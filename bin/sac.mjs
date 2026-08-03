@@ -49,6 +49,12 @@ try {
       for (const m of r.messages) console.log(fmt(m))
       break
     }
+    case "unread": {
+      const [room, n] = rest
+      if (!room) throw new Error("használat: sac unread <szoba> [n]   — az utolsó n üzenet újra olvasatlan")
+      json(store.unread({ room, agent: ME, count: Number(n) || 1 }))
+      break
+    }
     case "history": {
       const [room, n] = rest
       if (!room) throw new Error("használat: sac history <szoba> [n]")
@@ -78,6 +84,7 @@ agent: ${ME}   ·   tár: ${store.ROOT}
   sac send <szoba> <típus> "szöveg"   bejegyzés (${store.TYPES.join(" | ")})
   sac inbox <szoba>                   új üzenetek másoktól (olvasottnak jelöl)
   sac peek <szoba>                    ugyanaz, kurzor-mozgatás nélkül
+  sac unread <szoba> [n]              az utolsó n üzenet újra olvasatlan
   sac history <szoba> [n]             visszaolvasás
   sac watch-paths <szoba>             a figyelendő fájlok (hooknak)
   sac register <szoba>                bejelentkezés a nyilvántartóba`)

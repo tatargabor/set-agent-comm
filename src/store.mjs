@@ -193,6 +193,34 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
   return { room, agent, unread: fresh.length, truncated: fresh.length - shown.length, messages: shown }
 }
 
+/**
+ * A kurzor VISSZAÁLLÍTÁSA — az utolsó `count` üzenet újra olvasatlan lesz.
+ *
+ * Mért igény (2026-08-03, az élesítés napján): egy `inbox` hívás a bemutatóhoz elnyelte az
+ * egyetlen üzenetet a szobában, és nem volt mód visszahozni. Az `inbox` léptetése szándékos
+ * — de visszavonhatatlannak lenni nem az: az „elolvastam" és az „elveszett" különben
+ * megkülönböztethetetlen. (A bejegyzések maguk sosem vesznek el; csak a jelölés áll vissza.)
+ */
+export function unread({ room, agent, count = 1 }) {
+  const cursors = readJson(CURSORS, {})
+  const key = `${room}::${agent}`
+  const all = []
+  for (const path of busFiles(room)) {
+    const writer = path.split("/").pop().replace(/\.md$/, "")
+    if (writer !== agent) all.push(...parse(path, writer))
+  }
+  all.sort(byTime)
+  const back = new Set(all.slice(-count))
+  const seen = {}
+  for (const e of all) {
+    if (back.has(e)) continue
+    if (!seen[e.from] || t(e.ts) > t(seen[e.from])) seen[e.from] = e.ts
+  }
+  cursors[key] = seen
+  writeJson(CURSORS, cursors)
+  return { room, agent, restored: Math.min(count, all.length) }
+}
+
 /** Visszaolvasás — a kurzort NEM mozgatja. */
 export function history({ room, from, limit = 20 }) {
   const files = from ? [busFile(room, from)] : busFiles(room)
