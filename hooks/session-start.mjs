@@ -19,7 +19,7 @@
  * mint a működő figyelés.
  */
 import { basename } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, appendFileSync } from "node:fs"
 import * as store from "../src/store.mjs"
 
 const chunks = []
@@ -36,9 +36,27 @@ const out = { hookSpecificOutput: { hookEventName: "SessionStart" } }
 if (room) {
   store.register({ agent, project: cwd, session: payload.session_id, room })
 
+  // HIDEGINDÍTÁS (mérve az élesítéskor). Két hézag, mindkettő némán nyelte volna el
+  // az ELSŐ üzenetet — pont azt, amelyik a kapcsolatot nyitja:
+  //
+  //  1. üres szobában nincs egyetlen fájl sem → nincs mit a `watchPaths`-ba tenni;
+  //  2. egy ÚJ résztvevő fájljáról a többiek csak a KÖVETKEZŐ session-indulásnál
+  //     szereznének tudomást, mert a listát induláskor egyszer állítjuk össze.
+  //
+  // Ezért: (a) megjelenünk a szobában egy üres saját fájllal — ez a „itt vagyok, ide
+  // írok" bejelentés —, és (b) magát a KÖNYVTÁRAT is figyeljük, hogy az új fájl
+  // megjelenése is esemény legyen.
+  const dir = store.channelDir(room)
+  mkdirSync(dir, { recursive: true })
+  const mine = store.busFile(room, agent)
+  if (!existsSync(mine)) appendFileSync(mine, "")
+
   // Csak a MÁSOKÉT figyeljük — a saját írásunkra ébredni önébresztő hurok volna.
   const watch = store.busFiles(room).filter(p => basename(p) !== `${agent}.md` && existsSync(p))
-  if (watch.length) out.hookSpecificOutput.watchPaths = watch
+  // ⚠ A könyvtár-figyelés támogatottsága ELLENŐRIZETLEN. Ha a Claude Code csak fájlt
+  // fogad el, ez a bejegyzés legrosszabb esetben hatástalan — a fájlonkénti figyelés
+  // tőle függetlenül él, tehát nem ronthat el semmit.
+  out.hookSpecificOutput.watchPaths = [dir, ...watch]
 
   const { unread } = store.inbox({ room, agent, advance: false })
   if (unread) {
