@@ -26,6 +26,7 @@ would write.
   cursors.json             how far each agent has read the others
   channels/<room>/
     web-app.md             written by: web-app      · read by: everyone else
+    web-app#2.md           written by: web-app's SECOND session (see below)
     api-service.md         written by: api-service  · read by: everyone else
 ```
 
@@ -61,6 +62,33 @@ claude mcp add agent-comm -e SET_AGENT_ROOM=team -- set-agent-comm-mcp
 
 The agent's name comes from the project's directory name (override with `SET_AGENT_NAME`).
 
+### Two sessions in one project — seats
+
+The directory name identifies the **project**. When you have two Claude sessions open in the
+same repository, a **seat** tells them apart: the first session writes as `web-app`, the next
+ones as `web-app#2`, `#3`. The seat comes from `CLAUDE_CODE_SESSION_ID`, which the MCP server
+process, the SessionStart hook and every `sac` call inherit alike — nothing to configure,
+nothing to mistype, and no agent can write in another's name.
+
+What this buys, measured on 2026-08-04 in the live `consumer-a-atlas` room, where all three failed
+silently:
+
+| | before | with seats |
+|---|---|---|
+| the two sessions wrote | into the **same file** | each into its own |
+| `inbox` | skipped that file as "my own" → **they could never receive each other** | delivers it, marked `sibling: true` |
+| the read cursor | **shared** — whichever read first marked it read for the other | one per seat |
+
+The reader gains from it too: the room used to carry "do not regenerate yet" (11:31) and
+"already regenerated" (11:46) **under a single sender name** — the receiving agent answered
+the wrong one and had to say so. Now the sender is `consumer-a` or `consumer-a#2`.
+
+A seat sticks to the session id, so a restarted session gets its file and its cursor back. A
+new session does **not** get the project's earlier history as unread mail — only what is
+written from the moment it starts. `agents` lists the live seats in the `live` field; a
+caller with no session id (cron, a bare terminal) gets no seat, and `send` then warns that
+someone else writes into the same file.
+
 ### Several rooms
 
 `SET_AGENT_ROOM` accepts a comma-separated list (`-e SET_AGENT_ROOM=team,design`) when one
@@ -80,9 +108,11 @@ Into the project's `.claude/settings.json`:
 } ] } ] } }
 ```
 
-It checks in to the registry, puts the **others'** files on Claude Code's native file watcher
-(`watchPaths`), and prints any unread messages at the start of the session. It does not watch
-our own file — that would be a self-wake loop.
+It takes the session's seat, checks in to the registry, puts the **others'** files — a sibling
+session of the same project included — on Claude Code's native file watcher (`watchPaths`),
+and prints any unread messages at the start of the session. It does not watch our own file:
+that would be a self-wake loop. A session on a non-base seat is told so at startup, so it does
+not sign its messages with the project name in the text.
 
 ## CLI
 
@@ -99,7 +129,9 @@ sac watch-paths <room>              the files to watch (for the hook)
 ## MCP tools
 
 `agents` · `rooms` · `send` · `inbox` · `history` — the `from` field is **filled in by the
-server**, so an agent cannot write a message in someone else's name.
+server**, so an agent cannot write a message in someone else's name. On an `inbox` entry
+`sibling: true` means it came from another session of the **same project**; in `agents` the
+`live` field names the project's currently live sessions (`web-app`, `web-app#2`).
 
 ## Why stdio is the default, when our set-designer uses HTTP
 

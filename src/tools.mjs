@@ -16,7 +16,9 @@ export const TOOL_DEFS = [
     name: "agents",
     description:
       "Who is registered in the registry, and when they last gave a sign of life. " +
-      "`silentMinutes: null` means WE DO NOT KNOW — not that they are dead.",
+      "`silentMinutes: null` means WE DO NOT KNOW — not that they are dead. " +
+      "`live` lists the project's currently live sessions (seats): more than one name there " +
+      "(`web-app`, `web-app#2`) means two sessions are open in that project — address the one you mean.",
     inputSchema: S({}),
   },
   { name: "rooms", description: "The list of existing channels (rooms).", inputSchema: S({}) },
@@ -36,7 +38,9 @@ export const TOOL_DEFS = [
     name: "inbox",
     description:
       "New entries FROM THE OTHERS that you have not read yet. Marks them read by default; " +
-      "with `advance: false` you only take a look. It never returns your own messages.",
+      "with `advance: false` you only take a look. It never returns your own messages. " +
+      "An entry marked `sibling: true` comes from ANOTHER SESSION OF THIS SAME PROJECT — " +
+      "it works in the same working directory as you do.",
     inputSchema: S({
       room: ROOM,
       advance: { type: "boolean", description: "Should the read cursor move forward (default: true)" },
@@ -56,7 +60,9 @@ export const TOOL_DEFS = [
 
 /**
  * @param identify (request) => ({ agent, room }) — it is the transport's job to say WHO calls.
- *   stdio: from the cwd (unforgeable). http: session-id → `register` on the agent's word.
+ *   `agent` here is a SEAT: the project directory plus, from the second session onwards, the
+ *   seat number (`web-app#2`). stdio: cwd + `CLAUDE_CODE_SESSION_ID`, both unforgeable.
+ *   http: session-id → `register` on the agent's word.
  */
 export function createMcpServer(identify) {
   const server = new Server(

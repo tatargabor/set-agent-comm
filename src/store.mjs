@@ -100,27 +100,112 @@ const alive = pid => {
   try { process.kill(pid, 0); return true } catch (e) { return e.code === "EPERM" }
 }
 
+// ── seats: one session, one writer file ───────────────────────────────────────
+/**
+ * A SEAT is the writer identity: the name of the file this session appends to. The agent name
+ * (the project directory) identifies the PROJECT; the seat identifies the SESSION inside it.
+ * The first session in a project sits in the base seat (`consumer-a`), the next ones get
+ * `consumer-a#2`, `#3` …
+ *
+ * ⚠ Measured 2026-08-04 in the `consumer-a-atlas` room, and this is what the seat exists for: two
+ * Claude sessions open in ONE project were ONE name on the bus, because identity is the
+ * directory. Three consequences, all silent: they wrote into the SAME file, `inbox` skipped
+ * that file as "my own" so they could never receive each other, and they SHARED one read
+ * cursor — whichever read first marked the message read for the other. The room carried
+ * "do not regenerate yet" (11:31) and "already regenerated" (11:46) under a single sender
+ * name; the receiving agent answered the wrong one and had to say so.
+ *
+ * The seat comes from `CLAUDE_CODE_SESSION_ID` (measured: the MCP server process, the hook
+ * and any `sac` call inherit the same value), so it stays unforgeable — nothing to type,
+ * nothing to make up. Without a session id there is no seat: the caller is the base name, as
+ * before, and the co-writer warning of `send` still covers that case.
+ */
+export const seatBase = writer => String(writer).replace(/#\d+$/, "")
+const seatName = (agent, i) => (i === 0 ? agent : `${agent}#${i + 1}`)
+
+/**
+ * How long a seat is held after its last sign of life, once no process of it is alive.
+ *
+ * A live pid alone is not enough: a session may run with the hook and the CLI only (no MCP
+ * process), and both of those exit within a second. Handing their seat to a newcomer while
+ * they still work would put two sessions back into one file — the very thing measured above.
+ */
+const SEAT_TTL_MS = 30 * 60_000
+
+const seatLive = seat => !!seat && (
+  Object.keys(seat.writers || {}).some(p => alive(Number(p))) ||
+  Date.now() - (Date.parse(seat.lastSeen) || 0) < SEAT_TTL_MS)
+
+/** Record this process on the seat, and forget the processes that have exited. */
+function touchSeat(seats, name, { session = null, pid }) {
+  const held = seats[name]
+  // A seat held by ANOTHER session is not ours to inherit — start a fresh record. Without a
+  // session id we do not overwrite the holder: the CLI must not evict a live session.
+  const prev = held && (!session || !held.session || held.session === session) ? held : {}
+  const writers = { ...(prev.writers || {}), [pid]: now() }
+  for (const p of Object.keys(writers)) if (Number(p) !== pid && !alive(Number(p))) delete writers[p]
+  seats[name] = {
+    session: session ?? prev.session ?? null,
+    writers,
+    firstSeen: prev.firstSeen || now(),
+    lastSeen: now(),
+  }
+  return seats[name]
+}
+
+/**
+ * Which seat is this session's? Idempotent: the SAME session id always gets its seat back —
+ * that is what keeps a session's file and read cursor continuous across restarts.
+ *
+ * The registry is written with tmp→rename, so a concurrent claim cannot corrupt it, but the
+ * read-modify-write is not atomic: two sessions starting at the same moment can pick the same
+ * seat, and the later write wins. Hence the READ-BACK: the loser sees that the seat is not
+ * its own and looks for the next one. If even that keeps failing, we fall back to a name that
+ * cannot collide — an ugly name is better than two writers in one file.
+ */
+export function claimSeat({ agent, session, pid = process.pid }) {
+  if (!agent) throw new Error("claimSeat: `agent` is required")
+  if (!session) return agent
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const reg = readJson(REGISTRY, { agents: {} })
+    const rec = (reg.agents[agent] ||= { agent })
+    const seats = (rec.seats ||= {})
+    let name = Object.keys(seats).find(n => seats[n].session === session)
+    for (let i = 0; !name; i++) if (!seatLive(seats[seatName(agent, i)])) name = seatName(agent, i)
+    touchSeat(seats, name, { session, pid })
+    writeJson(REGISTRY, reg)
+    if (readJson(REGISTRY, { agents: {} }).agents?.[agent]?.seats?.[name]?.session === session) return name
+  }
+  return `${agent}#${session.slice(0, 8)}`
+}
+
+/**
+ * Which seat is this session's — WITHOUT claiming one. For read-only callers.
+ *
+ * ⚠ Measured while it was being built: `sac agents`, a pure query, claimed itself a seat,
+ * because the CLI inherits `CLAUDE_CODE_SESSION_ID` from whatever started it — a listing
+ * therefore invented a third session in a project that had two. Reading may not change the
+ * state it reports on.
+ */
+export function seatOf({ agent, session }) {
+  if (!session) return agent
+  const seats = readJson(REGISTRY, { agents: {} }).agents?.[agent]?.seats || {}
+  return Object.keys(seats).find(n => seats[n].session === session) || agent
+}
+
 /**
  * An agent checking in. Idempotent: the same name is updated, not duplicated.
  *
- * ⚠ Measured 2026-08-04 in the `consumer-a-atlas` room: two Claude sessions open in ONE project are
- * ONE name on the bus, because identity is the directory. That is the right identity — it is
- * unforgeable — but it was INVISIBLE, and it cost a real conversation. Under a single sender
- * name the room carried "do not regenerate yet" (11:31) and "already regenerated" (11:46)
- * from different processes; the receiving agent answered the wrong one and had to say so.
- *
- * Two writers is not an error and is not blocked here. It is a fact the bus used to hide, and
- * hiding it is what caused the harm — the same rule the rest of this file follows: announce,
- * never swallow.
+ * With a `session` the check-in claims a seat (see `claimSeat`); `writer` skips the claim for
+ * a seat that is already known — `send` uses that, so writing a message never reshuffles seats.
  */
-export function register({ agent, project, session, room, pid = process.pid }) {
+export function register({ agent, project, session, room, pid = process.pid, writer }) {
   if (!agent) throw new Error("register: `agent` is required")
+  const seat = writer || (session ? claimSeat({ agent, session, pid }) : agent)
   const reg = readJson(REGISTRY, { agents: {} })
   const prev = reg.agents[agent] || {}
-  const writers = { ...(prev.writers || {}), [pid]: now() }
-  // A session that has exited must drop off the record. A warning that is always on is a
-  // warning nobody reads, and every project would accumulate its own dead history.
-  for (const p of Object.keys(writers)) if (Number(p) !== pid && !alive(Number(p))) delete writers[p]
+  const seats = { ...(prev.seats || {}) }
+  const mine = touchSeat(seats, seat, { session, pid })
 
   reg.agents[agent] = {
     ...prev,
@@ -129,12 +214,19 @@ export function register({ agent, project, session, room, pid = process.pid }) {
     session: session ?? prev.session ?? null,
     host: hostname(),
     rooms: [...new Set([...(prev.rooms || []), ...(room ? [room] : [])])],
-    writers,
+    seats,
     firstSeen: prev.firstSeen || now(),
     lastSeen: now(),
   }
   writeJson(REGISTRY, reg)
-  return { ...reg.agents[agent], coWriters: Object.keys(writers).map(Number).filter(p => p !== pid) }
+  seedCursor(room, seat)
+  // Co-writers are counted PER SEAT — that is, per file. Another session of the same project
+  // sits in its own seat and does not collide, so it must not raise a warning.
+  return {
+    ...reg.agents[agent],
+    writer: seat,
+    coWriters: Object.keys(mine.writers).map(Number).filter(p => p !== pid),
+  }
 }
 
 /** Sign of life — refreshes `lastSeen` without recording a new session. */
@@ -157,7 +249,17 @@ export function agents() {
   const reg = readJson(REGISTRY, { agents: {} })
   return Object.values(reg.agents).map(a => {
     const ms = a.lastSeen ? Date.now() - new Date(a.lastSeen).getTime() : null
-    return { ...a, silentMinutes: ms == null ? null : Math.round(ms / 60000) }
+    // The seats are shown as a LIST, and the live ones separately: this is what tells another
+    // agent that this project currently has two sessions, and which names to address.
+    const seats = Object.entries(a.seats || {}).map(([writer, s]) => ({
+      writer, live: seatLive(s), lastSeen: s.lastSeen ?? null,
+    }))
+    return {
+      ...a,
+      seats,
+      live: seats.filter(s => s.live).map(s => s.writer),
+      silentMinutes: ms == null ? null : Math.round(ms / 60000),
+    }
   }).sort((x, y) => (x.silentMinutes ?? 1e9) - (y.silentMinutes ?? 1e9))
 }
 
@@ -165,6 +267,7 @@ export function agents() {
 
 export const channelDir = room => join(CHANNELS, room)
 export const busFile = (room, agent) => join(channelDir(room), `${agent}.md`)
+const writerOf = path => path.split("/").pop().replace(/\.md$/, "")
 
 /** Every writer file in the room — this is what the hook registers as `watchPaths`. */
 export function busFiles(room) {
@@ -192,12 +295,16 @@ export function send({ room, from, type = "FACT", text, re }) {
   const head = `## ${ts} — ${type}${re ? ` (re: ${re})` : ""}`
   const body = text.trim()
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
-  const { coWriters } = register({ agent: from, room })
+  // `from` is a SEAT, so the registry entry belongs to the project behind it. `writer` keeps
+  // the seat as it is: sending a message may not reshuffle who sits where.
+  const { coWriters } = register({ agent: seatBase(from), writer: from, room })
   // Told to the WRITER, at the moment of writing: by the time the reader notices that one
-  // sender is contradicting itself, the wrong instruction has already been acted on.
+  // sender is contradicting itself, the wrong instruction has already been acted on. With a
+  // session id every session has its own seat, so this can now only fire for a caller that
+  // has none (cron, a bare terminal, a non-Claude-Code client).
   const warning = coWriters.length
-    ? `⚠ ${coWriters.length} other live process(es) also write as \`${from}\` (pid ${coWriters.join(", ")}) — ` +
-      `identity is the project directory, so a second session in this project shares your name. ` +
+    ? `⚠ ${coWriters.length} other live process(es) write into the SAME file as \`${from}\` ` +
+      `(pid ${coWriters.join(", ")}) — they have no session id, so they got no seat of their own. ` +
       `The reader cannot tell your entries from theirs: say which thread you are, and do not ` +
       `assume an earlier entry under this name was yours.`
     : undefined
@@ -223,20 +330,58 @@ function parse(path, agent) {
 }
 
 /**
+ * The read cursor of a NEWLY BORN seat. Called by `register`, once, when the second session
+ * of a project takes its seat — at that point we know the room, which `claimSeat` does not.
+ *
+ * Two decisions in it:
+ *  - it inherits the base seat's cursor: what the project has already read from the OTHERS is
+ *    not unread for a session that just joined;
+ *  - a sibling's earlier entries are marked read: they are the project's shared history (400
+ *    entries in the live `consumer-a-atlas` room), not mail addressed to a session that did not yet
+ *    exist. `history` still has all of them.
+ * Everything a sibling writes FROM NOW ON is delivered — that is the point of the whole change.
+ */
+function seedCursor(room, writer) {
+  const base = seatBase(writer)
+  if (!room || writer === base) return               // the base seat starts from zero, as before
+  const cursors = readJson(CURSORS, {})
+  const key = `${room}::${writer}`
+  if (cursors[key]) return                           // an existing seat keeps its own cursor
+  const seen = { ...(cursors[`${room}::${base}`] || {}) }
+  for (const path of busFiles(room)) {
+    const w = writerOf(path)
+    if (w === writer || seatBase(w) !== base) continue
+    const last = parse(path, w).at(-1)
+    if (last) seen[w] = last.ts
+  }
+  cursors[key] = seen
+  writeJson(CURSORS, cursors)
+}
+
+/**
  * New entries FROM OTHERS. Skips your own file — we do not read ourselves back.
  * With `advance: true` the cursor moves forward (marks them read).
+ *
+ * `agent` here is a SEAT: another session of the same project is "someone else", so its
+ * messages are delivered, and every seat has its own cursor. Before seats, both were false:
+ * the sibling's file counted as "my own file" and the shared cursor meant whichever session
+ * read first marked the message read for the other one too.
  */
 export function inbox({ room, agent, advance = true, limit = 20 }) {
   const cursors = readJson(CURSORS, {})
   const key = `${room}::${agent}`
-  const seen = cursors[key] || {}
+  const base = seatBase(agent)
+  // A seat with no cursor of its own (nobody registered it) falls back to the base seat's —
+  // erring towards "unread" rather than swallowing the first message.
+  const seen = cursors[key] || (agent === base ? {} : { ...(cursors[`${room}::${base}`] || {}) })
   const fresh = []
   for (const path of busFiles(room)) {
-    const writer = path.split("/").pop().replace(/\.md$/, "")
+    const writer = writerOf(path)
     if (writer === agent) continue
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
-      if (!seen[writer] || t(e.ts) > t(seen[writer])) fresh.push(e)
+      if (!seen[writer] || t(e.ts) > t(seen[writer]))
+        fresh.push(seatBase(writer) === base ? { ...e, sibling: true } : e)
     }
   }
   fresh.sort(byTime)
@@ -263,7 +408,7 @@ export function unread({ room, agent, count = 1 }) {
   const key = `${room}::${agent}`
   const all = []
   for (const path of busFiles(room)) {
-    const writer = path.split("/").pop().replace(/\.md$/, "")
+    const writer = writerOf(path)
     if (writer !== agent) all.push(...parse(path, writer))
   }
   all.sort(byTime)
@@ -278,10 +423,18 @@ export function unread({ room, agent, count = 1 }) {
   return { room, agent, restored: Math.min(count, all.length) }
 }
 
-/** Reading back — does NOT move the cursor. */
+/**
+ * Reading back — does NOT move the cursor.
+ *
+ * `from` may name a project (`consumer-a`) or one seat of it (`consumer-a#2`). The project name
+ * returns ALL its sessions: "what did consumer-a say" is a question about the project, and
+ * answering it with one session's half of the thread would be a silent half-truth.
+ */
 export function history({ room, from, limit = 20 }) {
-  const files = from ? [busFile(room, from)] : busFiles(room)
-  const all = files.flatMap(p => parse(p, p.split("/").pop().replace(/\.md$/, "")))
+  const files = from
+    ? busFiles(room).filter(p => writerOf(p) === from || seatBase(writerOf(p)) === from)
+    : busFiles(room)
+  const all = files.flatMap(p => parse(p, writerOf(p)))
   all.sort(byTime)
   return { room, total: all.length, messages: all.slice(-limit) }
 }

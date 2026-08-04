@@ -30,6 +30,12 @@ try { payload = JSON.parse(Buffer.concat(chunks).toString() || "{}") } catch { /
 
 const cwd = payload.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()
 const agent = process.env.SET_AGENT_NAME || basename(cwd)
+// The seat (which file THIS session writes) must be the same one the MCP server takes. The
+// env var comes FIRST for exactly that reason: the MCP process only ever sees that one, while
+// the hook also gets a `session_id` on stdin. Reading them in a different order would hand
+// the two of them two different seats — and the session would then read its own file back.
+const session = process.env.CLAUDE_CODE_SESSION_ID || payload.session_id || null
+const writer = store.claimSeat({ agent, session })
 // `SET_AGENT_ROOM` may name several rooms, comma-separated — ALL of them are set up here.
 // Registering only the first one would leave the second room's messages unwatched, which
 // from the outside is indistinguishable from "nobody wrote anything".
@@ -40,7 +46,7 @@ const watchPaths = []
 const notices = []
 
 for (const room of rooms) {
-  store.register({ agent, project: cwd, session: payload.session_id, room })
+  store.register({ agent, project: cwd, session, room, writer })
 
   // COLD START (measured on the day it went live). Two gaps, both of which would have
   // silently swallowed the FIRST message — precisely the one that opens the conversation:
@@ -54,25 +60,39 @@ for (const room of rooms) {
   // that a new file appearing is an event too.
   const dir = store.channelDir(room)
   mkdirSync(dir, { recursive: true })
-  const mine = store.busFile(room, agent)
+  const mine = store.busFile(room, writer)
   if (!existsSync(mine)) appendFileSync(mine, "")
 
   // We only watch what belongs to OTHERS — waking on our own writes would be a self-wake loop.
-  const watch = store.busFiles(room).filter(p => basename(p) !== `${agent}.md` && existsSync(p))
+  // "Others" now includes a SIBLING SESSION of this same project: its file is not ours.
+  const watch = store.busFiles(room).filter(p => basename(p) !== `${writer}.md` && existsSync(p))
   // ⚠ Whether directory watching is supported is UNVERIFIED. If Claude Code only accepts
   // files, this entry is at worst ineffective — the per-file watching lives independently
   // of it, so it cannot break anything.
   watchPaths.push(dir, ...watch)
 
-  const { unread } = store.inbox({ room, agent, advance: false })
+  const { unread } = store.inbox({ room, agent: writer, advance: false })
   if (unread) notices.push(`${unread} in "${room}" (\`sac inbox ${room}\`)`)
 }
 
 if (watchPaths.length) out.hookSpecificOutput.watchPaths = watchPaths
-if (notices.length) {
+
+// Being on a non-base seat is ANNOUNCED, even with nothing unread: the session has to know
+// that it is not the only one in this project and that it writes under a different name than
+// the one the project is known by — otherwise it would sign its messages `consumer-a` in the text.
+const siblings = writer !== agent
+  ? ` You are the project's ${writer.split("#")[1]}. session, so on the bus your name is ` +
+    `\`${writer}\` (not \`${agent}\`) — another session of this project writes as well, and ` +
+    `you two now receive each other.`
+  : ""
+if (notices.length || siblings) {
   out.hookSpecificOutput.additionalContext =
-    `[set-agent-comm] Unread messages: ${notices.join(", ")}. ` +
-    `Read them with the \`inbox\` tool before touching the shared work.` +
+    `[set-agent-comm]` +
+    (notices.length
+      ? ` Unread messages: ${notices.join(", ")}. Read them with the \`inbox\` tool before ` +
+        `touching the shared work.`
+      : "") +
+    siblings +
     (rooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "")
 }
 

@@ -14,8 +14,21 @@
 import { basename } from "node:path"
 import * as store from "../src/store.mjs"
 
-const ME = process.env.SET_AGENT_NAME || basename(process.cwd())
+const AGENT = process.env.SET_AGENT_NAME || basename(process.cwd())
+const SESSION = process.env.CLAUDE_CODE_SESSION_ID || null
 const [cmd, ...rest] = process.argv.slice(2)
+
+// The same seat the MCP server and the hook use: `CLAUDE_CODE_SESSION_ID` is inherited by
+// everything Claude Code starts, so a `sac` call from a session writes into that session's
+// file. From a bare terminal (no session id) there is no seat — that is the base name, as
+// before, and `send` then warns about the shared file.
+//
+// A seat is CLAIMED only by a command that writes or that keeps a read cursor. Measured: with
+// an unconditional claim `sac agents` — a pure listing — invented a third session in a project
+// that had two.
+const CLAIMS = new Set(["send", "inbox", "peek", "unread", "register"])
+const seat = { agent: AGENT, session: SESSION }
+const ME = CLAIMS.has(cmd) ? store.claimSeat(seat) : store.seatOf(seat)
 const json = v => console.log(JSON.stringify(v, null, 2))
 
 const fmt = m => `## ${m.ts} — ${m.type}${m.re ? ` (re: ${m.re})` : ""}  [${m.from}]\n${m.text}\n`
@@ -27,7 +40,10 @@ try {
       if (!list.length) { console.log("(the registry is empty)"); break }
       for (const a of list) {
         const s = a.silentMinutes == null ? "?" : `${a.silentMinutes}m`
-        console.log(`${a.agent.padEnd(18)} ${String(s).padStart(5)} silent   ${a.project || "-"}`)
+        // The live seats are shown: this is what says the project has TWO sessions right now,
+        // and it names the one you can address.
+        const live = a.live?.length > 1 ? `   [${a.live.join(", ")}]` : ""
+        console.log(`${a.agent.padEnd(18)} ${String(s).padStart(5)} silent   ${a.project || "-"}${live}`)
       }
       break
     }
@@ -72,12 +88,12 @@ try {
     }
     case "register": {
       const [room] = rest
-      json(store.register({ agent: ME, project: process.cwd(), room }))
+      json(store.register({ agent: AGENT, project: process.cwd(), room, writer: ME, session: SESSION }))
       break
     }
     default:
       console.log(`set-agent-comm — messaging between agents on one machine.
-agent: ${ME}   ·   store: ${store.ROOT}
+agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this project's ${ME.split("#")[1]}. session)` : ""}   ·   store: ${store.ROOT}
 
   sac agents                          who exists, who is alive
   sac rooms                           rooms

@@ -127,6 +127,89 @@ test("REGRESSION: a second live process writing under one name is ANNOUNCED", ()
   assert.match(out.warning, /twin/)
 })
 
+test("TWO SESSIONS IN ONE PROJECT: separate seats, and they DO receive each other", () => {
+  // This is the whole point. Before seats: one name → one file → `inbox` skipped it as "my
+  // own", so the two sessions could not hear each other at all, and they shared one cursor.
+  const A = store.claimSeat({ agent: "twinproj", session: "sess-A" })
+  const B = store.claimSeat({ agent: "twinproj", session: "sess-B" })
+  assert.equal(A, "twinproj", "the first session keeps the plain project name")
+  assert.equal(B, "twinproj#2", "the second session did not get a seat of its own")
+
+  store.register({ agent: "twinproj", session: "sess-A", room: "twin", writer: A })
+  store.register({ agent: "twinproj", session: "sess-B", room: "twin", writer: B })
+  store.send({ room: "twin", from: A, type: "QUESTION", text: "am I regenerating it?" })
+
+  const got = store.inbox({ room: "twin", agent: B })
+  assert.equal(got.unread, 1, "the sibling session did not receive the message")
+  assert.equal(got.messages[0].from, "twinproj")
+  assert.equal(got.messages[0].sibling, true, "it was not marked as coming from the same project")
+  assert.equal(store.inbox({ room: "twin", agent: A }).unread, 0, "the sender got its own message back")
+})
+
+test("the seat sticks to the SESSION ID — a restart gets the same file and cursor back", () => {
+  assert.equal(store.claimSeat({ agent: "twinproj", session: "sess-B" }), "twinproj#2")
+  assert.equal(store.claimSeat({ agent: "twinproj", session: "sess-A" }), "twinproj")
+})
+
+test("a live session's seat is NOT taken away, a dead one's is reused after the TTL", () => {
+  // Reuse matters: without it every session that ever ran would leave its own file behind in
+  // the room. Not taking a live one matters more — that would put two sessions in one file.
+  const REG = join(ROOT, "registry.json")
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid
+  const patch = lastSeen => {
+    const reg = JSON.parse(readFileSync(REG, "utf8"))
+    reg.agents.twinproj.seats["twinproj#2"] = { session: "sess-B", writers: { [dead]: lastSeen }, lastSeen }
+    writeFileSync(REG, JSON.stringify(reg, null, 2))
+  }
+
+  patch(store.now())                       // process gone, but the seat is fresh
+  assert.equal(store.claimSeat({ agent: "twinproj", session: "sess-C" }), "twinproj#3",
+    "a seat that has only just gone quiet was taken from under a possibly live session")
+
+  patch(store.now(new Date(Date.now() - 3600_000)))   // gone AND quiet for an hour
+  assert.equal(store.claimSeat({ agent: "twinproj", session: "sess-D" }), "twinproj#2",
+    "the seat of a long-dead session is not reused — the room fills up with orphan files")
+})
+
+test("REGRESSION: a read-only lookup does NOT claim a seat", () => {
+  // Measured while building this: the CLI inherits `CLAUDE_CODE_SESSION_ID`, so `sac agents`
+  // — a pure listing — claimed itself a seat and reported a third session in a project that
+  // had two. Reading may not change the state it reports on.
+  const before = Object.keys(store.agents().find(a => a.agent === "twinproj").seats).length
+  assert.equal(store.seatOf({ agent: "twinproj", session: "sess-A" }), "twinproj")
+  assert.equal(store.seatOf({ agent: "twinproj", session: "never-seen" }), "twinproj",
+    "an unknown session must fall back to the base name, not get a seat")
+  assert.equal(Object.keys(store.agents().find(a => a.agent === "twinproj").seats).length, before,
+    "a lookup created a seat")
+})
+
+test("a NEWLY BORN seat does not get the project's whole history as unread", () => {
+  // Measured need: the live `consumer-a-atlas` room holds 400 entries. A second session starting up
+  // must not be handed all of them as "unread mail" — that is history, and `history` has it.
+  store.send({ room: "seed", from: "outsider", type: "FACT", text: "old news" })
+  store.register({ agent: "seedproj", session: "s1", room: "seed" })   // base seat
+  assert.equal(store.inbox({ room: "seed", agent: "seedproj" }).unread, 1)   // the base read it
+  store.send({ room: "seed", from: "seedproj", type: "FACT", text: "the first session's old entry" })
+
+  const second = store.claimSeat({ agent: "seedproj", session: "s2" })
+  store.register({ agent: "seedproj", session: "s2", room: "seed", writer: second })
+  assert.equal(store.inbox({ room: "seed", agent: second, advance: false }).unread, 0,
+    "the new session was handed the earlier history as unread")
+
+  store.send({ room: "seed", from: "seedproj", type: "QUESTION", text: "are you there?" })
+  store.send({ room: "seed", from: "outsider", type: "FACT", text: "fresh news" })
+  const inb = store.inbox({ room: "seed", agent: second })
+  // Sorted: at machine speed both land in the same millisecond, and on a tie the order falls
+  // back to the file names. What is being measured here is DELIVERY, not the order.
+  assert.deepEqual(inb.messages.map(m => m.text).sort(), ["are you there?", "fresh news"],
+    "what was written AFTER the new session started must be delivered")
+})
+
+test("history by project name returns ALL of its sessions, not just one seat", () => {
+  const h = store.history({ room: "seed", from: "seedproj" })
+  assert.deepEqual(h.messages.map(m => m.text), ["the first session's old entry", "are you there?"])
+})
+
 test("a writer whose process is gone is forgotten — no false co-writer warning", () => {
   // Without this, every session that ever ran in the project stays on the record and the
   // warning fires forever. A warning that is always on is a warning nobody reads.
