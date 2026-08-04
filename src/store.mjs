@@ -6,7 +6,7 @@
 // That way there is no lost update and no lockfile is needed — after a session dies the
 // lock would stay stuck, and from then on nobody would write.
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync,
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, unlinkSync,
          existsSync, renameSync, openSync, fsyncSync, closeSync, statSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { homedir, hostname } from "node:os"
@@ -17,6 +17,7 @@ export const ROOT = process.env.SET_AGENT_COMM_DIR
 const REGISTRY = join(ROOT, "registry.json")
 const CHANNELS = join(ROOT, "channels")
 const CURSORS = join(ROOT, "cursors.json")
+const NUDGES = join(ROOT, "nudges.json")
 
 export const TYPES = ["QUESTION", "ANSWER", "FACT", "REQUEST"]
 
@@ -104,8 +105,7 @@ const alive = pid => {
 /**
  * A SEAT is the writer identity: the name of the file this session appends to. The agent name
  * (the project directory) identifies the PROJECT; the seat identifies the SESSION inside it.
- * The first session in a project sits in the base seat (`consumer-a`), the next ones get
- * `consumer-a#2`, `#3` …
+ * Every session writes into its own file, named after its session id: `consumer-a#968f89d7`.
  *
  * ⚠ Measured 2026-08-04 in the `consumer-a-atlas` room, and this is what the seat exists for: two
  * Claude sessions open in ONE project were ONE name on the bus, because identity is the
@@ -117,24 +117,46 @@ const alive = pid => {
  *
  * The seat comes from `CLAUDE_CODE_SESSION_ID` (measured: the MCP server process, the hook
  * and any `sac` call inherit the same value), so it stays unforgeable — nothing to type,
- * nothing to make up. Without a session id there is no seat: the caller is the base name, as
- * before, and the co-writer warning of `send` still covers that case.
+ * nothing to make up. Without a session id there is no seat: the caller writes under the bare
+ * project name (cron, a bare terminal), and the co-writer warning of `send` covers that case.
  */
-export const seatBase = writer => String(writer).replace(/#\d+$/, "")
-const seatName = (agent, i) => (i === 0 ? agent : `${agent}#${i + 1}`)
+export const seatBase = writer => String(writer).replace(/#[^#]+$/, "")
 
 /**
- * How long a seat is held after its last sign of life, once no process of it is alive.
+ * The seat name carries the SESSION ID (`consumer-a#968f89d7`), by the author's decision on
+ * 2026-08-04, made with the trade-off in front of him: this way a name says exactly which
+ * session it is — it can be matched against what Claude Code's `/status` shows — while a
+ * counter (`#2`) says only "the second one, some time". The price he accepted: a name is
+ * good for one session, so every restart starts a new file, and the room accumulates the
+ * files of past sessions.
  *
- * A live pid alone is not enough: a session may run with the hook and the CLI only (no MCP
- * process), and both of those exit within a second. Handing their seat to a newcomer while
- * they still work would put two sessions back into one file — the very thing measured above.
+ * Eight characters of a UUID is plenty to tell sessions apart, but the id does not HAVE to be
+ * a UUID (a test, another client), so a shortened form that is already held by a DIFFERENT
+ * session gets longer rather than colliding. Two sessions in one file is the failure this
+ * whole mechanism exists to prevent — it may not come back through the name.
+ */
+const SEAT_LENGTHS = [8, 12, 16]
+const seatName = (agent, session, len) => `${agent}#${session.slice(0, len)}`
+
+/**
+ * Is anyone alive on this seat? THREE answers, not two — the same rule `agents` follows for
+ * `silentMinutes`: "we don't know" and "dead" are different claims.
+ *
+ *   true   a process of it is alive (an MCP server lives as long as its session)
+ *   null   no live process, but it checked in recently — a session running with only the hook
+ *          and the CLI has no lasting process, so this cannot be called dead
+ *   false  no live process and quiet for half an hour
+ *
+ * Since the name follows from the session id, nothing is ever taken over on the strength of
+ * this — it only decides what we REPORT, and what `pruneEmptySeats` may delete (`false` only).
  */
 const SEAT_TTL_MS = 30 * 60_000
 
-const seatLive = seat => !!seat && (
-  Object.keys(seat.writers || {}).some(p => alive(Number(p))) ||
-  Date.now() - (Date.parse(seat.lastSeen) || 0) < SEAT_TTL_MS)
+const seatState = seat => {
+  if (!seat) return false
+  if (Object.keys(seat.writers || {}).some(p => alive(Number(p)))) return true
+  return Date.now() - (Date.parse(seat.lastSeen) || 0) < SEAT_TTL_MS ? null : false
+}
 
 /** Record this process on the seat, and forget the processes that have exited. */
 function touchSeat(seats, name, { session = null, pid }) {
@@ -154,29 +176,29 @@ function touchSeat(seats, name, { session = null, pid }) {
 }
 
 /**
- * Which seat is this session's? Idempotent: the SAME session id always gets its seat back —
- * that is what keeps a session's file and read cursor continuous across restarts.
- *
- * The registry is written with tmp→rename, so a concurrent claim cannot corrupt it, but the
- * read-modify-write is not atomic: two sessions starting at the same moment can pick the same
- * seat, and the later write wins. Hence the READ-BACK: the loser sees that the seat is not
- * its own and looks for the next one. If even that keeps failing, we fall back to a name that
- * cannot collide — an ugly name is better than two writers in one file.
+ * Which seat is this session's? The name FOLLOWS FROM the session id, so it needs no
+ * negotiation: two sessions starting at the same moment cannot pick the same one, and a
+ * restarted session with the same id gets its file and its cursor back.
  */
 export function claimSeat({ agent, session, pid = process.pid }) {
   if (!agent) throw new Error("claimSeat: `agent` is required")
   if (!session) return agent
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const reg = readJson(REGISTRY, { agents: {} })
-    const rec = (reg.agents[agent] ||= { agent })
-    const seats = (rec.seats ||= {})
-    let name = Object.keys(seats).find(n => seats[n].session === session)
-    for (let i = 0; !name; i++) if (!seatLive(seats[seatName(agent, i)])) name = seatName(agent, i)
-    touchSeat(seats, name, { session, pid })
-    writeJson(REGISTRY, reg)
-    if (readJson(REGISTRY, { agents: {} }).agents?.[agent]?.seats?.[name]?.session === session) return name
+  const reg = readJson(REGISTRY, { agents: {} })
+  const rec = (reg.agents[agent] ||= { agent })
+  const seats = (rec.seats ||= {})
+  const name = seatFor(seats, agent, session)
+  touchSeat(seats, name, { session, pid })
+  writeJson(REGISTRY, reg)
+  return name
+}
+
+/** The shortest form of the id that is not already held by a DIFFERENT session. */
+function seatFor(seats, agent, session) {
+  for (const len of SEAT_LENGTHS) {
+    const name = seatName(agent, session, len)
+    if (!seats[name] || seats[name].session === session) return name
   }
-  return `${agent}#${session.slice(0, 8)}`
+  return seatName(agent, session, session.length)
 }
 
 /**
@@ -190,7 +212,7 @@ export function claimSeat({ agent, session, pid = process.pid }) {
 export function seatOf({ agent, session }) {
   if (!session) return agent
   const seats = readJson(REGISTRY, { agents: {} }).agents?.[agent]?.seats || {}
-  return Object.keys(seats).find(n => seats[n].session === session) || agent
+  return Object.keys(seats).find(n => seats[n].session === session) || seatFor(seats, agent, session)
 }
 
 /**
@@ -251,13 +273,18 @@ export function agents() {
     const ms = a.lastSeen ? Date.now() - new Date(a.lastSeen).getTime() : null
     // The seats are shown as a LIST, and the live ones separately: this is what tells another
     // agent that this project currently has two sessions, and which names to address.
+    // The FULL session id is reported, not the shortened form in the name: that is what can be
+    // matched against what Claude Code shows for a session, which is the point of the whole
+    // naming scheme — to be able to say WHICH window that seat is.
     const seats = Object.entries(a.seats || {}).map(([writer, s]) => ({
-      writer, live: seatLive(s), lastSeen: s.lastSeen ?? null,
+      writer, session: s.session ?? null, live: seatState(s), lastSeen: s.lastSeen ?? null,
     }))
     return {
       ...a,
       seats,
-      live: seats.filter(s => s.live).map(s => s.writer),
+      // Live and "we don't know" both belong here: leaving out a session that may well be
+      // working would send the caller looking for someone to talk to who is right there.
+      live: seats.filter(s => s.live !== false).map(s => s.writer),
       silentMinutes: ms == null ? null : Math.round(ms / 60000),
     }
   }).sort((x, y) => (x.silentMinutes ?? 1e9) - (y.silentMinutes ?? 1e9))
@@ -275,6 +302,35 @@ export function busFiles(room) {
     return readdirSync(channelDir(room)).filter(f => f.endsWith(".md") && f !== "README.md")
       .map(f => join(channelDir(room), f)).sort()
   } catch { return [] }
+}
+
+/**
+ * Delete the EMPTY writer files of this project's dead sessions.
+ *
+ * The counterweight to session-id names: the SessionStart hook announces every session with a
+ * file of its own ("I am here, this is where I write"), so a session that never writes still
+ * leaves one behind — a handful of empty files a day. Without this, the room would be unusable
+ * to look at in a week.
+ *
+ * Three conditions, all of them necessary, so that this can never destroy anything:
+ *  - the file is EMPTY (not one entry in it) — a file with content is history, never touched;
+ *  - it belongs to a seat of THIS project (we do not clean up after others);
+ *  - nobody is alive on that seat, and it is not the caller's own.
+ */
+export function pruneEmptySeats({ room, agent, keep }) {
+  const seats = readJson(REGISTRY, { agents: {} }).agents?.[agent]?.seats || {}
+  const removed = []
+  for (const path of busFiles(room)) {
+    const w = writerOf(path)
+    // `!== false` — only a seat we are SURE is dead may be cleaned up after.
+    if (w === keep || seatBase(w) !== agent || seatState(seats[w]) !== false) continue
+    try {
+      if (statSync(path).size) continue
+      unlinkSync(path)
+      removed.push(w)
+    } catch { /* someone got there first, or it is being written — leave it alone */ }
+  }
+  return removed
 }
 
 /**
@@ -330,29 +386,56 @@ function parse(path, agent) {
 }
 
 /**
- * The read cursor of a NEWLY BORN seat. Called by `register`, once, when the second session
- * of a project takes its seat — at that point we know the room, which `claimSeat` does not.
+ * How far back a newly born seat still counts entries as UNREAD MAIL rather than history.
  *
- * Two decisions in it:
- *  - it inherits the base seat's cursor: what the project has already read from the OTHERS is
- *    not unread for a session that just joined;
- *  - a sibling's earlier entries are marked read: they are the project's shared history (400
- *    entries in the live `consumer-a-atlas` room), not mail addressed to a session that did not yet
- *    exist. `history` still has all of them.
- * Everything a sibling writes FROM NOW ON is delivered — that is the point of the whole change.
+ * ⚠ Measured 2026-08-04, 23:09, and it cost the very message this whole thing was built for.
+ * A session sent a detailed REQUEST at 22:38; the other side was resumed half an hour later,
+ * and the resume gave it a new session id, hence a new seat. The seeding rule then said "a
+ * sibling's earlier entries are history" — and marked the 22:38 request READ before anyone
+ * had seen it. The room was quiet, the cursor was correct, the request was gone.
+ *
+ * The rule was right in intent and wrong at the edge: what someone wrote HALF AN HOUR ago is
+ * a live conversation, not history. Half an hour is a plausible gap between "I asked you" and
+ * "you restarted"; an hour is a safe margin over it. What is older than that is what `history`
+ * is for.
+ */
+const SEED_FRESH_MS = 60 * 60_000
+
+/**
+ * The read cursor of a NEWLY BORN seat. Called by `register` — at that point we know the room,
+ * which `claimSeat` does not.
+ *
+ * The question it answers: how far has THE PROJECT already read this writer? Not "what does
+ * one seat's cursor say" — a session-id name means every restart creates a new seat, so the
+ * project's reading is spread across all of its past seats. We take the furthest of them.
+ *
+ *  - from a STRANGER: exactly that maximum. What the project has read is not unread for the
+ *    session that just joined, and what nobody read stays unread.
+ *  - from a SIBLING: the same maximum, but never further back than `SEED_FRESH_MS` — this is
+ *    what keeps a 400-entry room from landing in a new session's inbox, while a request from
+ *    half an hour ago still gets delivered.
  */
 function seedCursor(room, writer) {
   const base = seatBase(writer)
-  if (!room || writer === base) return               // the base seat starts from zero, as before
+  if (!room || writer === base) return
   const cursors = readJson(CURSORS, {})
   const key = `${room}::${writer}`
   if (cursors[key]) return                           // an existing seat keeps its own cursor
-  const seen = { ...(cursors[`${room}::${base}`] || {}) }
+  const prefix = `${room}::${base}`
+  const mine = Object.entries(cursors)
+    .filter(([k]) => k === prefix || k.startsWith(`${prefix}#`))
+    .map(([, v]) => v)
+
+  const seen = {}
+  const furthest = w => mine.reduce((best, c) => (c[w] && t(c[w]) > t(best) ? c[w] : best), null)
   for (const path of busFiles(room)) {
     const w = writerOf(path)
-    if (w === writer || seatBase(w) !== base) continue
-    const last = parse(path, w).at(-1)
-    if (last) seen[w] = last.ts
+    if (w === writer) continue
+    const read = furthest(w)
+    if (seatBase(w) !== base) { if (read) seen[w] = read; continue }
+    // A sibling: at most an hour of its past counts as unread — see SEED_FRESH_MS.
+    const floor = now(new Date(Date.now() - SEED_FRESH_MS))
+    seen[w] = !read || t(read) < t(floor) ? floor : read
   }
   cursors[key] = seen
   writeJson(CURSORS, cursors)
@@ -426,7 +509,7 @@ export function unread({ room, agent, count = 1 }) {
 /**
  * Reading back — does NOT move the cursor.
  *
- * `from` may name a project (`consumer-a`) or one seat of it (`consumer-a#2`). The project name
+ * `from` may name a project (`consumer-a`) or one seat of it (`consumer-a#968f89d7`). The project name
  * returns ALL its sessions: "what did consumer-a say" is a question about the project, and
  * answering it with one session's half of the thread would be a silent half-truth.
  */
@@ -437,6 +520,29 @@ export function history({ room, from, limit = 20 }) {
   const all = files.flatMap(p => parse(p, writerOf(p)))
   all.sort(byTime)
   return { room, total: all.length, messages: all.slice(-limit) }
+}
+
+// ── nudging ───────────────────────────────────────────────────────────────────
+
+/**
+ * "Have we already told this seat about this entry?" — true means it is NEW and worth saying.
+ *
+ * This is what makes a `Stop` hook safe. Claude Code's Stop hook may block the end of a turn
+ * (`decision: "block"`), and there is NO `stop_hook_active` field to break the cycle: if the
+ * hook blocked every time it saw an unread message, an agent that does not read it — because
+ * it has no MCP tool, or is doing something else — would be stuck in a loop forever.
+ *
+ * So we nudge ONCE per entry. If the agent reads it, good; if it does not, it is not held
+ * hostage. The message is not lost either way: it stays unread until the cursor advances.
+ * A nudge is not a delivery — it never touches the cursor.
+ */
+export function shouldNudge({ room, agent, ts }) {
+  const all = readJson(NUDGES, {})
+  const key = `${room}::${agent}`
+  if (all[key] && t(all[key]) >= t(ts)) return false
+  all[key] = ts
+  writeJson(NUDGES, all)
+  return true
 }
 
 /** Existing rooms. */

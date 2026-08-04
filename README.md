@@ -12,7 +12,7 @@ could not do:
 |---|---|
 | the agent wrote with `Write`/`Edit` → **a full rewrite of a 555 KB file** per message, and out of two concurrent writes one was silently lost | `send` **appends** |
 | "who is here?" — recorded nowhere | `agents`: who exists, where, when they were last alive |
-| watching: `Monitor` long-poll + a cron patrol + `pgrep` keep-alive, ~60 lines in CLAUDE.md, with three measured lessons about how `TaskList` and `pgrep` get it wrong in **both directions** | a SessionStart hook → **native `watchPaths`** |
+| watching: `Monitor` long-poll + a cron patrol + `pgrep` keep-alive, ~60 lines in CLAUDE.md, with three measured lessons about how `TaskList` and `pgrep` get it wrong in **both directions** | two hooks and one blocking command, wired in by `sac install` — and the measured lesson that a file watcher **cannot wake an idle session**, so the long poll stays (see [Being told](#being-told-delivery-is-not-the-same-as-noticing)) |
 
 ## Protocol — one file, one writer
 
@@ -24,10 +24,11 @@ would write.
 ~/.local/share/set-agent-comm/
   registry.json            who exists, where, when they were last alive
   cursors.json             how far each agent has read the others
+  nudges.json              what each seat has already been told about
   channels/<room>/
-    web-app.md             written by: web-app      · read by: everyone else
-    web-app#2.md           written by: web-app's SECOND session (see below)
-    api-service.md         written by: api-service  · read by: everyone else
+    web-app#3f9c1a20.md    written by: one SESSION of web-app (see below)
+    web-app#7b02e5d1.md    written by: another session of the same project
+    api-service#c4e1.md    written by: api-service · read by: everyone else
 ```
 
 One entry:
@@ -48,7 +49,7 @@ in by the server**, never by the model — measured on 2026-07-24 on the hand-ke
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 14 unit tests + the two-agent smoke test
+npm test                          # 31 tests + the two-agent smoke test
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
@@ -58,17 +59,25 @@ Once per project, in **stdio** mode (this is the default):
 cd ~/code/web-app
 claude mcp add agent-comm -e SET_AGENT_ROOM=team -- set-agent-comm-mcp
 # without a global install: -- node /path/to/set-agent-comm/src/stdio.mjs
+
+sac install team                  # the two hooks that make sure a message is NOTICED
 ```
 
 The agent's name comes from the project's directory name (override with `SET_AGENT_NAME`).
 
 ### Two sessions in one project — seats
 
-The directory name identifies the **project**. When you have two Claude sessions open in the
-same repository, a **seat** tells them apart: the first session writes as `web-app`, the next
-ones as `web-app#2`, `#3`. The seat comes from `CLAUDE_CODE_SESSION_ID`, which the MCP server
-process, the SessionStart hook and every `sac` call inherit alike — nothing to configure,
-nothing to mistype, and no agent can write in another's name.
+The directory name identifies the **project**; a **seat** identifies the session inside it.
+The seat name carries the session id — `web-app#3f9c1a20` — so a name says exactly *which*
+session it is, and it can be matched against the session a Claude Code window reports for
+itself. The id comes from `CLAUDE_CODE_SESSION_ID`, which the MCP server process, the
+SessionStart hook and every `sac` call inherit alike: nothing to configure, nothing to mistype,
+and no agent can write in another's name.
+
+The trade-off, chosen deliberately: a name is good for **one session**, so a restart starts a
+new file and the room keeps the files of past sessions. What has content is history and stays;
+the **empty** files of dead sessions — a session that announced itself and never wrote — are
+cleaned up by the SessionStart hook.
 
 What this buys, measured on 2026-08-04 in the live `consumer-a-atlas` room, where all three failed
 silently:
@@ -81,13 +90,16 @@ silently:
 
 The reader gains from it too: the room used to carry "do not regenerate yet" (11:31) and
 "already regenerated" (11:46) **under a single sender name** — the receiving agent answered
-the wrong one and had to say so. Now the sender is `consumer-a` or `consumer-a#2`.
+the wrong one and had to say so. Now the sender is `consumer-a#968f89d7` or `consumer-a#526b22ce`.
 
-A seat sticks to the session id, so a restarted session gets its file and its cursor back. A
-new session does **not** get the project's earlier history as unread mail — only what is
-written from the moment it starts. `agents` lists the live seats in the `live` field; a
-caller with no session id (cron, a bare terminal) gets no seat, and `send` then warns that
-someone else writes into the same file.
+A new session does **not** get the project's older history as unread mail — but what was
+written in the **last hour** is delivered to it. ⚠ Measured on 2026-08-04 at 23:09, and it cost
+the very message this was built for: a session sent a detailed request at 22:38, the other side
+was resumed half an hour later — and a resume means a new session id, hence a new seat, whose
+cursor marked that request read before anyone had seen it. Half an hour is not history; it is
+the other half of a conversation. `agents` lists the live seats in the `live` field and their
+full session id in `seats`; a caller with no session id (cron, a bare terminal) gets no seat of
+its own, and `send` then warns that someone else writes into the same file.
 
 ### Several rooms
 
@@ -99,7 +111,7 @@ silently — and that cannot be taken back.
 
 ### Push: the SessionStart hook
 
-Into the project's `.claude/settings.json`:
+`sac install` writes it into the project's `.claude/settings.json`; by hand it is:
 
 ```json
 { "hooks": { "SessionStart": [ { "hooks": [ {
@@ -111,18 +123,56 @@ Into the project's `.claude/settings.json`:
 It takes the session's seat, checks in to the registry, puts the **others'** files — a sibling
 session of the same project included — on Claude Code's native file watcher (`watchPaths`),
 and prints any unread messages at the start of the session. It does not watch our own file:
-that would be a self-wake loop. A session on a non-base seat is told so at startup, so it does
-not sign its messages with the project name in the text.
+that would be a self-wake loop. At startup it also tells the session what its name on the bus
+is and which other sessions of the project are live — otherwise the agent would sign its
+messages with the bare project name in the text.
+
+### Being told: delivery is not the same as noticing
+
+Measured 2026-08-04 between two `consumer-a` sessions: **delivery worked and nothing happened.**
+The message was in the room, unread, with the right cursor — and the other session sat idle at
+its prompt, because nothing told it. `watchPaths` → `FileChanged` does fire while a session is
+idle, but it **cannot start a turn**; it only leaves context for the next one. Two gaps, two
+answers:
+
+| the other agent is | mechanism | what it does |
+|---|---|---|
+| **working** | `Stop` hook (`hooks/stop.mjs`) | it may not end the turn with unread mail — `decision: "block"` sends it back with the room named |
+| **idle** | `sac wait` inside a `Monitor` | the only thing that **starts a new turn**: every message is an event in the chat |
+
+Both hooks are wired in by one command, run in the project:
+
+```bash
+sac install team                  # --dry-run first if you want to see it
+```
+
+It adds them to `.claude/settings.json`, leaves every other hook alone, takes a backup before
+writing, and a re-run updates its own entry instead of adding a second copy. (Measured need:
+on a live project the Stop hook was simply forgotten in a settings file holding a dozen hooks —
+and from the outside a forgotten hook looks exactly like a quiet room.)
+
+```js
+// the agent arms this once, e.g. at the start of the session
+Monitor({ command: "sac wait", description: "agent-comm inbox", persistent: true })
+```
+
+Both only ever **look**: `advance: false`, so a notification never marks a message read — a
+monitor firing while the agent is busy must not swallow it. And the Stop hook nudges **once per
+entry**: Claude Code has no `stop_hook_active` field, so a hook that blocked on every unread
+message would trap an agent that does not read it. Blocking is a strong move; it is spent on
+saying something new.
 
 ## CLI
 
 ```
+sac install <room> [--dry-run]      wire both hooks into this project's settings.json
 sac agents                          who exists, who is alive
 sac send <room> <type> "text"       entry (append)
 sac inbox <room>                    new messages from others (marks them read)
 sac peek <room>                     the same, without moving the cursor
 sac unread <room> [n]               make the last n messages unread again
 sac history <room> [n]              read back
+sac wait [--once] [room…]           block until a message arrives (for a Monitor)
 sac watch-paths <room>              the files to watch (for the hook)
 ```
 
@@ -131,7 +181,8 @@ sac watch-paths <room>              the files to watch (for the hook)
 `agents` · `rooms` · `send` · `inbox` · `history` — the `from` field is **filled in by the
 server**, so an agent cannot write a message in someone else's name. On an `inbox` entry
 `sibling: true` means it came from another session of the **same project**; in `agents` the
-`live` field names the project's currently live sessions (`web-app`, `web-app#2`).
+`live` field names the project's currently live sessions, and `seats` carries their full
+session id.
 
 ## Why stdio is the default, when our set-designer uses HTTP
 

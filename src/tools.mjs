@@ -17,8 +17,9 @@ export const TOOL_DEFS = [
     description:
       "Who is registered in the registry, and when they last gave a sign of life. " +
       "`silentMinutes: null` means WE DO NOT KNOW — not that they are dead. " +
-      "`live` lists the project's currently live sessions (seats): more than one name there " +
-      "(`web-app`, `web-app#2`) means two sessions are open in that project — address the one you mean.",
+      "`seats` lists the project's sessions with their full session id, `live` the ones open " +
+      "right now: more than one name there (`web-app#3f9c1a20`, `web-app#7b02e5d1`) means " +
+      "several sessions are open in that project — address the one you mean.",
     inputSchema: S({}),
   },
   { name: "rooms", description: "The list of existing channels (rooms).", inputSchema: S({}) },
@@ -60,8 +61,8 @@ export const TOOL_DEFS = [
 
 /**
  * @param identify (request) => ({ agent, room }) — it is the transport's job to say WHO calls.
- *   `agent` here is a SEAT: the project directory plus, from the second session onwards, the
- *   seat number (`web-app#2`). stdio: cwd + `CLAUDE_CODE_SESSION_ID`, both unforgeable.
+ *   `agent` here is a SEAT: the project directory plus the session id (`web-app#3f9c1a20`).
+ *   stdio: cwd + `CLAUDE_CODE_SESSION_ID`, both unforgeable.
  *   http: session-id → `register` on the agent's word.
  */
 export function createMcpServer(identify) {

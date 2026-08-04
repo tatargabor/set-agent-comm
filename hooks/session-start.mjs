@@ -62,6 +62,9 @@ for (const room of rooms) {
   mkdirSync(dir, { recursive: true })
   const mine = store.busFile(room, writer)
   if (!existsSync(mine)) appendFileSync(mine, "")
+  // A seat name is good for ONE session, so every start leaves a file behind. The empty ones
+  // of dead sessions go now — a file with even one entry in it is history and stays.
+  store.pruneEmptySeats({ room, agent, keep: writer })
 
   // We only watch what belongs to OTHERS — waking on our own writes would be a self-wake loop.
   // "Others" now includes a SIBLING SESSION of this same project: its file is not ours.
@@ -77,13 +80,19 @@ for (const room of rooms) {
 
 if (watchPaths.length) out.hookSpecificOutput.watchPaths = watchPaths
 
-// Being on a non-base seat is ANNOUNCED, even with nothing unread: the session has to know
-// that it is not the only one in this project and that it writes under a different name than
-// the one the project is known by — otherwise it would sign its messages `consumer-a` in the text.
+// The seat name is ANNOUNCED, even with nothing unread: the agent writes under a different
+// name than the one the project is known by, and without being told it would sign its messages
+// `consumer-a` in the text. If another session of the project is live, that is named too — that
+// is the one it can now talk to.
+const others = store.agents().find(a => a.agent === agent)?.seats
+  ?.filter(s => s.live && s.writer !== writer).map(s => s.writer) || []
 const siblings = writer !== agent
-  ? ` You are the project's ${writer.split("#")[1]}. session, so on the bus your name is ` +
-    `\`${writer}\` (not \`${agent}\`) — another session of this project writes as well, and ` +
-    `you two now receive each other.`
+  ? ` On the bus your name is \`${writer}\` (not \`${agent}\`) — the suffix is your session id, ` +
+    `so it says WHICH session you are.` +
+    (others.length
+      ? ` This project has ${others.length} other live session(s): ${others.join(", ")} — ` +
+        `you receive each other's messages.`
+      : "")
   : ""
 if (notices.length || siblings) {
   out.hookSpecificOutput.additionalContext =

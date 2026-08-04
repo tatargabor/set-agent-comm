@@ -40,8 +40,10 @@ const call = async (c, name, args = {}) => {
 }
 
 console.log(`\nset-agent-comm smoke test — store: ${ROOT}\n`)
-const web = await connect("web-app")
-const api = await connect("api-service")
+// Explicit session ids: the seat name — the name on the bus — carries the session id.
+const WEB = "web-app#w1", API = "api-service#a1"
+const web = await connect("web-app", ROOM, "w1")
+const api = await connect("api-service", ROOM, "a1")
 
 try {
   const tools = (await web.listTools()).tools.map(t => t.name).sort()
@@ -53,7 +55,7 @@ try {
 
   const inb = await call(api, "inbox")
   assert.equal(inb.unread, 1, "api-service did not receive the message")
-  assert.equal(inb.messages[0].from, "web-app")
+  assert.equal(inb.messages[0].from, WEB)
   assert.match(inb.messages[0].text, /orders/)
   ok(`api-service received it: "${inb.messages[0].text}"`)
 
@@ -63,7 +65,7 @@ try {
   await call(api, "send", { type: "ANSWER", text: "Shipped, it is in the response now.", re: inb.messages[0].ts })
   const back = await call(web, "inbox")
   assert.equal(back.unread, 1)
-  assert.equal(back.messages[0].from, "api-service")
+  assert.equal(back.messages[0].from, API)
   assert.equal(back.messages[0].re, inb.messages[0].ts)
   ok("api-service answered, web-app received it — the `re:` reference survived")
 
@@ -77,12 +79,12 @@ try {
 
   const h = await call(web, "history")
   assert.equal(h.total, 2)
-  assert.deepEqual(h.messages.map(m => m.from), ["web-app", "api-service"])
+  assert.deepEqual(h.messages.map(m => m.from), [WEB, API])
   ok("history returns both sides in chronological order")
 
   // An agent in two rooms: no default room, so an unrouted `send` must FAIL rather than
   // guess. A message delivered to the wrong audience cannot be taken back.
-  const both = await connect("web-app", `${ROOM},design`)
+  const both = await connect("web-app", `${ROOM},design`, "w2")
   const refused = await raw(both, "send", { type: "FACT", text: "which room?" })
   assert.ok(refused.isError, "send without a room silently picked a room")
   assert.match(refused.content[0].text, /several rooms \(team, design\)/)
@@ -98,33 +100,37 @@ try {
   // case measured on 2026-08-04 in the `consumer-a-atlas` room, where they wrote into one file, could
   // not receive each other, and shared one read cursor.
   const MONO = "mono"
-  const s1 = await connect("mono-repo", MONO, "session-one")
-  const s2 = await connect("mono-repo", MONO, "session-two")
+  const SID1 = "3f9c1a20-1111-4e61-9f8d-000000000001"
+  const SID2 = "7b02e5d1-2222-4e61-9f8d-000000000002"
+  const s1 = await connect("mono-repo", MONO, SID1)
+  const s2 = await connect("mono-repo", MONO, SID2)
 
   const sent = await call(s1, "send", { type: "REQUEST", text: "Do not regenerate the atlas yet." })
-  assert.equal(sent.from, "mono-repo", "the first session did not keep the plain project name")
+  assert.equal(sent.from, "mono-repo#3f9c1a20", "the sender's name does not carry the session id")
   assert.ok(!sent.warning, `it warned about a shared file even though there are seats: ${sent.warning}`)
 
   const heard = await call(s2, "inbox")
   assert.equal(heard.unread, 1, "THE OTHER SESSION OF THE SAME PROJECT DID NOT RECEIVE THE MESSAGE")
-  assert.equal(heard.messages[0].from, "mono-repo")
+  assert.equal(heard.messages[0].from, "mono-repo#3f9c1a20")
   assert.equal(heard.messages[0].sibling, true, "it was not marked as coming from the same project")
-  ok(`the project's 2nd session received it: "${heard.messages[0].text}"`)
+  ok(`the project's other session received it: "${heard.messages[0].text}"`)
 
   const reply = await call(s2, "send", { type: "ANSWER", text: "Understood, I am not touching it.", re: heard.messages[0].ts })
-  assert.equal(reply.from, "mono-repo#2", "the second session did not get a seat of its own")
+  assert.equal(reply.from, "mono-repo#7b02e5d1", "the second session did not get a seat of its own")
   const echo = await call(s1, "inbox")
   assert.equal(echo.unread, 1, "the answer did not get back to the first session")
-  assert.equal(echo.messages[0].from, "mono-repo#2")
-  ok("the first session got the answer — under a name that tells the two sessions apart")
+  assert.equal(echo.messages[0].from, "mono-repo#7b02e5d1")
+  ok("the first session got the answer — under a name that says WHICH session sent it")
 
   assert.equal((await call(s1, "inbox")).unread, 0, "the cursor of the two sessions is shared")
   assert.equal((await call(s2, "inbox")).unread, 0)
   ok("each session has its OWN cursor — one reading does not swallow the other's message")
 
   const mono = (await call(s1, "agents")).find(a => a.agent === "mono-repo")
-  assert.deepEqual(mono.live.sort(), ["mono-repo", "mono-repo#2"])
-  ok(`the registry announces both live sessions: ${mono.live.join(", ")}`)
+  assert.deepEqual(mono.live.sort(), ["mono-repo#3f9c1a20", "mono-repo#7b02e5d1"])
+  assert.deepEqual(mono.seats.map(s => s.session).sort(), [SID1, SID2],
+    "the full session id is not readable — that is what identifies the window")
+  ok(`the registry announces both live sessions with their session id: ${mono.live.join(", ")}`)
 
   const mh = await call(s1, "history", { room: MONO, from: "mono-repo" })
   assert.equal(mh.total, 2, "history by project name did not return both sessions")
