@@ -1,13 +1,19 @@
 {
   "name": "set-agent-comm",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Agentek közti üzenetváltás egy gépen — fájl-alapú csatorna + nyilvántartó, MCP-n és CLI-n keresztül.",
+  "description": "Messaging between agents on one machine — a file-based channel plus a registry, over MCP and a CLI. Tailored to Claude Code.",
+  "license": "MIT",
+  "author": "Gábor Tatár",
+  "homepage": "https://github.com/tatargabor/set-agent-comm",
+  "repository": { "type": "git", "url": "git+https://github.com/tatargabor/set-agent-comm.git" },
+  "keywords": ["mcp", "claude-code", "agents", "ipc", "cli"],
   "bin": {
     "sac": "./bin/sac.mjs",
     "set-agent-comm-mcp": "./src/stdio.mjs"
   },
+  "files": ["bin", "src", "hooks", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
   "scripts": {
     "http": "node src/http.mjs",
     "test": "node --test test/*.test.mjs && node test/smoke-mcp.mjs"

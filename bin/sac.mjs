@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// CLI a mag fölé — a hookok, a cron és az ember ezt hívja.
-// Az MCP-vel azonos magot használja, tehát nem tud elcsúszni tőle.
+// A CLI on top of the core — hooks, cron and humans call this.
+// It uses the same core as the MCP server, so the two cannot drift apart.
 //
-//   sac agents                          ki létezik, ki él
-//   sac rooms                           szobák
-//   sac send <szoba> <típus> "szöveg"   bejegyzés (append)
-//   sac inbox <szoba>                   új üzenetek másoktól
-//   sac peek <szoba>                    ugyanaz, de a kurzort nem mozgatja
-//   sac history <szoba> [n]             visszaolvasás
-//   sac watch-paths <szoba>             a figyelendő fájlok (hooknak)
-//   sac register <szoba>                bejelentkezés a nyilvántartóba
+//   sac agents                          who exists, who is alive
+//   sac rooms                           rooms
+//   sac send <room> <type> "text"       entry (append)
+//   sac inbox <room>                    new messages from others
+//   sac peek <room>                     the same, but does not move the cursor
+//   sac history <room> [n]              read back
+//   sac watch-paths <room>              the files to watch (for the hook)
+//   sac register <room>                 check in to the registry
 
 import { basename } from "node:path"
 import * as store from "../src/store.mjs"
@@ -24,49 +24,49 @@ try {
   switch (cmd) {
     case "agents": {
       const list = store.agents()
-      if (!list.length) { console.log("(a nyilvántartó üres)"); break }
+      if (!list.length) { console.log("(the registry is empty)"); break }
       for (const a of list) {
-        const s = a.silentMinutes == null ? "?" : `${a.silentMinutes}p`
-        console.log(`${a.agent.padEnd(18)} ${String(s).padStart(5)} néma   ${a.project || "-"}`)
+        const s = a.silentMinutes == null ? "?" : `${a.silentMinutes}m`
+        console.log(`${a.agent.padEnd(18)} ${String(s).padStart(5)} silent   ${a.project || "-"}`)
       }
       break
     }
-    case "rooms": console.log(store.rooms().join("\n") || "(egy szoba sincs)"); break
+    case "rooms": console.log(store.rooms().join("\n") || "(no rooms yet)"); break
 
     case "send": {
       const [room, type, ...text] = rest
-      if (!room || !text.length) throw new Error('használat: sac send <szoba> <típus> "szöveg"')
+      if (!room || !text.length) throw new Error('usage: sac send <room> <type> "text"')
       json(store.send({ room, from: ME, type, text: text.join(" ") }))
       break
     }
     case "inbox":
     case "peek": {
       const [room] = rest
-      if (!room) throw new Error(`használat: sac ${cmd} <szoba>`)
+      if (!room) throw new Error(`usage: sac ${cmd} <room>`)
       const r = store.inbox({ room, agent: ME, advance: cmd === "inbox" })
-      if (!r.unread) { console.log("(nincs új üzenet)"); break }
-      if (r.truncated) console.log(`… ${r.truncated} régebbi kihagyva\n`)
+      if (!r.unread) { console.log("(no new messages)"); break }
+      if (r.truncated) console.log(`… ${r.truncated} older skipped\n`)
       for (const m of r.messages) console.log(fmt(m))
       break
     }
     case "unread": {
       const [room, n] = rest
-      if (!room) throw new Error("használat: sac unread <szoba> [n]   — az utolsó n üzenet újra olvasatlan")
+      if (!room) throw new Error("usage: sac unread <room> [n]   — makes the last n messages unread again")
       json(store.unread({ room, agent: ME, count: Number(n) || 1 }))
       break
     }
     case "history": {
       const [room, n] = rest
-      if (!room) throw new Error("használat: sac history <szoba> [n]")
+      if (!room) throw new Error("usage: sac history <room> [n]")
       const r = store.history({ room, limit: Number(n) || 20 })
-      console.log(`(összesen ${r.total} bejegyzés)\n`)
+      console.log(`(${r.total} entries in total)\n`)
       for (const m of r.messages) console.log(fmt(m))
       break
     }
     case "watch-paths": {
       const [room] = rest
-      if (!room) throw new Error("használat: sac watch-paths <szoba>")
-      // Csak a MÁSOK fájljait — a sajátunk változására nem akarunk ébredni.
+      if (!room) throw new Error("usage: sac watch-paths <room>")
+      // Only the OTHERS' files — we do not want to wake up on our own file changing.
       console.log(store.busFiles(room).filter(p => basename(p) !== `${ME}.md`).join("\n"))
       break
     }
@@ -76,18 +76,18 @@ try {
       break
     }
     default:
-      console.log(`set-agent-comm — agentek közti üzenetváltás egy gépen.
-agent: ${ME}   ·   tár: ${store.ROOT}
+      console.log(`set-agent-comm — messaging between agents on one machine.
+agent: ${ME}   ·   store: ${store.ROOT}
 
-  sac agents                          ki létezik, ki él
-  sac rooms                           szobák
-  sac send <szoba> <típus> "szöveg"   bejegyzés (${store.TYPES.join(" | ")})
-  sac inbox <szoba>                   új üzenetek másoktól (olvasottnak jelöl)
-  sac peek <szoba>                    ugyanaz, kurzor-mozgatás nélkül
-  sac unread <szoba> [n]              az utolsó n üzenet újra olvasatlan
-  sac history <szoba> [n]             visszaolvasás
-  sac watch-paths <szoba>             a figyelendő fájlok (hooknak)
-  sac register <szoba>                bejelentkezés a nyilvántartóba`)
+  sac agents                          who exists, who is alive
+  sac rooms                           rooms
+  sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
+  sac inbox <room>                    new messages from others (marks them read)
+  sac peek <room>                     the same, without moving the cursor
+  sac unread <room> [n]               make the last n messages unread again
+  sac history <room> [n]              read back
+  sac watch-paths <room>              the files to watch (for the hook)
+  sac register <room>                 check in to the registry`)
       process.exit(cmd ? 1 : 0)
   }
 } catch (e) {

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// FÜST-TESZT: két külön MCP-kliens (= két agent) tényleg beszél egymással a stdio szerveren.
-// Nem a hívást méri, hanem az eredményt: amit az egyik küld, azt a másik MEGKAPJA — és
-// magát nem kapja vissza. Eldobható tárral fut, az éleshez nem nyúl.
+// SMOKE TEST: two separate MCP clients (= two agents) really do talk to each other over the
+// stdio server. It does not measure the call but the result: what one sends, the other
+// RECEIVES — and does not get its own message back. Runs against a throwaway store, it never
+// touches the live one.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -13,7 +14,7 @@ import assert from "node:assert/strict"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SERVER = join(HERE, "..", "src", "stdio.mjs")
 const ROOT = mkdtempSync(join(tmpdir(), "sac-smoke-"))
-const ROOM = "consumer-a-set"
+const ROOM = "team"
 const ok = m => console.log(`  ✔ ${m}`)
 
 async function connect(agent) {
@@ -27,54 +28,54 @@ async function connect(agent) {
 }
 const call = async (c, name, args = {}) => {
   const r = await c.callTool({ name, arguments: args })
-  assert.ok(!r.isError, `${name} hibát adott: ${r.content?.[0]?.text}`)
+  assert.ok(!r.isError, `${name} returned an error: ${r.content?.[0]?.text}`)
   return JSON.parse(r.content[0].text)
 }
 
-console.log(`\nset-agent-comm füst-teszt — tár: ${ROOT}\n`)
-const consumer-a = await connect("consumer-a")
-const promo = await connect("set-promo")
+console.log(`\nset-agent-comm smoke test — store: ${ROOT}\n`)
+const web = await connect("web-app")
+const api = await connect("api-service")
 
 try {
-  const tools = (await consumer-a.listTools()).tools.map(t => t.name).sort()
+  const tools = (await web.listTools()).tools.map(t => t.name).sort()
   assert.deepEqual(tools, ["agents", "history", "inbox", "rooms", "send"])
-  ok(`mindkét szerver felállt, 5 tool: ${tools.join(", ")}`)
+  ok(`both servers came up, 5 tools: ${tools.join(", ")}`)
 
-  await call(consumer-a, "send", { type: "KÉRÉS", text: "Kellene pár ötlet a WPC ajánlathoz." })
-  ok("consumer-a küldött egy KÉRÉS-t")
+  await call(web, "send", { type: "REQUEST", text: "Need the new field on the orders endpoint." })
+  ok("web-app sent a REQUEST")
 
-  const inb = await call(promo, "inbox")
-  assert.equal(inb.unread, 1, "a set-promo nem kapta meg az üzenetet")
-  assert.equal(inb.messages[0].from, "consumer-a")
-  assert.match(inb.messages[0].text, /ötlet/)
-  ok(`set-promo megkapta: "${inb.messages[0].text}"`)
+  const inb = await call(api, "inbox")
+  assert.equal(inb.unread, 1, "api-service did not receive the message")
+  assert.equal(inb.messages[0].from, "web-app")
+  assert.match(inb.messages[0].text, /orders/)
+  ok(`api-service received it: "${inb.messages[0].text}"`)
 
-  assert.equal((await call(promo, "inbox")).unread, 0)
-  ok("másodszorra már nincs olvasatlan — a kurzor lépett")
+  assert.equal((await call(api, "inbox")).unread, 0)
+  ok("nothing unread the second time — the cursor advanced")
 
-  await call(promo, "send", { type: "VÁLASZ", text: "Három ötlet…", re: inb.messages[0].ts })
-  const back = await call(consumer-a, "inbox")
+  await call(api, "send", { type: "ANSWER", text: "Shipped, it is in the response now.", re: inb.messages[0].ts })
+  const back = await call(web, "inbox")
   assert.equal(back.unread, 1)
-  assert.equal(back.messages[0].from, "set-promo")
+  assert.equal(back.messages[0].from, "api-service")
   assert.equal(back.messages[0].re, inb.messages[0].ts)
-  ok("set-promo válaszolt, consumer-a megkapta — a `re:` hivatkozás megmaradt")
+  ok("api-service answered, web-app received it — the `re:` reference survived")
 
-  assert.equal((await call(consumer-a, "inbox")).unread, 0)
-  ok("a saját üzenetét EGYIK sem kapta vissza")
+  assert.equal((await call(web, "inbox")).unread, 0)
+  ok("NEITHER of them got its own message back")
 
-  const reg = await call(consumer-a, "agents")
-  assert.deepEqual(reg.map(a => a.agent).sort(), ["set-promo", "consumer-a"])
+  const reg = await call(web, "agents")
+  assert.deepEqual(reg.map(a => a.agent).sort(), ["api-service", "web-app"])
   assert.ok(reg.every(a => typeof a.silentMinutes === "number"))
-  ok(`a nyilvántartó mindkettőt látja: ${reg.map(a => `${a.agent}(${a.silentMinutes}p)`).join(", ")}`)
+  ok(`the registry sees both: ${reg.map(a => `${a.agent}(${a.silentMinutes}m)`).join(", ")}`)
 
-  const h = await call(consumer-a, "history")
+  const h = await call(web, "history")
   assert.equal(h.total, 2)
-  assert.deepEqual(h.messages.map(m => m.from), ["consumer-a", "set-promo"])
-  ok("a history mindkét oldalt idősorrendben adja vissza")
+  assert.deepEqual(h.messages.map(m => m.from), ["web-app", "api-service"])
+  ok("history returns both sides in chronological order")
 
-  console.log("\n✅ FÜST-TESZT ZÖLD — két agent beszélt egymással MCP-n keresztül.\n")
+  console.log("\n✅ SMOKE TEST GREEN — two agents talked to each other over MCP.\n")
 } finally {
-  await consumer-a.close().catch(() => {})
-  await promo.close().catch(() => {})
+  await web.close().catch(() => {})
+  await api.close().catch(() => {})
   rmSync(ROOT, { recursive: true, force: true })
 }

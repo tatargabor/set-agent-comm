@@ -1,6 +1,6 @@
-// Transzport-független MCP-mag — a stdio és a HTTP belépő is EZT használja.
-// (set-designer/mcp minta: egy `tools`, két vékony transzport. Ha a két oldal külön
-// tool-listát vezetne, egy mezőnév-változás némán elcsúsztatná őket egymástól.)
+// Transport-independent MCP core — both the stdio and the HTTP entry point use THIS.
+// (set-designer/mcp pattern: one `tools`, two thin transports. If the two sides kept
+// separate tool lists, one renamed field would silently drift them apart.)
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -9,54 +9,54 @@ import * as store from "./store.mjs"
 const S = (props, required = []) =>
   ({ type: "object", properties: props, required, additionalProperties: false })
 
-const ROOM = { type: "string", description: "Szoba neve; elhagyva az alapértelmezett" }
+const ROOM = { type: "string", description: "Room name; the default is used when omitted" }
 
 export const TOOL_DEFS = [
   {
     name: "agents",
     description:
-      "Ki van regisztrálva a nyilvántartóban, és mikor adott utoljára életjelet. " +
-      "A `silentMinutes: null` azt jelenti, hogy NEM TUDJUK — nem azt, hogy halott.",
+      "Who is registered in the registry, and when they last gave a sign of life. " +
+      "`silentMinutes: null` means WE DO NOT KNOW — not that they are dead.",
     inputSchema: S({}),
   },
-  { name: "rooms", description: "A létező csatornák (szobák) listája.", inputSchema: S({}) },
+  { name: "rooms", description: "The list of existing channels (rooms).", inputSchema: S({}) },
   {
     name: "send",
     description:
-      "Bejegyzés hozzáfűzése a saját fájlodhoz a szobában (append, nem újraírás). " +
-      "A feladó és az időbélyeg SZERVEROLDALON generálódik — ne írj magadnak nevet vagy dátumot a szövegbe.",
+      "Append an entry to your own file in the room (append, not rewrite). " +
+      "The sender and the timestamp are generated SERVER-SIDE — do not write a name or a date into the text yourself.",
     inputSchema: S({
       room: ROOM,
-      type: { type: "string", enum: store.TYPES, description: "A bejegyzés típusa" },
-      text: { type: "string", description: "A bejegyzés szövege (markdown)" },
-      re: { type: "string", description: "Melyik bejegyzésre válasz — annak időbélyege" },
+      type: { type: "string", enum: store.TYPES, description: "The type of the entry" },
+      text: { type: "string", description: "The text of the entry (markdown)" },
+      re: { type: "string", description: "Which entry this answers — its timestamp" },
     }, ["text"]),
   },
   {
     name: "inbox",
     description:
-      "Új bejegyzések a TÖBBIEKTŐL, amiket még nem olvastál. Alapból elolvasottnak jelöli " +
-      "őket; `advance: false`-szal csak belenézel. A saját üzeneteidet nem adja vissza.",
+      "New entries FROM THE OTHERS that you have not read yet. Marks them read by default; " +
+      "with `advance: false` you only take a look. It never returns your own messages.",
     inputSchema: S({
       room: ROOM,
-      advance: { type: "boolean", description: "Lépjen-e előre az olvasottsági kurzor (alap: true)" },
-      limit: { type: "number", description: "Legfeljebb ennyi bejegyzés (alap: 20)" },
+      advance: { type: "boolean", description: "Should the read cursor move forward (default: true)" },
+      limit: { type: "number", description: "At most this many entries (default: 20)" },
     }),
   },
   {
     name: "history",
-    description: "Visszaolvasás a szoba előzményeiből. A kurzort NEM mozgatja.",
+    description: "Read back the room's history. Does NOT move the cursor.",
     inputSchema: S({
       room: ROOM,
-      from: { type: "string", description: "Csak ettől az agenttől" },
-      limit: { type: "number", description: "Legfeljebb ennyi bejegyzés (alap: 20)" },
+      from: { type: "string", description: "Only from this agent" },
+      limit: { type: "number", description: "At most this many entries (default: 20)" },
     }),
   },
 ]
 
 /**
- * @param identify (request) => ({ agent, room }) — a transzport dolga megmondani, KI hív.
- *   stdio: a cwd-ből (hamisíthatatlan). http: session-id → `register` bemondás.
+ * @param identify (request) => ({ agent, room }) — it is the transport's job to say WHO calls.
+ *   stdio: from the cwd (unforgeable). http: session-id → `register` on the agent's word.
  */
 export function createMcpServer(identify) {
   const server = new Server(
@@ -74,7 +74,7 @@ export function createMcpServer(identify) {
       const needRoom = () => {
         if (room) return room
         throw new Error(
-          `Nincs megadva szoba, és nincs alapértelmezett. Létező szobák: ${store.rooms().join(", ") || "(egy sincs)"}`)
+          `No room given and no default. Existing rooms: ${store.rooms().join(", ") || "(none)"}`)
       }
       let out
       switch (req.params.name) {
@@ -86,13 +86,13 @@ export function createMcpServer(identify) {
           out = store.inbox({ room: needRoom(), agent, advance: a.advance !== false, limit: a.limit }); break
         case "history":
           out = store.history({ room: needRoom(), from: a.from, limit: a.limit }); break
-        default: throw new Error(`ismeretlen tool: ${req.params.name}`)
+        default: throw new Error(`unknown tool: ${req.params.name}`)
       }
       return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] }
     } catch (e) {
-      // A hiba HANGOS. A némán elnyelt hiba megkülönböztethetetlen attól, hogy nem volt üzenet —
-      // és pont a „nincs új üzenet" a legveszélyesebb hamis negatív ebben a rendszerben.
-      return { isError: true, content: [{ type: "text", text: `set-agent-comm hiba: ${e.message}` }] }
+      // Errors are LOUD. A silently swallowed error is indistinguishable from "there was no
+      // message" — and "no new messages" is exactly the most dangerous false negative here.
+      return { isError: true, content: [{ type: "text", text: `set-agent-comm error: ${e.message}` }] }
     }
   })
 

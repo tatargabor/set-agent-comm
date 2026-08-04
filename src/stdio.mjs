@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /**
- * stdio belépő — EZ AZ ALAPÉRTELMEZETT MÓD.
+ * stdio entry point — THIS IS THE DEFAULT MODE.
  *
- * Regisztráció projektenként (a `-s user` itt szándékosan NEM jó — lásd lent):
- *   claude mcp add agent-comm -e SET_AGENT_ROOM=consumer-a-set -- node ~/code2/set-agent-comm/src/stdio.mjs
+ * Register it per project (`-s user` is deliberately NOT right here — see below):
+ *   claude mcp add agent-comm -e SET_AGENT_ROOM=team -- node /path/to/set-agent-comm/src/stdio.mjs
  *
- * MIÉRT stdio az alap, amikor a set-designer HTTP-t használ: ott EGY globális állapot van,
- * itt viszont tudni kell, KI ír. A stdio-processzt a kliens a saját cwd-jével indítja, tehát
- * az identitás a projekt-könyvtárból jön — az agent nem tudja elírni és nem tud más nevében
- * írni. HTTP-n minden kliens ugyanarra az URL-re jön, ott az identitás bemondásos lenne.
+ * WHY stdio is the default while set-designer uses HTTP: there is ONE global state there,
+ * while here we have to know WHO writes. The client starts the stdio process with its own
+ * cwd, so identity comes from the project directory — the agent cannot mistype it and cannot
+ * write in someone else's name. Over HTTP every client arrives at the same URL, where
+ * identity would be self-declared.
  */
 import { basename } from "node:path"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"

@@ -1,115 +1,127 @@
 # set-agent-comm
 
-Agentek közti üzenetváltás **egy gépen**: fájl-alapú csatorna + nyilvántartó, MCP-n és
-CLI-n keresztül. Claude Code-ra szabva.
+Messaging between agents **on one machine**: a file-based channel plus a registry, over MCP
+and a CLI. Tailored to Claude Code.
 
-Ez **nem zöldmezős találmány**: a consumer-a ↔ set-core csatorna protokollját emeli ki kódba,
-amit **400 bejegyzésen, ~1 MB forgalommal járattunk be** 2026 júliusa óta. A kiemelés
-három dolgot ad hozzá, amit a kézi változat nem tudott:
+This is **not a greenfield invention**: it lifts into code the protocol of a channel between
+two of our own long-running Claude Code sessions, which we **ran in on 400 entries and
+~1 MB of traffic** since July 2026. Lifting it out adds three things the hand-kept version
+could not do:
 
-| kézi csatorna (eddig) | set-agent-comm |
+| hand-kept channel (until now) | set-agent-comm |
 |---|---|
-| az agent `Write`/`Edit`-tel írt → **555 KB-os fájl teljes újraírása** üzenetenként, és két egyidejű írásból az egyik némán elveszik | `send` **appendel** |
-| „ki van itt?" — sehol nem volt nyilvántartva | `agents`: ki létezik, hol, mikor élt utoljára |
-| figyelés: `Monitor` long-poll + cron őrjárat + `pgrep` életben tartás, ~60 sor CLAUDE.md-ben, három mérési tanulsággal arról, hogyan téved a `TaskList` és a `pgrep` **mindkét irányba** | SessionStart hook → **natív `watchPaths`** |
+| the agent wrote with `Write`/`Edit` → **a full rewrite of a 555 KB file** per message, and out of two concurrent writes one was silently lost | `send` **appends** |
+| "who is here?" — recorded nowhere | `agents`: who exists, where, when they were last alive |
+| watching: `Monitor` long-poll + a cron patrol + `pgrep` keep-alive, ~60 lines in CLAUDE.md, with three measured lessons about how `TaskList` and `pgrep` get it wrong in **both directions** | a SessionStart hook → **native `watchPaths`** |
 
-## Protokoll — egy fájl, egy író
+## Protocol — one file, one writer
 
-Mindenki **kizárólag a saját nevű fájljába appendel**, a többiét olvassa. Nincs lost update
-és **nincs lockfile** — egy megszakadt session után a lock beragadna, és onnantól senki nem írna.
+Everyone **appends to their own file only**, and reads the others'. No lost update and
+**no lockfile** — after a session dies the lock would stay stuck, and from then on nobody
+would write.
 
 ```
 ~/.local/share/set-agent-comm/
-  registry.json            ki létezik, hol, mikor élt utoljára
-  cursors.json             ki meddig olvasta a másikat
-  channels/<szoba>/
-    consumer-a.md            írja: consumer-a   · olvassa: mindenki más
-    set-promo.md           írja: set-promo  · olvassa: mindenki más
+  registry.json            who exists, where, when they were last alive
+  cursors.json             how far each agent has read the others
+  channels/<room>/
+    web-app.md             written by: web-app      · read by: everyone else
+    api-service.md         written by: api-service  · read by: everyone else
 ```
 
-Egy bejegyzés:
+One entry:
 
 ```markdown
-## 2026-08-03T18:42:07.318+02:00 — KÉRDÉS (re: 2026-08-03T18:40:11.002+02:00)
-A szöveg, markdownban.
+## 2026-08-03T18:42:07.318+02:00 — QUESTION (re: 2026-08-03T18:40:11.002+02:00)
+The text, in markdown.
 ```
 
-Típusok: `KÉRDÉS` · `VÁLASZ` · `TÉNY` · `KÉRÉS`. **Az időbélyeget és a feladót a szerver
-tölti ki**, sosem a modell — mérve 2026-07-24-én a kézi csatornán, hogy *mindkét* agent
-találgatta a dátumot (+6 és +1,5 óra tévedés), és ezzel a „N perce néma" feltétel vakká vált.
+Types: `QUESTION` · `ANSWER` · `FACT` · `REQUEST`. **The timestamp and the sender are filled
+in by the server**, never by the model — measured on 2026-07-24 on the hand-kept channel:
+*both* agents were guessing the date (off by +6 and +1.5 hours), which blinded the
+"silent for N minutes" condition.
 
-## Telepítés
+## Install
 
 ```bash
-npm install                       # egyetlen függőség: @modelcontextprotocol/sdk
-npm test                          # 12 unit + a két-agentes füst-teszt
+git clone https://github.com/tatargabor/set-agent-comm
+cd set-agent-comm
+npm install                       # a single dependency: @modelcontextprotocol/sdk
+npm test                          # 13 unit tests + the two-agent smoke test
+npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
-Projektenként egyszer, a **stdio** módra (ez az alapértelmezett):
+Once per project, in **stdio** mode (this is the default):
 
 ```bash
-cd ~/code/consumer-a
-claude mcp add agent-comm -e SET_AGENT_ROOM=consumer-a-set -- node ~/code2/set-agent-comm/src/stdio.mjs
+cd ~/code/web-app
+claude mcp add agent-comm -e SET_AGENT_ROOM=team -- set-agent-comm-mcp
+# without a global install: -- node /path/to/set-agent-comm/src/stdio.mjs
 ```
 
-Az agent neve a projekt könyvtárnevéből jön (`SET_AGENT_NAME`-mel felülírható).
+The agent's name comes from the project's directory name (override with `SET_AGENT_NAME`).
 
-### Push: a SessionStart hook
+### Push: the SessionStart hook
 
-A projekt `.claude/settings.json`-jébe:
+Into the project's `.claude/settings.json`:
 
 ```json
 { "hooks": { "SessionStart": [ { "hooks": [ {
   "type": "command",
-  "command": "SET_AGENT_ROOM=consumer-a-set node ~/code2/set-agent-comm/hooks/session-start.mjs"
+  "command": "SET_AGENT_ROOM=team node /path/to/set-agent-comm/hooks/session-start.mjs"
 } ] } ] } }
 ```
 
-Ez bejelentkezik a nyilvántartóba, a **többiek** fájljait ráteszi a Claude Code natív
-fájlfigyelőjére (`watchPaths`), és ha van olvasatlan üzenet, kiírja a session elején.
-A sajátunkat nem figyeli — az önébresztő hurok volna.
+It checks in to the registry, puts the **others'** files on Claude Code's native file watcher
+(`watchPaths`), and prints any unread messages at the start of the session. It does not watch
+our own file — that would be a self-wake loop.
 
 ## CLI
 
 ```
-sac agents                          ki létezik, ki él
-sac send <szoba> <típus> "szöveg"   bejegyzés (append)
-sac inbox <szoba>                   új üzenetek másoktól (olvasottnak jelöl)
-sac peek <szoba>                    ugyanaz, kurzor-mozgatás nélkül
-sac history <szoba> [n]             visszaolvasás
-sac watch-paths <szoba>             a figyelendő fájlok (hooknak)
+sac agents                          who exists, who is alive
+sac send <room> <type> "text"       entry (append)
+sac inbox <room>                    new messages from others (marks them read)
+sac peek <room>                     the same, without moving the cursor
+sac unread <room> [n]               make the last n messages unread again
+sac history <room> [n]              read back
+sac watch-paths <room>              the files to watch (for the hook)
 ```
 
-## MCP toolok
+## MCP tools
 
-`agents` · `rooms` · `send` · `inbox` · `history` — a `from` mezőt **a szerver tölti ki**,
-tehát egy agent nem tud más nevében üzenetet írni.
+`agents` · `rooms` · `send` · `inbox` · `history` — the `from` field is **filled in by the
+server**, so an agent cannot write a message in someone else's name.
 
-## Miért stdio az alapértelmezett, ha a set-designer HTTP-t használ
+## Why stdio is the default, when our set-designer uses HTTP
 
-A [`set-designer/mcp`](../set-designer/mcp) szerkezetét vettük át — **egy mag
-(`tools.mjs`), két vékony transzport** —, de az alapértelmezett mód más, és ennek oka van:
-a set-designernek *egy globális* állapota van, nekünk viszont tudnunk kell, **ki ír**.
+We took over the structure of our set-designer MCP server — **one core (`tools.mjs`), two
+thin transports** — but the default mode differs, and for a reason: set-designer has *one
+global* state, whereas here we have to know **who writes**.
 
-- **stdio**: a klienst a saját cwd-jével indítja a Claude Code → az identitás a
-  projekt-könyvtárból jön, **ingyen és hamisíthatatlanul**.
-- **HTTP** (`npm run http`, `127.0.0.1:7510`): minden kliens ugyanarra a portra jön, ezért
-  az identitás az **URL-útvonalban** van (`/mcp/consumer-a`) — a projekt MCP-konfigjában él,
-  nem egy paraméterben, amit a modell hívásonként megválaszthatna. Akkor való, ha egy
-  daemon kell, vagy nem-Claude-Code kliens is csatlakozik.
+- **stdio**: Claude Code starts the client with its own cwd → identity comes from the project
+  directory, **for free and unforgeably**.
+- **HTTP** (`npm run http`, `127.0.0.1:7510`): every client arrives at the same port, so
+  identity lives in the **URL path** (`/mcp/web-app`) — that is, in the project's MCP config,
+  not in a parameter the model could choose per call. Use it when you need a daemon, or when
+  a non-Claude-Code client connects too.
 
-## Hatókör — amit ez SZÁNDÉKOSAN nem tud
+## Scope — what this DELIBERATELY cannot do
 
-- **Egy gép.** Nincs auth, nincs hálózat, nincs üzemeltetendő szerver. Több gép (pl. remote
-  munkatárs) **külön protokoll lesz**, nem ennek a kiterjesztése.
-- **Nem hangya-farm.** Nem feladat-kiosztó és nem orchestrator: két (vagy N) *ember által
-  vezetett* session beszélget benne.
+- **One machine.** No auth, no network, no server to operate. Multiple machines (e.g. a
+  remote colleague) **will be a separate protocol**, not an extension of this one.
+- **Not an ant farm.** It is not a task dispatcher and not an orchestrator: two (or N)
+  *human-led* sessions talk in it.
 
-## Előzmény és rokonság
+## Prior art and relatives
 
-A `reuse-before-build` scan (2026-08-03) ezeket találta, mielőtt bármit írtunk volna:
-[AMQ](https://github.com/avivsinai/agent-message-queue) (Maildir, MIT — tőle van az
-atomikus JSON-írás mintája), [patchcord](https://patchcord.dev) (cross-machine, de
-Supabase + szerver kell), `agent-com`, `claude-peers-mcp`. A saját változat melletti
-döntés tudatos: **fejleszthetőség** — a set-core/bug/release integráció egy idegen
-csomagba nem fér bele.
+The `reuse-before-build` scan (2026-08-03) found these before we wrote a line:
+[AMQ](https://github.com/avivsinai/agent-message-queue) (Maildir, MIT — the atomic JSON
+write pattern comes from it), [patchcord](https://patchcord.dev) (cross-machine, but needs
+Supabase + a server), `agent-com`, `claude-peers-mcp`. Deciding on our own version was
+deliberate: **developability** — integrating with set-core's bug/release flow does not fit
+into a third-party package.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

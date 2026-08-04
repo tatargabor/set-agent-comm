@@ -1,10 +1,10 @@
-// A mag: nyilvántartó (ki létezik, ki él) + csatorna (ki mit mondott).
-// Zéró futásidejű függőség — a hookok és a cron is hívják, ahol nincs node_modules.
+// The core: registry (who exists, who is alive) + channel (who said what).
+// Zero runtime dependencies — hooks and cron call this too, where there is no node_modules.
 //
-// Protokoll (kiemelve a consumer-a ↔ set-core csatornából, 400 bejegyzésen bejáratva):
-// EGY FÁJL, EGY ÍRÓ. Mindenki kizárólag a saját nevű fájljába appendel, a többiét olvassa.
-// Így nincs lost update és nem kell lockfile — egy megszakadt session után a lock beragadna,
-// és onnantól senki nem írna.
+// Protocol (extracted from the consumer-a ↔ set-core channel, run in on 400 entries):
+// ONE FILE, ONE WRITER. Everyone appends to their own file only, and reads the others'.
+// That way there is no lost update and no lockfile is needed — after a session dies the
+// lock would stay stuck, and from then on nobody would write.
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync,
          existsSync, renameSync, openSync, fsyncSync, closeSync, statSync } from "node:fs"
@@ -18,21 +18,30 @@ const REGISTRY = join(ROOT, "registry.json")
 const CHANNELS = join(ROOT, "channels")
 const CURSORS = join(ROOT, "cursors.json")
 
-export const TYPES = ["KÉRDÉS", "VÁLASZ", "TÉNY", "KÉRÉS"]
+export const TYPES = ["QUESTION", "ANSWER", "FACT", "REQUEST"]
 
 /**
- * ISO időbélyeg helyi eltolással, EZREDMÁSODPERCES felbontással.
+ * The entry type lives ON DISK, so the pre-English keywords are still out there in existing
+ * channels. Both directions accept them: `send` normalises them, `parse` maps them on read.
+ * A rename is not a reason to make already written entries unreadable.
+ */
+const LEGACY_TYPES = { "KÉRDÉS": "QUESTION", "VÁLASZ": "ANSWER", "TÉNY": "FACT", "KÉRÉS": "REQUEST" }
+export const normalizeType = type => LEGACY_TYPES[type] || type
+
+/**
+ * ISO timestamp with local offset, at MILLISECOND resolution.
  *
- * ⚠ Ez SOHA nem lehet fejből írt érték. Mérve 2026-07-24-én a régi, kézzel vezetett
- * csatornán: a valódi óra 10:50 volt, miközben az egyik fél `T16:50`-et állított (+6 óra),
- * a másik `T12:25`-öt (+1,5 óra) — *mindkét* agent találgatott. A hamis időbélyeg nem
- * kozmetika: az „a másik N perce néma" feltétel ezen áll, tehát vakká teszi a figyelőt.
+ * ⚠ This may NEVER be a value written from memory. Measured on 2026-07-24 on the old,
+ * hand-kept channel: the real clock said 10:50 while one side claimed `T16:50` (+6 hours)
+ * and the other `T12:25` (+1.5 hours) — *both* agents were guessing. A fake timestamp is
+ * not cosmetic: the "the other side has been silent for N minutes" condition rests on it,
+ * so it blinds the watcher.
  *
- * ⚠ A MÁSODPERC NEM ELÉG — mérve a saját füst-tesztünkön. Gépi tempónál a kérdés és a rá
- * adott válasz ugyanabba a másodpercbe esik; azonos időbélyegnél a rendezés a fájlnevek
- * ábécésorrendjére esik vissza, és a `history` a VÁLASZT adja vissza előbb. A szál némán
- * megfordul, és az azt olvasó agent félreérti. A régi, ms nélküli bejegyzések továbbra is
- * helyesen rendeződnek (ugyanabban a másodpercben a `.000` elé kerülnek).
+ * ⚠ SECONDS ARE NOT ENOUGH — measured on our own smoke test. At machine speed a question
+ * and its answer land in the same second; on equal timestamps sorting falls back to the
+ * alphabetical order of file names, and `history` returns the ANSWER first. The thread
+ * silently reverses, and the agent reading it misunderstands. Older entries without ms still
+ * sort correctly (within the same second they come before `.000`).
  */
 export function now(d = new Date()) {
   const p = (n, w = 2) => String(Math.abs(n)).padStart(w, "0")
@@ -44,16 +53,16 @@ export function now(d = new Date()) {
 }
 
 /**
- * Rendezési kulcs. VALÓDI idő szerint, nem string-összehasonlítással: a stringes rendezés
- * az óraátállításkor téved (`…T02:30+02:00` vs `…T02:30+01:00` ugyanaz a szöveg-előtag,
- * de egy óra különbség). Döntetlennél a hívó eredeti sorrendje marad (stabil sort).
+ * Sort key. By REAL time, not by string comparison: string sorting gets it wrong across a
+ * DST switch (`…T02:30+02:00` vs `…T02:30+01:00` share the text prefix but are an hour
+ * apart). On a tie the caller's original order is kept (stable sort).
  */
 const t = ts => Date.parse(ts) || 0
 const byTime = (a, b) => t(a.ts) - t(b.ts)
 
-// ── atomikus JSON írás ────────────────────────────────────────────────────────
-// tmp → fsync → rename. A `writeFileSync` a célfájlra crash esetén csonka JSON-t hagy,
-// és onnantól a nyilvántartás elolvashatatlan — az AMQ-tól ellesett minta.
+// ── atomic JSON write ─────────────────────────────────────────────────────────
+// tmp → fsync → rename. On a crash `writeFileSync` leaves truncated JSON in the target file,
+// and from then on the registry is unreadable — a pattern borrowed from AMQ.
 function writeJson(path, value) {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.tmp.${process.pid}`
@@ -69,11 +78,11 @@ function readJson(path, fallback) {
   try { return JSON.parse(readFileSync(path, "utf8")) } catch { return fallback }
 }
 
-// ── nyilvántartó ──────────────────────────────────────────────────────────────
+// ── registry ──────────────────────────────────────────────────────────────────
 
-/** Egy agent bejelentkezése. Idempotens: ugyanaz a név frissül, nem duplázódik. */
+/** An agent checking in. Idempotent: the same name is updated, not duplicated. */
 export function register({ agent, project, session, room }) {
-  if (!agent) throw new Error("register: `agent` kötelező")
+  if (!agent) throw new Error("register: `agent` is required")
   const reg = readJson(REGISTRY, { agents: {} })
   const prev = reg.agents[agent] || {}
   reg.agents[agent] = {
@@ -90,7 +99,7 @@ export function register({ agent, project, session, room }) {
   return reg.agents[agent]
 }
 
-/** Életjel — a `lastSeen` frissítése új session felvétele nélkül. */
+/** Sign of life — refreshes `lastSeen` without recording a new session. */
 export function heartbeat(agent) {
   const reg = readJson(REGISTRY, { agents: {} })
   if (!reg.agents[agent]) return null
@@ -100,11 +109,11 @@ export function heartbeat(agent) {
 }
 
 /**
- * A nyilvántartott agentek. `silentMinutes`: mennyi ideje nem adott életjelet.
+ * The registered agents. `silentMinutes`: how long since the last sign of life.
  *
- * ⚠ Az `alive` MINDIG null, ha nincs `lastSeen` — nem `false`. A „nem tudjuk" és a
- * „biztosan halott" két különböző állítás, és a hamis `false` a rossz irányba téved:
- * a hívó lemondana egy élő partnerről.
+ * ⚠ `alive` is ALWAYS null when there is no `lastSeen` — never `false`. "We don't know" and
+ * "definitely dead" are two different claims, and a false `false` errs in the wrong
+ * direction: the caller would give up on a live partner.
  */
 export function agents() {
   const reg = readJson(REGISTRY, { agents: {} })
@@ -114,12 +123,12 @@ export function agents() {
   }).sort((x, y) => (x.silentMinutes ?? 1e9) - (y.silentMinutes ?? 1e9))
 }
 
-// ── csatorna ──────────────────────────────────────────────────────────────────
+// ── channel ───────────────────────────────────────────────────────────────────
 
 export const channelDir = room => join(CHANNELS, room)
 export const busFile = (room, agent) => join(channelDir(room), `${agent}.md`)
 
-/** A szoba összes írófájlja — ezt regisztrálja a hook `watchPaths`-ként. */
+/** Every writer file in the room — this is what the hook registers as `watchPaths`. */
 export function busFiles(room) {
   try {
     return readdirSync(channelDir(room)).filter(f => f.endsWith(".md") && f !== "README.md")
@@ -128,16 +137,17 @@ export function busFiles(room) {
 }
 
 /**
- * Bejegyzés hozzáfűzése a saját fájlhoz. APPEND, soha nem teljes újraírás.
+ * Append an entry to your own file. APPEND, never a full rewrite.
  *
- * Ez a kiemelés legkonkrétabb nyeresége: a régi csatornán az agent `Write`/`Edit` toollal
- * írt, ami egy 555 KB-os fájl TELJES újraírása üzenetenként — a fájl a kontextusba kerül,
- * és két egyidejű írás közül az egyik némán elveszik.
+ * This is the most concrete gain of the extraction: on the old channel the agent wrote with
+ * the `Write`/`Edit` tool, which is a FULL rewrite of a 555 KB file per message — the file
+ * lands in the context, and out of two concurrent writes one is silently lost.
  */
-export function send({ room, from, type = "TÉNY", text, re }) {
-  if (!room || !from) throw new Error("send: `room` és `from` kötelező")
-  if (!text?.trim()) throw new Error("send: üres üzenet")
-  if (!TYPES.includes(type)) throw new Error(`send: ismeretlen típus '${type}' (${TYPES.join(" | ")})`)
+export function send({ room, from, type = "FACT", text, re }) {
+  if (!room || !from) throw new Error("send: `room` and `from` are required")
+  if (!text?.trim()) throw new Error("send: empty message")
+  type = normalizeType(type)
+  if (!TYPES.includes(type)) throw new Error(`send: unknown type '${type}' (${TYPES.join(" | ")})`)
   const path = busFile(room, from)
   mkdirSync(dirname(path), { recursive: true })
   const ts = now()
@@ -148,7 +158,7 @@ export function send({ room, from, type = "TÉNY", text, re }) {
   return { ts, room, from, type, path }
 }
 
-/** Egy fájl bejegyzései, legfrissebb alul (ahogy a fájlban állnak). */
+/** The entries of one file, newest at the bottom (as they stand in the file). */
 function parse(path, agent) {
   let raw
   try { raw = readFileSync(path, "utf8") } catch { return [] }
@@ -159,7 +169,7 @@ function parse(path, agent) {
     const m = line.match(re)
     if (m) {
       if (cur) out.push(cur)
-      cur = { ts: m[1], type: m[2].trim(), re: m[3]?.trim() || null, from: agent, lines: [] }
+      cur = { ts: m[1], type: normalizeType(m[2].trim()), re: m[3]?.trim() || null, from: agent, lines: [] }
     } else if (cur) cur.lines.push(line)
   }
   if (cur) out.push(cur)
@@ -167,8 +177,8 @@ function parse(path, agent) {
 }
 
 /**
- * Új bejegyzések MÁSOKTÓL. A saját fájlt kihagyja — magunkat nem olvassuk vissza.
- * `advance: true` esetén a kurzor előre lép (elolvasottnak jelöl).
+ * New entries FROM OTHERS. Skips your own file — we do not read ourselves back.
+ * With `advance: true` the cursor moves forward (marks them read).
  */
 export function inbox({ room, agent, advance = true, limit = 20 }) {
   const cursors = readJson(CURSORS, {})
@@ -179,7 +189,7 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
     const writer = path.split("/").pop().replace(/\.md$/, "")
     if (writer === agent) continue
     for (const e of parse(path, writer)) {
-      // Idő szerint, nem stringesen — ugyanaz a buktató, mint a rendezésnél.
+      // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer])) fresh.push(e)
     }
   }
@@ -194,12 +204,13 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
 }
 
 /**
- * A kurzor VISSZAÁLLÍTÁSA — az utolsó `count` üzenet újra olvasatlan lesz.
+ * REWIND the cursor — the last `count` messages become unread again.
  *
- * Mért igény (2026-08-03, az élesítés napján): egy `inbox` hívás a bemutatóhoz elnyelte az
- * egyetlen üzenetet a szobában, és nem volt mód visszahozni. Az `inbox` léptetése szándékos
- * — de visszavonhatatlannak lenni nem az: az „elolvastam" és az „elveszett" különben
- * megkülönböztethetetlen. (A bejegyzések maguk sosem vesznek el; csak a jelölés áll vissza.)
+ * A measured need (2026-08-03, the day it went live): an `inbox` call made for a demo
+ * swallowed the only message in the room, and there was no way to bring it back. `inbox`
+ * advancing is deliberate — being irreversible is not: otherwise "I have read it" and
+ * "it was lost" are indistinguishable. (The entries themselves are never lost; only the
+ * mark is restored.)
  */
 export function unread({ room, agent, count = 1 }) {
   const cursors = readJson(CURSORS, {})
@@ -221,7 +232,7 @@ export function unread({ room, agent, count = 1 }) {
   return { room, agent, restored: Math.min(count, all.length) }
 }
 
-/** Visszaolvasás — a kurzort NEM mozgatja. */
+/** Reading back — does NOT move the cursor. */
 export function history({ room, from, limit = 20 }) {
   const files = from ? [busFile(room, from)] : busFiles(room)
   const all = files.flatMap(p => parse(p, p.split("/").pop().replace(/\.md$/, "")))
@@ -229,7 +240,7 @@ export function history({ room, from, limit = 20 }) {
   return { room, total: all.length, messages: all.slice(-limit) }
 }
 
-/** Létező szobák. */
+/** Existing rooms. */
 export function rooms() {
   try { return readdirSync(CHANNELS).filter(d => !d.startsWith(".")).sort() } catch { return [] }
 }

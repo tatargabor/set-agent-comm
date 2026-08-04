@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * Streamable-HTTP belépő — egy daemon, bármennyi kliens. A set-designer/mcp/src/http.ts
- * mintája (transport-map `mcp-session-id` szerint, 127.0.0.1-re kötve).
+ * Streamable-HTTP entry point — one daemon, any number of clients. Modelled on
+ * set-designer/mcp/src/http.ts (transport map keyed by `mcp-session-id`, bound to 127.0.0.1).
  *
- * ⚠ AZ IDENTITÁS AZ URL-ÚTVONALBÓL JÖN, nem a tool-hívásból:
+ * ⚠ IDENTITY COMES FROM THE URL PATH, not from the tool call:
  *
- *   claude mcp add --transport http agent-comm http://127.0.0.1:7510/mcp/consumer-a
- *                                                                    ^^^^^^^^ ez az agent
+ *   claude mcp add --transport http agent-comm http://127.0.0.1:7510/mcp/web-app
+ *                                                                    ^^^^^^^ this is the agent
  *
- * Így az agent neve a projekt MCP-konfigjában él, nem egy paraméterben, amit a modell
- * hívásonként megválaszthatna — vagyis egy agent nem tud más nevében üzenetet írni.
- * A `?room=` opcionális alapértelmezett szoba.
+ * That way the agent's name lives in the project's MCP config, not in a parameter the model
+ * could choose per call — meaning an agent cannot write a message in someone else's name.
+ * `?room=` is an optional default room.
  *
- * A stdio mód (src/stdio.mjs) ennél is szigorúbb (cwd-ből jön az identitás) — ez a HTTP mód
- * akkor való, ha egy daemon kell, vagy nem-Claude-Code kliens is csatlakozik.
+ * The stdio mode (src/stdio.mjs) is stricter still (identity comes from the cwd) — this HTTP
+ * mode is for when you need a daemon, or a non-Claude-Code client connects too.
  */
 import { createServer } from "node:http"
 import { randomUUID } from "node:crypto"
@@ -43,7 +43,7 @@ const server = createServer(async (req, res) => {
   const m = url.pathname.match(/^\/mcp\/([A-Za-z0-9._-]+)$/)
   if (!m) {
     return send(res, 404, {
-      error: "Az útvonal /mcp/<agent-név> alakú kell legyen — az agent neve az URL-ben van.",
+      error: "The path must look like /mcp/<agent-name> — the agent's name is in the URL.",
     })
   }
   const agent = m[1]
@@ -61,7 +61,7 @@ const server = createServer(async (req, res) => {
         if (!isInitializeRequest(body)) {
           return send(res, 400, {
             jsonrpc: "2.0", id: null,
-            error: { code: -32000, message: "Nincs érvényes session id; előbb initialize kell" },
+            error: { code: -32000, message: "No valid session id; initialize first" },
           })
         }
         const created = new StreamableHTTPServerTransport({
@@ -69,7 +69,7 @@ const server = createServer(async (req, res) => {
           onsessioninitialized: id => transports.set(id, created),
         })
         created.onclose = () => { if (created.sessionId) transports.delete(created.sessionId) }
-        // Az identitás a KAPCSOLATHOZ kötődik (az URL, amin bejött), nem a hívásokhoz.
+        // Identity is bound to the CONNECTION (the URL it came in on), not to the calls.
         await createMcpServer(() => ({ agent, room })).connect(created)
         transport = created
       }
@@ -78,7 +78,7 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" || req.method === "DELETE") {
       const transport = sessionId ? transports.get(sessionId) : undefined
-      if (!transport) { res.writeHead(400); return res.end("Hiányzó vagy ismeretlen session id") }
+      if (!transport) { res.writeHead(400); return res.end("Missing or unknown session id") }
       return void await transport.handleRequest(req, res)
     }
 
@@ -91,4 +91,4 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[set-agent-comm] Streamable HTTP: http://${HOST}:${PORT}/mcp/<agent>`)
 })
-server.on("error", e => console.error("[set-agent-comm] http hiba:", e?.message ?? e))
+server.on("error", e => console.error("[set-agent-comm] http error:", e?.message ?? e))
