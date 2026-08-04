@@ -89,11 +89,39 @@ function readJson(path, fallback) {
 
 // ── registry ──────────────────────────────────────────────────────────────────
 
-/** An agent checking in. Idempotent: the same name is updated, not duplicated. */
-export function register({ agent, project, session, room }) {
+/**
+ * Does that process still exist? EPERM means it does, but belongs to someone else.
+ *
+ * The pid is what we have: identity comes from the project directory (see stdio.mjs), so the
+ * name cannot tell two sessions apart, but the WRITING PROCESS always can — no configuration,
+ * nothing to mistype.
+ */
+const alive = pid => {
+  try { process.kill(pid, 0); return true } catch (e) { return e.code === "EPERM" }
+}
+
+/**
+ * An agent checking in. Idempotent: the same name is updated, not duplicated.
+ *
+ * ⚠ Measured 2026-08-04 in the `consumer-a-atlas` room: two Claude sessions open in ONE project are
+ * ONE name on the bus, because identity is the directory. That is the right identity — it is
+ * unforgeable — but it was INVISIBLE, and it cost a real conversation. Under a single sender
+ * name the room carried "do not regenerate yet" (11:31) and "already regenerated" (11:46)
+ * from different processes; the receiving agent answered the wrong one and had to say so.
+ *
+ * Two writers is not an error and is not blocked here. It is a fact the bus used to hide, and
+ * hiding it is what caused the harm — the same rule the rest of this file follows: announce,
+ * never swallow.
+ */
+export function register({ agent, project, session, room, pid = process.pid }) {
   if (!agent) throw new Error("register: `agent` is required")
   const reg = readJson(REGISTRY, { agents: {} })
   const prev = reg.agents[agent] || {}
+  const writers = { ...(prev.writers || {}), [pid]: now() }
+  // A session that has exited must drop off the record. A warning that is always on is a
+  // warning nobody reads, and every project would accumulate its own dead history.
+  for (const p of Object.keys(writers)) if (Number(p) !== pid && !alive(Number(p))) delete writers[p]
+
   reg.agents[agent] = {
     ...prev,
     agent,
@@ -101,11 +129,12 @@ export function register({ agent, project, session, room }) {
     session: session ?? prev.session ?? null,
     host: hostname(),
     rooms: [...new Set([...(prev.rooms || []), ...(room ? [room] : [])])],
+    writers,
     firstSeen: prev.firstSeen || now(),
     lastSeen: now(),
   }
   writeJson(REGISTRY, reg)
-  return reg.agents[agent]
+  return { ...reg.agents[agent], coWriters: Object.keys(writers).map(Number).filter(p => p !== pid) }
 }
 
 /** Sign of life — refreshes `lastSeen` without recording a new session. */
@@ -163,8 +192,16 @@ export function send({ room, from, type = "FACT", text, re }) {
   const head = `## ${ts} — ${type}${re ? ` (re: ${re})` : ""}`
   const body = text.trim()
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
-  register({ agent: from, room })
-  return { ts, room, from, type, path }
+  const { coWriters } = register({ agent: from, room })
+  // Told to the WRITER, at the moment of writing: by the time the reader notices that one
+  // sender is contradicting itself, the wrong instruction has already been acted on.
+  const warning = coWriters.length
+    ? `⚠ ${coWriters.length} other live process(es) also write as \`${from}\` (pid ${coWriters.join(", ")}) — ` +
+      `identity is the project directory, so a second session in this project shares your name. ` +
+      `The reader cannot tell your entries from theirs: say which thread you are, and do not ` +
+      `assume an earlier entry under this name was yours.`
+    : undefined
+  return { ts, room, from, type, path, ...(warning && { warning }) }
 }
 
 /** The entries of one file, newest at the bottom (as they stand in the file). */

@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { spawnSync } from "node:child_process"
 
 const ROOT = mkdtempSync(join(tmpdir(), "sac-test-"))
 process.env.SET_AGENT_COMM_DIR = ROOT
@@ -107,4 +108,31 @@ test("SET_AGENT_ROOM may name several rooms, comma-separated", () => {
 test("watch list: the room's writer files, your own can be filtered out", () => {
   const files = store.busFiles("r").map(p => p.split("/").pop())
   assert.deepEqual(files, ["a.md", "b.md"])
+})
+
+test("REGRESSION: a second live process writing under one name is ANNOUNCED", () => {
+  // Measured 2026-08-04 in the `consumer-a-atlas` room. Identity comes from the project directory
+  // (stdio.mjs), which is unforgeable and right — but it means TWO sessions open in one repo
+  // are one name on the bus. Neither the writers nor the reader could see it, and the room
+  // filled with contradicting instructions under a single sender: "do not regenerate yet"
+  // at 11:31 and "already regenerated" at 11:46 were different processes. The receiving
+  // agent answered the wrong one and said so.
+  //
+  // Two writers is not an error and is not forbidden here — it is a fact the bus was hiding.
+  store.register({ agent: "twin", room: "r", pid: process.ppid }) // a live foreign process
+  const out = store.send({ room: "r", from: "twin", type: "FACT", text: "from the second session" })
+
+  assert.ok(out.warning, "the second writer was not told it shares the name")
+  assert.match(out.warning, new RegExp(String(process.ppid)), "the warning must name the other process")
+  assert.match(out.warning, /twin/)
+})
+
+test("a writer whose process is gone is forgotten — no false co-writer warning", () => {
+  // Without this, every session that ever ran in the project stays on the record and the
+  // warning fires forever. A warning that is always on is a warning nobody reads.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid
+  store.register({ agent: "solo", room: "r", pid: dead })
+  const out = store.send({ room: "r", from: "solo", type: "FACT", text: "alone" })
+
+  assert.equal(out.warning, undefined, `a dead pid (${dead}) was reported as a live co-writer`)
 })
