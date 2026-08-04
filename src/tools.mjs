@@ -69,10 +69,16 @@ export function createMcpServer(identify) {
   server.setRequestHandler(CallToolRequestSchema, async req => {
     const a = req.params.arguments || {}
     try {
-      const { agent, room: defaultRoom } = identify(req)
+      const { agent, room: defaultRoom, rooms: configured } = identify(req)
       const room = a.room || defaultRoom
       const needRoom = () => {
         if (room) return room
+        // Several rooms configured → no default, on purpose: see `parseRooms`. Name them, so
+        // the caller does not have to guess which ones it may write to.
+        if (configured?.length > 1)
+          throw new Error(
+            `You are in several rooms (${configured.join(", ")}), so \`room\` is required — ` +
+            `pick the one this message belongs to.`)
         throw new Error(
           `No room given and no default. Existing rooms: ${store.rooms().join(", ") || "(none)"}`)
       }

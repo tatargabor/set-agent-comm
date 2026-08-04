@@ -29,6 +29,15 @@ const LEGACY_TYPES = { "KÉRDÉS": "QUESTION", "VÁLASZ": "ANSWER", "TÉNY": "FA
 export const normalizeType = type => LEGACY_TYPES[type] || type
 
 /**
+ * `SET_AGENT_ROOM` may name SEVERAL rooms, comma-separated ("promo,atlas"): one agent can be
+ * part of more than one conversation. Note what this deliberately does NOT do: with several
+ * rooms configured there is no default room, so `send` without an explicit `room` fails
+ * loudly. Picking "the first one" would send a message into the wrong room silently — and a
+ * message delivered to the wrong audience cannot be taken back.
+ */
+export const parseRooms = value => (value || "").split(",").map(s => s.trim()).filter(Boolean)
+
+/**
  * ISO timestamp with local offset, at MILLISECOND resolution.
  *
  * ⚠ This may NEVER be a value written from memory. Measured on 2026-07-24 on the old,

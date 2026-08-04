@@ -17,17 +17,18 @@ const ROOT = mkdtempSync(join(tmpdir(), "sac-smoke-"))
 const ROOM = "team"
 const ok = m => console.log(`  ✔ ${m}`)
 
-async function connect(agent) {
+async function connect(agent, room = ROOM) {
   const client = new Client({ name: `smoke-${agent}`, version: "0" }, { capabilities: {} })
   await client.connect(new StdioClientTransport({
     command: process.execPath,
     args: [SERVER],
-    env: { ...process.env, SET_AGENT_COMM_DIR: ROOT, SET_AGENT_NAME: agent, SET_AGENT_ROOM: ROOM },
+    env: { ...process.env, SET_AGENT_COMM_DIR: ROOT, SET_AGENT_NAME: agent, SET_AGENT_ROOM: room },
   }))
   return client
 }
+const raw = (c, name, args = {}) => c.callTool({ name, arguments: args })
 const call = async (c, name, args = {}) => {
-  const r = await c.callTool({ name, arguments: args })
+  const r = await raw(c, name, args)
   assert.ok(!r.isError, `${name} returned an error: ${r.content?.[0]?.text}`)
   return JSON.parse(r.content[0].text)
 }
@@ -72,6 +73,20 @@ try {
   assert.equal(h.total, 2)
   assert.deepEqual(h.messages.map(m => m.from), ["web-app", "api-service"])
   ok("history returns both sides in chronological order")
+
+  // An agent in two rooms: no default room, so an unrouted `send` must FAIL rather than
+  // guess. A message delivered to the wrong audience cannot be taken back.
+  const both = await connect("web-app", `${ROOM},design`)
+  const refused = await raw(both, "send", { type: "FACT", text: "which room?" })
+  assert.ok(refused.isError, "send without a room silently picked a room")
+  assert.match(refused.content[0].text, /several rooms \(team, design\)/)
+  ok("in two rooms an unrouted `send` fails loudly, naming both rooms")
+
+  await call(both, "send", { room: "design", type: "FACT", text: "routed by hand" })
+  assert.equal((await call(both, "history", { room: "design" })).total, 1)
+  assert.equal((await call(web, "history")).total, 2, "the message leaked into the other room")
+  ok("with an explicit room it goes through, and the other room stays untouched")
+  await both.close().catch(() => {})
 
   console.log("\n✅ SMOKE TEST GREEN — two agents talked to each other over MCP.\n")
 } finally {

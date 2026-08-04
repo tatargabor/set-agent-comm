@@ -30,11 +30,16 @@ try { payload = JSON.parse(Buffer.concat(chunks).toString() || "{}") } catch { /
 
 const cwd = payload.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd()
 const agent = process.env.SET_AGENT_NAME || basename(cwd)
-const room = process.env.SET_AGENT_ROOM
+// `SET_AGENT_ROOM` may name several rooms, comma-separated — ALL of them are set up here.
+// Registering only the first one would leave the second room's messages unwatched, which
+// from the outside is indistinguishable from "nobody wrote anything".
+const rooms = store.parseRooms(process.env.SET_AGENT_ROOM)
 
 const out = { hookSpecificOutput: { hookEventName: "SessionStart" } }
+const watchPaths = []
+const notices = []
 
-if (room) {
+for (const room of rooms) {
   store.register({ agent, project: cwd, session: payload.session_id, room })
 
   // COLD START (measured on the day it went live). Two gaps, both of which would have
@@ -57,14 +62,18 @@ if (room) {
   // ⚠ Whether directory watching is supported is UNVERIFIED. If Claude Code only accepts
   // files, this entry is at worst ineffective — the per-file watching lives independently
   // of it, so it cannot break anything.
-  out.hookSpecificOutput.watchPaths = [dir, ...watch]
+  watchPaths.push(dir, ...watch)
 
   const { unread } = store.inbox({ room, agent, advance: false })
-  if (unread) {
-    out.hookSpecificOutput.additionalContext =
-      `[set-agent-comm] ${unread} unread message(s) in room "${room}". ` +
-      `Read them with the \`inbox\` tool (or \`sac inbox ${room}\`) before touching the shared work.`
-  }
+  if (unread) notices.push(`${unread} in "${room}" (\`sac inbox ${room}\`)`)
+}
+
+if (watchPaths.length) out.hookSpecificOutput.watchPaths = watchPaths
+if (notices.length) {
+  out.hookSpecificOutput.additionalContext =
+    `[set-agent-comm] Unread messages: ${notices.join(", ")}. ` +
+    `Read them with the \`inbox\` tool before touching the shared work.` +
+    (rooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "")
 }
 
 process.stdout.write(JSON.stringify(out))

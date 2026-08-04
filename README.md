@@ -47,7 +47,7 @@ in by the server**, never by the model — measured on 2026-07-24 on the hand-ke
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 13 unit tests + the two-agent smoke test
+npm test                          # 14 unit tests + the two-agent smoke test
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
@@ -60,6 +60,14 @@ claude mcp add agent-comm -e SET_AGENT_ROOM=team -- set-agent-comm-mcp
 ```
 
 The agent's name comes from the project's directory name (override with `SET_AGENT_NAME`).
+
+### Several rooms
+
+`SET_AGENT_ROOM` accepts a comma-separated list (`-e SET_AGENT_ROOM=team,design`) when one
+project talks to different partners in separate conversations. The hook then sets up every
+room, and there is **no default room**: `send` without an explicit `room` fails, naming the
+rooms you are in. Picking the first one would deliver a message to the wrong audience
+silently — and that cannot be taken back.
 
 ### Push: the SessionStart hook
 

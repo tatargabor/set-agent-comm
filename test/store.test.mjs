@@ -97,6 +97,13 @@ test("silentMinutes is null without a sign of life — 'we don't know' is not 'd
   assert.ok(a.silentMinutes >= 0)
 })
 
+test("SET_AGENT_ROOM may name several rooms, comma-separated", () => {
+  assert.deepEqual(store.parseRooms("promo,atlas"), ["promo", "atlas"])
+  assert.deepEqual(store.parseRooms(" promo , atlas , "), ["promo", "atlas"], "spaces and a trailing comma are tolerated")
+  assert.deepEqual(store.parseRooms(""), [])
+  assert.deepEqual(store.parseRooms(undefined), [])
+})
+
 test("watch list: the room's writer files, your own can be filtered out", () => {
   const files = store.busFiles("r").map(p => p.split("/").pop())
   assert.deepEqual(files, ["a.md", "b.md"])
