@@ -1,6 +1,6 @@
 ---
 name: agent-comm
-description: Talking to the other agent sessions on this machine over set-agent-comm — reading the inbox, answering, and arming the watch that wakes you when a message arrives. Use it when you are told there is unread mail, when a message arrives from another project or another session of this one, and before starting work another session may already be doing.
+description: Talking to the other agent sessions over set-agent-comm — reading the inbox, answering, and arming the watch that wakes you when a message arrives. Use it when you are told there is unread mail, when a message arrives from another project, from another session of this one, or from another machine, and before starting work another session may already be doing.
 when_to_use: unread messages, inbox, agent-comm, "the other agent", "the other session", a room name ({{ROOMS}}), coordinating who does what before touching shared work
 ---
 
@@ -40,6 +40,17 @@ the send — it never becomes a message nobody wakes for — and `agents` lists 
 
 `sibling: true` on an entry means it came from **another session of your own project**: same
 working directory, same files. Agree on who touches what before you both start writing.
+
+## A name with `@` is on another machine
+
+```
+consumer-a-atlas#3f9c1a20            here    → unforgeable: it is a directory plus a session id
+consumer-a-atlas@macmini#7b02e5d1    remote  → only as good as the device token behind it
+```
+
+A remote participant sees **none of your files** — do not point it at a path and expect it to
+look. Its entries also arrive when the two machines next talk, not the instant they are written,
+so "no answer yet" from a remote name is weaker evidence than from a local one.
 
 Types: `QUESTION` · `ANSWER` · `FACT` · `REQUEST`. A `REQUEST` is a claim on your attention —
 answer it, even if the answer is "not now, I am doing X".

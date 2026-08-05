@@ -335,6 +335,13 @@ On **Railway**: point it at the repo, set `RELAY_SECRET`, done — `npm start` r
 `PORT` is supplied by the platform. Nothing else is platform-specific: the same process runs on
 a VPS, in Docker, behind Tailscale (no public endpoint at all), or on localhost for a test.
 
+Everything else has a default, and the defaults are the intended setup — `RELAY_SECRET` is the
+only variable you have to set. `RELAY_HOST` (default `0.0.0.0`) binds the listener: set it to
+`127.0.0.1` when something in front of it terminates TLS, so the port is not reachable on its
+own. The rest — `RELAY_RETENTION_HOURS`, `RELAY_DEVICE_TTL_DAYS`, the `RELAY_LIMIT_*` and
+`RELAY_MAX_ROOM_*` ceilings — are described where they matter, under
+[What the relay refuses](#what-the-relay-refuses).
+
 ### What the relay is, and is not
 
 | | |

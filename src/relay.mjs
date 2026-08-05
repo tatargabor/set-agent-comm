@@ -298,6 +298,7 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[relay] set-agent-comm relay on ${HOST}:${PORT}  ·  epoch ${EPOCH}` +
     `  ·  retention ${Math.round(RETENTION_MS / 3600_000)}h` +
-    `  ·  limits ${LIMITS.join}/min join, ${LIMITS.post}/min post, ${LIMITS.poll}/min poll`)
+    `  ·  limits ${LIMITS.join}/min join, ${LIMITS.post}/min post, ${LIMITS.poll}/min poll` +
+    `  ·  ceiling ${MAX_ROOM_ENTRIES} entries / ${Math.round(MAX_ROOM_BYTES / 1024 / 1024)} MB per room`)
 })
 server.on("error", e => { console.error("[relay]", e?.message ?? e); process.exit(1) })
