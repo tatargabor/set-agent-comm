@@ -4,7 +4,7 @@
 //
 //   sac agents                          who exists, who is alive
 //   sac rooms                           rooms
-//   sac send <room> <type> "text"       entry (append)
+//   sac send <room> <type> "text"       entry (append); --to <name>[,…] addresses it
 //   sac inbox <room>                    new messages from others
 //   sac peek <room>                     the same, but does not move the cursor
 //   sac history <room> [n]              read back
@@ -44,7 +44,18 @@ const seat = { agent: AGENT, session: SESSION }
 const ME = CLAIMS.has(cmd) ? store.claimSeat(seat) : store.seatOf(seat)
 const json = v => console.log(JSON.stringify(v, null, 2))
 
-const fmt = m => `## ${m.ts} — ${m.type}${m.re ? ` (re: ${m.re})` : ""}  [${m.from}]\n${m.text}\n`
+// The addressee is shown where it stands in the file, and `(not for you)` is spelled out:
+// reading an entry aimed at someone else and answering it as if asked is a real failure mode —
+// it happened on the live bus before addressing existed.
+const fmt = m => `## ${m.ts} — ${m.type}${m.to?.length ? ` → ${m.to.join(", ")}` : ""}` +
+  `${m.re ? ` (re: ${m.re})` : ""}  [${m.from}]${m.forMe === false ? "  (not for you)" : ""}\n${m.text}\n`
+
+/** Pull `--flag <value>` out of the argv, so it cannot end up inside the message text. */
+const takeFlag = (argv, name) => {
+  const i = argv.indexOf(name)
+  if (i === -1) return { value: null, rest: argv }
+  return { value: argv[i + 1], rest: [...argv.slice(0, i), ...argv.slice(i + 2)] }
+}
 
 try {
   switch (cmd) {
@@ -72,9 +83,10 @@ try {
     case "rooms": console.log(store.rooms().join("\n") || "(no rooms yet)"); break
 
     case "send": {
-      const [room, type, ...text] = rest
-      if (!room || !text.length) throw new Error('usage: sac send <room> <type> "text"')
-      const out = store.send({ room, from: ME, type, text: text.join(" ") })
+      const { value: to, rest: args } = takeFlag(rest, "--to")
+      const [room, type, ...text] = args
+      if (!room || !text.length) throw new Error('usage: sac send <room> <type> "text" [--to <seat|project>[,…]]')
+      const out = store.send({ room, from: ME, type, text: text.join(" "), to })
       // LOCAL FIRST, then the wire. If the relay is down the entry is already safe on disk and
       // the outbox cursor will carry it next time — a dead relay is a delay, not a lost message.
       json({ ...out, ...(await relayPush(room)) })
@@ -338,17 +350,27 @@ try {
         .flatMap(store.parseRooms)
       if (!watched.length) throw new Error("usage: sac wait [--once] <room> […]   (or set SET_AGENT_ROOM)")
 
+      // ⚠ ONLY WHAT IS ADDRESSED TO US WAKES US. A broadcast (no `to`) counts as addressed to
+      // everyone — that is the default, so nothing that used to wake a session stops doing so.
+      // What this drops is the case measured 2026-08-05 in the consumer-a rooms: a message aimed at
+      // ONE sibling session started a turn in every seat of the room, each of which spent it
+      // establishing that it was not being spoken to. Those entries are NOT lost — they stay
+      // unread, the next `inbox` returns them, and the line below says how many there are.
       const reported = {}
       const check = () => {
         for (const room of watched) {
           const r = store.inbox({ room, agent: ME, advance: false })
-          const last = r.messages.at(-1)
+          const mine = r.messages.filter(m => m.forMe)
+          const last = mine.at(-1)
           if (!last) continue
           if (reported[room] && Date.parse(reported[room]) >= Date.parse(last.ts)) continue
           reported[room] = last.ts
-          const who = [...new Set(r.messages.map(m => m.from))].join(", ")
-          console.log(`[set-agent-comm] ${r.unread} unread in "${room}" from ${who} — ` +
-            `call the \`inbox\` tool (room: ${room}) and answer.`)
+          const who = [...new Set(mine.map(m => m.from))].join(", ")
+          const others = r.unread - r.unreadForMe
+          console.log(`[set-agent-comm] ${r.unreadForMe} unread FOR YOU in "${room}" from ${who} — ` +
+            `call the \`inbox\` tool (room: ${room}) and answer.` +
+            (others ? ` (${others} more ${others === 1 ? "entry is" : "entries are"} addressed to ` +
+              `someone else — read them when you like.)` : ""))
           if (once) process.exit(0)
         }
       }
@@ -411,6 +433,7 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac agents                          who exists, who is alive
   sac rooms                           rooms
   sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
+       [--to <seat|project>[,…]]      … addressed: ONLY they are woken (default: everyone)
   sac inbox <room>                    new messages from others (marks them read)
   sac peek <room>                     the same, without moving the cursor
   sac unread <room> [n]               make the last n messages unread again

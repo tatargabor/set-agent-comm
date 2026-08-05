@@ -135,6 +135,32 @@ try {
   const mh = await call(s1, "history", { room: MONO, from: "mono-repo" })
   assert.equal(mh.total, 2, "history by project name did not return both sessions")
   ok("`history` by project name returns both sessions' entries")
+
+  // ADDRESSING, over MCP — a third seat joins, so the room is no longer a room of two. From
+  // here `to` decides who is woken; everyone still reads everything.
+  const SID3 = "c4e1b0a3-3333-4e61-9f8d-000000000003"
+  const s3 = await connect("mono-repo", MONO, SID3)
+  const aimed = await call(s1, "send", {
+    type: "QUESTION", text: "Are you the window with the atlas open?", to: ["mono-repo#c4e1b0a3"],
+  })
+  assert.deepEqual(aimed.to, ["mono-repo#c4e1b0a3"], "the addressee was not recorded on the entry")
+
+  const target = await call(s3, "inbox")
+  assert.equal(target.unreadForMe, 1, "the addressee was not woken by a message aimed at it")
+  assert.equal(target.messages.at(-1).forMe, true)
+
+  const bystander = await call(s2, "inbox")
+  assert.equal(bystander.unreadForMe, 0, "a bystander seat was woken by someone else's message")
+  assert.equal(bystander.messages.at(-1).text, "Are you the window with the atlas open?",
+    "the entry was hidden from a non-addressee — the room stopped being a room")
+  assert.equal(bystander.messages.at(-1).forMe, false)
+  ok("addressed over MCP: the named seat is woken, the other one only reads along")
+
+  const wrong = await raw(s1, "send", { type: "FACT", text: "x", to: ["mono-rep"] })
+  assert.ok(wrong.isError, "an addressee nobody answers to went through — nothing would wake")
+  assert.match(wrong.content[0].text, /nobody in "mono" is called 'mono-rep'/)
+  ok("a misspelt addressee fails at the writer, naming who could have been meant")
+  await s3.close().catch(() => {})
   await s1.close().catch(() => {})
   await s2.close().catch(() => {})
 

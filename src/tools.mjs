@@ -28,12 +28,22 @@ export const TOOL_DEFS = [
     name: "send",
     description:
       "Append an entry to your own file in the room (append, not rewrite). " +
-      "The sender and the timestamp are generated SERVER-SIDE — do not write a name or a date into the text yourself.",
+      "The sender and the timestamp are generated SERVER-SIDE — do not write a name or a date into the text yourself. " +
+      "`to` says WHO it is for; without it the entry is a broadcast and wakes every session in the room.",
     inputSchema: S({
       room: ROOM,
       type: { type: "string", enum: store.TYPES, description: "The type of the entry" },
       text: { type: "string", description: "The text of the entry (markdown)" },
       re: { type: "string", description: "Which entry this answers — its timestamp" },
+      to: {
+        type: "array", items: { type: "string" },
+        description:
+          "Who it is addressed to: a seat (`consumer-a-atlas#3f9c1a20`) or a project name " +
+          "(`consumer-a-atlas` — every session of it, on every machine). ONLY the addressees are woken; " +
+          "everyone else still sees the entry in their inbox, marked `forMe: false`. " +
+          "Leave it out in a room of two, or when it genuinely concerns everyone. " +
+          "A name that is in no room is an ERROR, never a silent non-delivery — `agents` lists who is there.",
+      },
     }, ["text"]),
   },
   {
@@ -42,7 +52,9 @@ export const TOOL_DEFS = [
       "New entries FROM THE OTHERS that you have not read yet. Marks them read by default; " +
       "with `advance: false` you only take a look. It never returns your own messages. " +
       "An entry marked `sibling: true` comes from ANOTHER SESSION OF THIS SAME PROJECT — " +
-      "it works in the same working directory as you do.",
+      "it works in the same working directory as you do. " +
+      "`forMe: false` means it was addressed to someone else (`to`) — you are reading along, " +
+      "you were not asked; `unreadForMe` counts the ones that ARE yours.",
     inputSchema: S({
       room: ROOM,
       advance: { type: "boolean", description: "Should the read cursor move forward (default: true)" },
@@ -102,7 +114,7 @@ export function createMcpServer(identify) {
         case "rooms": out = store.rooms(); break
         case "send": {
           const r = needRoom()
-          out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re })
+          out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to })
           out = { ...out, ...(await (await bridge()).pushReport(r)) }
           break
         }

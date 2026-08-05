@@ -90,8 +90,11 @@ for (const room of rooms) {
   // of it, so it cannot break anything.
   watchPaths.push(dir, ...watch)
 
-  const { unread } = store.inbox({ room, agent: writer, advance: false })
-  if (unread) notices.push(`${unread} in "${room}" (\`sac inbox ${room}\`)`)
+  // The count that matters at startup is what is FOR US — but the rest is named too, because
+  // "3 unread" and "3 unread, none of them yours" lead to different first moves.
+  const { unread, unreadForMe } = store.inbox({ room, agent: writer, advance: false })
+  if (unread) notices.push(`${unreadForMe} for you in "${room}"` +
+    (unread > unreadForMe ? ` (+${unread - unreadForMe} for others)` : "") + ` (\`sac inbox ${room}\`)`)
 }
 
 if (watchPaths.length) out.hookSpecificOutput.watchPaths = watchPaths

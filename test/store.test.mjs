@@ -315,3 +315,104 @@ test("a writer whose process is gone is forgotten — no false co-writer warning
 
   assert.equal(out.warning, undefined, `a dead pid (${dead}) was reported as a live co-writer`)
 })
+
+// ── addressing: broadcast AND a named addressee ───────────────────────────────
+// Measured 2026-08-05 in the consumer-a rooms (`consumer-a-promo`, `consumer-a-atlas`, `consumer-a-demo`): a message aimed
+// at ONE sibling session woke every seat in the room, and each spent a full turn establishing
+// that it was not being spoken to. A room of two needs no addressing; a room of four does.
+
+test("with no addressee an entry is a BROADCAST — everyone is woken, as before", () => {
+  // Everyone in the room has checked in — that is what the SessionStart hook and the MCP
+  // server both do at startup, and it is what makes a name addressable.
+  for (const who of ["alpha", "beta", "gamma"]) store.register({ agent: who, room: "addr" })
+  store.send({ room: "addr", from: "alpha", type: "FACT", text: "everyone hears this" })
+  const r = store.inbox({ room: "addr", agent: "beta", advance: false })
+  assert.equal(r.unread, 1)
+  assert.equal(r.unreadForMe, 1, "a broadcast did not count as addressed to me")
+  assert.deepEqual(r.messages.at(-1).to, [], "an unaddressed entry must carry an EMPTY list")
+  assert.equal(r.messages.at(-1).forMe, true)
+})
+
+test("an addressed entry is DELIVERED to everyone but is `forMe` only to the addressee", () => {
+  store.send({ room: "addr", from: "alpha", type: "QUESTION", text: "just for beta", to: "beta" })
+  const mine = store.inbox({ room: "addr", agent: "beta", advance: false })
+  const theirs = store.inbox({ room: "addr", agent: "gamma", advance: false })
+
+  assert.equal(mine.messages.at(-1).forMe, true)
+  // Reading is NOT restricted — a reader who cannot see what the others agreed on is how two
+  // sessions end up doing the same work twice. Only the WAKING is.
+  assert.equal(theirs.messages.at(-1).text, "just for beta",
+    "the entry vanished from a non-addressee's inbox — the room stopped being a room")
+  assert.equal(theirs.messages.at(-1).forMe, false)
+  assert.equal(theirs.unreadForMe, 1, "only the earlier broadcast is for gamma")
+  assert.equal(theirs.unread, 2)
+})
+
+test("addressing a PROJECT reaches every session of it", () => {
+  const s1 = store.claimSeat({ agent: "proj", session: "aaaaaaaa" })
+  const s2 = store.claimSeat({ agent: "proj", session: "bbbbbbbb" })
+  store.register({ agent: "proj", session: "aaaaaaaa", room: "addr" })
+  store.register({ agent: "proj", session: "bbbbbbbb", room: "addr" })
+  store.send({ room: "addr", from: "alpha", type: "REQUEST", text: "for the project", to: ["proj"] })
+
+  for (const seat of [s1, s2])
+    assert.equal(store.inbox({ room: "addr", agent: seat, advance: false }).messages.at(-1).forMe,
+      true, `${seat} was not woken by a message addressed to its project`)
+  // …and it is still not for the outsider.
+  assert.equal(store.inbox({ room: "addr", agent: "gamma", advance: false }).messages.at(-1).forMe, false)
+})
+
+test("a seat address wakes THAT session only, not its sibling", () => {
+  const s1 = store.seatOf({ agent: "proj", session: "aaaaaaaa" })
+  const s2 = store.seatOf({ agent: "proj", session: "bbbbbbbb" })
+  store.send({ room: "addr", from: "alpha", type: "QUESTION", text: "which window are you?", to: s2 })
+  assert.equal(store.inbox({ room: "addr", agent: s2, advance: false }).messages.at(-1).forMe, true)
+  assert.equal(store.inbox({ room: "addr", agent: s1, advance: false }).messages.at(-1).forMe, false,
+    "the sibling session was woken by a message addressed to the other one")
+})
+
+test("an addressee NOBODY answers to fails loudly, naming the room's participants", () => {
+  // The one failure this may not commit silently: an entry with the room full of readers and
+  // not one of them woken is indistinguishable from a quiet room.
+  assert.throws(
+    () => store.send({ room: "addr", from: "alpha", type: "FACT", text: "x", to: "beeta" }),
+    e => /nobody in "addr" is called 'beeta'/.test(e.message) && /beta/.test(e.message),
+    "a misspelt addressee went through — that message would have woken no one")
+})
+
+test("the addressee is on the LINE in the file, and survives a re-read", () => {
+  const raw = readFileSync(store.busFile("addr", "alpha"), "utf8")
+  assert.match(raw, /^## \S+ — QUESTION → beta$/m, "the addressee is not in the entry's header")
+  const m = store.history({ room: "addr" }).messages.find(x => x.text === "just for beta")
+  assert.deepEqual(m.to, ["beta"])
+})
+
+test("REGRESSION: entries written BEFORE addressing existed read as broadcasts", () => {
+  // The protocol grew; already written channels may not become unreadable, and an old entry
+  // must not turn into "addressed to nobody" — it was addressed to everyone.
+  const dir = store.channelDir("oldaddr")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, "ancient.md"),
+    "## 2026-08-01T10:00:00.000+02:00 — FACT (re: 2026-08-01T09:00:00.000+02:00)\nno arrow here\n")
+  const m = store.history({ room: "oldaddr" }).messages.at(-1)
+  assert.deepEqual(m.to, [])
+  assert.equal(m.re, "2026-08-01T09:00:00.000+02:00", "the `re:` reference was lost")
+  assert.equal(store.inbox({ room: "oldaddr", agent: "reader", advance: false }).unreadForMe, 1)
+})
+
+test("a remote entry keeps its addressee — the wire is a delivery detail", () => {
+  store.ingest({ room: "addr", writer: "far@mini#c0ffee", ts: "2026-08-05T09:00:00.000+02:00",
+    type: "REQUEST", text: "from another machine", to: ["beta"] })
+  const m = store.history({ room: "addr", from: "far@mini#c0ffee" }).messages.at(-1)
+  assert.deepEqual(m.to, ["beta"])
+  const seen = store.inbox({ room: "addr", agent: "beta", advance: false })
+    .messages.find(x => x.text === "from another machine")
+  assert.equal(seen?.forMe, true, "an entry that arrived over the wire did not wake its addressee")
+})
+
+test("a remote seat is addressable BY ITS PROJECT, machine and session id aside", () => {
+  store.send({ room: "addr", from: "alpha", type: "FACT", text: "hello over there", to: "far" })
+  const r = store.inbox({ room: "addr", agent: "far@mini#c0ffee", advance: false })
+  assert.equal(r.messages.at(-1).forMe, true,
+    "addressing the project did not reach its seat on the other machine")
+})

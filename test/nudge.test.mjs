@@ -70,7 +70,7 @@ test("`sac wait` reports what is ALREADY waiting, then exits with --once", async
     setTimeout(() => { p.kill(); reject(new Error("`sac wait` did not exit — it hung")) }, 10_000)
   })
   assert.equal(out.code, 0)
-  assert.match(out.text, /unread in "team"/)
+  assert.match(out.text, /unread FOR YOU in "team"/)
   assert.match(out.text, /inbox/, "the event does not say what to do about it")
 })
 
@@ -92,4 +92,58 @@ test("the cursor did not move through any of it — `wait` only looks", () => {
   const cursors = JSON.parse(readFileSync(join(ROOT, "cursors.json"), "utf8"))
   assert.equal(cursors[`team::${SEAT}`]?.["web-app#one"], undefined,
     "watching advanced the read cursor, so the message would be lost")
+})
+
+// ── addressing: who is WOKEN ──────────────────────────────────────────────────
+// A room of two needs no addressee; a room of four does. Measured 2026-08-05 in the consumer-a rooms:
+// a message aimed at one sibling session started a turn in every seat, and each spent it
+// establishing that it was not being spoken to. Delivery is unchanged — only waking is.
+// Its own room, so the cursor of "team" above stays untouched.
+const aimEnv = session => ({ ...env(session), SET_AGENT_ROOM: "aim" })
+const aim = (session, ...args) =>
+  spawnSync(process.execPath, [SAC, ...args], { env: aimEnv(session), encoding: "utf8" })
+const aimStop = session => JSON.parse(spawnSync(process.execPath, [STOP], {
+  env: aimEnv(session), encoding: "utf8", input: JSON.stringify({ cwd: "/x", session_id: session }),
+}).stdout || "{}")
+
+for (const s of ["one", "two", "three"]) aim(s, "register", "aim")
+
+test("an entry addressed to ANOTHER seat does not wake this one", async () => {
+  aim("one", "send", "aim", "REQUEST", "Regenerate the atlas, please.", "--to", "web-app#three")
+  const out = await new Promise(resolve => {
+    const p = spawn(process.execPath, [SAC, "wait", "--once", "aim"], { env: aimEnv("two") })
+    let text = ""
+    p.stdout.on("data", d => { text += d })
+    // It is SUPPOSED to keep waiting: the only honest way to assert "no event" is to give it
+    // time and find the output empty.
+    setTimeout(() => { p.kill(); resolve(text) }, 1500)
+  })
+  assert.equal(out, "", `a message addressed to web-app#three woke web-app#two: ${out}`)
+})
+
+test("…nor does it hold that seat's turn open", () => {
+  assert.deepEqual(aimStop("two"), {},
+    "the Stop hook blocked for a message addressed to another seat")
+})
+
+test("it is READABLE all the same — the room did not stop being a room", () => {
+  assert.match(aim("two", "peek", "aim").stdout, /Regenerate the atlas/)
+  assert.match(aim("two", "peek", "aim").stdout, /not for you/,
+    "nothing said the entry was addressed to someone else")
+})
+
+test("an entry addressed TO US blocks, and says how many are not ours", () => {
+  aim("one", "send", "aim", "QUESTION", "Is the draft ready?", "--to", SEAT)
+  const out = aimStop("two")
+  assert.equal(out.decision, "block", "a message addressed to this very seat let the turn end")
+  assert.match(out.reason, /draft/)
+  assert.match(out.reason, /\+1 addressed to someone else/,
+    "the entries waiting for others went unmentioned — that is how one gets forgotten")
+})
+
+test("a misspelt addressee fails the send LOUDLY, at the writer", () => {
+  const r = aim("one", "send", "aim", "FACT", "x", "--to", "web-app#thre")
+  assert.notEqual(r.status, 0, "the send went through — that entry would have woken nobody")
+  assert.match(r.stderr, /nobody in "aim" is called/)
+  assert.match(r.stderr, /web-app#three/, "the error does not name who could have been meant")
 })

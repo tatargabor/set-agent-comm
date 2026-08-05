@@ -38,13 +38,19 @@ const pending = []
 for (const room of store.parseRooms(process.env.SET_AGENT_ROOM)) {
   // `advance: false` — the hook does not read the message on the agent's behalf. Marking it
   // read here would be the worst outcome: the agent would never see what it was nudged about.
-  const { unread, messages } = store.inbox({ room, agent: writer, advance: false })
-  const last = messages.at(-1)
-  if (!unread || !last) continue
+  const { unread, unreadForMe, messages } = store.inbox({ room, agent: writer, advance: false })
+  // Blocking is spent on what is ADDRESSED TO US — a broadcast included, since that is
+  // addressed to everyone. An entry aimed at another seat may not hold this turn open: it is
+  // not ours to answer, it stays unread, and the next `inbox` hands it over anyway.
+  const mine = messages.filter(m => m.forMe)
+  const last = mine.at(-1)
+  if (!unreadForMe || !last) continue
   if (!store.shouldNudge({ room, agent: writer, ts: last.ts })) continue
-  const who = [...new Set(messages.map(m => m.from))].join(", ")
+  const who = [...new Set(mine.map(m => m.from))].join(", ")
   const preview = last.text.replace(/\s+/g, " ").slice(0, 200)
-  pending.push(`${unread} in "${room}" from ${who} — last one (${last.type}): "${preview}"`)
+  const others = unread - unreadForMe
+  pending.push(`${unreadForMe} in "${room}" from ${who} — last one (${last.type}): "${preview}"` +
+    (others ? ` (+${others} addressed to someone else)` : ""))
 }
 
 // `decision: "block"` sends the agent back to work with the reason in hand. The room is named,

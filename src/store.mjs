@@ -39,6 +39,39 @@ export const normalizeType = type => LEGACY_TYPES[type] || type
 export const parseRooms = value => (value || "").split(",").map(s => s.trim()).filter(Boolean)
 
 /**
+ * The addressee list of an entry. Accepts a string ("a, b") and an array alike.
+ *
+ * BROADCAST IS THE EMPTY LIST, and that stays the default deliberately. A room of two needs no
+ * addressing; a room of four does — measured 2026-08-05 in the `consumer-a-promo` / `consumer-a-atlas` /
+ * `consumer-a-demo` rooms, where a message aimed at ONE sibling session woke every seat, and each of
+ * them spent a full turn establishing that it was not being spoken to. The reverse mistake is
+ * worse, though: a message nobody is woken for. Hence the asymmetry — omitting `to` reaches
+ * everyone, while a `to` that names nobody in the room is an ERROR (see `send`).
+ */
+export const parseTo = value =>
+  [...new Set((Array.isArray(value) ? value : String(value ?? "").split(","))
+    .map(s => String(s).trim()).filter(Boolean))]
+
+/**
+ * The names that address THIS seat: the seat itself (`consumer-a#968f89d7`), the project behind
+ * it (`consumer-a` — every session of it, which is the common case: the sender knows who it is
+ * talking to, not which window happens to be open), and for a remote seat the project without
+ * its machine (`consumer-a@mac-mini` → `consumer-a`), so addressing a project reaches it on every
+ * machine.
+ */
+export const addressForms = seat => {
+  const base = seatBase(seat)
+  return new Set([seat, base, base.split("@")[0]].filter(Boolean))
+}
+
+/** Is this entry for me? A broadcast is for everyone — that is what keeps `to` optional. */
+export function isForMe(entry, me) {
+  if (!entry.to?.length) return true
+  const forms = addressForms(me)
+  return entry.to.some(n => forms.has(n))
+}
+
+/**
  * ISO timestamp with local offset, at MILLISECOND resolution.
  *
  * ⚠ This may NEVER be a value written from memory. Measured on 2026-07-24 on the old,
@@ -359,15 +392,28 @@ export function pruneEmptySeats({ room, agent, keep }) {
  * the `Write`/`Edit` tool, which is a FULL rewrite of a 555 KB file per message — the file
  * lands in the context, and out of two concurrent writes one is silently lost.
  */
-export function send({ room, from, type = "FACT", text, re }) {
+export function send({ room, from, type = "FACT", text, re, to }) {
   if (!room || !from) throw new Error("send: `room` and `from` are required")
   if (!text?.trim()) throw new Error("send: empty message")
   type = normalizeType(type)
   if (!TYPES.includes(type)) throw new Error(`send: unknown type '${type}' (${TYPES.join(" | ")})`)
+  // An addressee nobody answers to is the one failure this must not commit silently: it would
+  // be a message with the room full of readers and NOT ONE of them woken — indistinguishable
+  // from a quiet room. So a name that matches no participant fails here, at the writer, where
+  // it can still be corrected, and the error names everyone who could have been meant.
+  const addressed = parseTo(to)
+  if (addressed.length) {
+    const known = participants(room)
+    const unknown = addressed.filter(n => !known.includes(n))
+    if (unknown.length) throw new Error(
+      `send: nobody in "${room}" is called ${unknown.map(n => `'${n}'`).join(", ")} — ` +
+      `the room has: ${known.join(", ") || "(nobody yet)"}. ` +
+      `A misspelt addressee is a message NOBODY is woken for; leave \`to\` out to address everyone.`)
+  }
   const path = busFile(room, from)
   mkdirSync(dirname(path), { recursive: true })
   const ts = now()
-  const head = `## ${ts} — ${type}${re ? ` (re: ${re})` : ""}`
+  const head = `## ${ts} — ${type}${addressed.length ? ` → ${addressed.join(", ")}` : ""}${re ? ` (re: ${re})` : ""}`
   const body = text.trim()
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
   // `from` is a SEAT, so the registry entry belongs to the project behind it. `writer` keeps
@@ -388,7 +434,28 @@ export function send({ room, from, type = "FACT", text, re }) {
       `The reader cannot tell your entries from theirs: say which thread you are, and do not ` +
       `assume an earlier entry under this name was yours.`
     : undefined
-  return { ts, room, from, type, path, ...(warning && { warning }) }
+  return { ts, room, from, type, to: addressed, path, ...(warning && { warning }) }
+}
+
+/**
+ * Who can be addressed in this room — every writer file's seat, every seat of every agent
+ * registered here, and the project names behind them.
+ *
+ * A remote seat carries its machine (`consumer-a@mac-mini#3f9c`); the bare project name is listed
+ * too, because "I am talking to consumer-a" is a statement about the project, not about which of
+ * its machines happens to hold the open window.
+ */
+export function participants(room) {
+  const names = new Set()
+  for (const p of busFiles(room)) { const w = writerOf(p); names.add(w); names.add(seatBase(w)) }
+  const reg = readJson(REGISTRY, { agents: {} })
+  for (const a of Object.values(reg.agents)) {
+    if (!(a.rooms || []).includes(room)) continue
+    names.add(a.agent)
+    for (const s of Object.keys(a.seats || {})) { names.add(s); names.add(seatBase(s)) }
+  }
+  for (const n of [...names]) names.add(n.split("@")[0])
+  return [...names].sort()
 }
 
 /**
@@ -404,13 +471,18 @@ export function send({ room, from, type = "FACT", text, re }) {
  *
  * @returns true if it was new
  */
-export function ingest({ room, writer, ts, type = "FACT", re, text }) {
+export function ingest({ room, writer, ts, type = "FACT", re, text, to }) {
   if (!room || !writer || !ts) throw new Error("ingest: `room`, `writer` and `ts` are required")
   if (!text?.trim()) throw new Error("ingest: empty message")
   const path = busFile(room, writer)
   if (parse(path, writer).some(e => e.ts === ts)) return false
   mkdirSync(dirname(path), { recursive: true })
-  const head = `## ${ts} — ${normalizeType(type)}${re ? ` (re: ${re})` : ""}`
+  // The addressee crosses the wire as written and is NOT validated here: the sender's room
+  // membership is the sender's machine's business, and dropping an entry we cannot resolve
+  // would turn an unknown name into a lost message.
+  const addressed = parseTo(to)
+  const head = `## ${ts} — ${normalizeType(type)}${addressed.length ? ` → ${addressed.join(", ")}` : ""}` +
+    `${re ? ` (re: ${re})` : ""}`
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${text.trim()}\n`)
   noteRemote(writer, room)
   return true
@@ -444,13 +516,17 @@ function parse(path, agent) {
   let raw
   try { raw = readFileSync(path, "utf8") } catch { return [] }
   const out = []
-  const re = /^## (\S+) — ([^\n(]+?)(?:\s*\(re: ([^)]*)\))?\s*$/
+  // `## <ts> — <TYPE> [→ <to>, <to>] [(re: <ts>)]`. The `→` group is OPTIONAL and was added
+  // later: every entry written before addressing existed parses as a broadcast, which is what
+  // it was. An entry may never become unreadable because the protocol grew.
+  const re = /^## (\S+) — ([^\n(→]+?)(?:\s*→\s*([^\n(]+?))?(?:\s*\(re: ([^)]*)\))?\s*$/
   let cur = null
   for (const line of raw.split("\n")) {
     const m = line.match(re)
     if (m) {
       if (cur) out.push(cur)
-      cur = { ts: m[1], type: normalizeType(m[2].trim()), re: m[3]?.trim() || null, from: agent, lines: [] }
+      cur = { ts: m[1], type: normalizeType(m[2].trim()), to: parseTo(m[3]),
+              re: m[4]?.trim() || null, from: agent, lines: [] }
     } else if (cur) cur.lines.push(line)
   }
   if (cur) out.push(cur)
@@ -521,6 +597,12 @@ function seedCursor(room, writer) {
  * messages are delivered, and every seat has its own cursor. Before seats, both were false:
  * the sibling's file counted as "my own file" and the shared cursor meant whichever session
  * read first marked the message read for the other one too.
+ *
+ * ADDRESSING CHANGES NOTHING ABOUT DELIVERY. Every entry is returned, including one addressed
+ * to someone else — `forMe: false` marks it, and the room stays readable to everyone in it,
+ * which is the point of a room. What the addressee decides is who gets WOKEN (`sac wait`, the
+ * Stop hook); reading is never the thing we restrict, because a reader who cannot see what the
+ * others agreed on is how two sessions end up doing the same work twice.
  */
 export function inbox({ room, agent, advance = true, limit = 20 }) {
   const cursors = readJson(CURSORS, {})
@@ -536,7 +618,7 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push(seatBase(writer) === base ? { ...e, sibling: true } : e)
+        fresh.push({ ...e, forMe: isForMe(e, agent), ...(seatBase(writer) === base && { sibling: true }) })
     }
   }
   fresh.sort(byTime)
@@ -546,7 +628,16 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
     cursors[key] = seen
     writeJson(CURSORS, cursors)
   }
-  return { room, agent, unread: fresh.length, truncated: fresh.length - shown.length, messages: shown }
+  // `unreadForMe` is counted over ALL fresh entries, not just the page shown — the wake-up
+  // paths (`sac wait`, the Stop hook) decide on this number, and deciding on a truncated
+  // count is how a message addressed to you would fail to wake you.
+  return {
+    room, agent,
+    unread: fresh.length,
+    unreadForMe: fresh.filter(e => e.forMe).length,
+    truncated: fresh.length - shown.length,
+    messages: shown,
+  }
 }
 
 /**

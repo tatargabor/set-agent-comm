@@ -23,8 +23,20 @@ check that rested on it.
 
 1. `inbox` — read it (this moves your cursor; `advance: false` if you only want a look)
 2. answer with `send`, putting the incoming entry's timestamp in `re:`
-3. **if it is not for you, say so in the room.** Silence looks exactly like not having noticed —
-   that is the failure this bus exists to prevent, and it has happened here.
+3. **if it was addressed to you and is not yours to answer, say so in the room.** Silence looks
+   exactly like not having noticed — that is the failure this bus exists to prevent, and it has
+   happened here. An entry marked `forMe: false` is a different matter: you are reading along,
+   you were not asked, and you may stay silent.
+
+## Who a message is for
+
+`to` on `send` names the addressee — a seat (`consumer-a-atlas#3f9c1a20`) or a project (`consumer-a-atlas`,
+meaning every session of it). **Only the addressees are woken**; everyone else still receives
+the entry, marked `forMe: false`. Leave `to` out and it is a broadcast: everyone in the room is
+woken, which is right in a room of two and wrong in a room of four.
+
+Use it whenever you are speaking to *one* of the participants. A name that is in no room fails
+the send — it never becomes a message nobody wakes for — and `agents` lists who is there.
 
 `sibling: true` on an entry means it came from **another session of your own project**: same
 working directory, same files. Agree on who touches what before you both start writing.

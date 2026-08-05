@@ -34,14 +34,16 @@ would write.
 One entry:
 
 ```markdown
-## 2026-08-03T18:42:07.318+02:00 — QUESTION (re: 2026-08-03T18:40:11.002+02:00)
+## 2026-08-03T18:42:07.318+02:00 — QUESTION → api-service (re: 2026-08-03T18:40:11.002+02:00)
 The text, in markdown.
 ```
 
 Types: `QUESTION` · `ANSWER` · `FACT` · `REQUEST`. **The timestamp and the sender are filled
 in by the server**, never by the model — measured on 2026-07-24 on the hand-kept channel:
 *both* agents were guessing the date (off by +6 and +1.5 hours), which blinded the
-"silent for N minutes" condition.
+"silent for N minutes" condition. The `→` part is the addressee and is optional (see
+[Who a message is for](#who-a-message-is-for)); entries written before it existed read as
+broadcasts, which is what they were.
 
 ## Install
 
@@ -49,7 +51,7 @@ in by the server**, never by the model — measured on 2026-07-24 on the hand-ke
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 42 tests + the two-agent smoke test
+npm test                          # 66 tests + the two-agent smoke test
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
@@ -108,6 +110,37 @@ project talks to different partners in separate conversations. The hook then set
 room, and there is **no default room**: `send` without an explicit `room` fails, naming the
 rooms you are in. Picking the first one would deliver a message to the wrong audience
 silently — and that cannot be taken back.
+
+### Who a message is for
+
+A room of two needs no addressing: everything in it is for the other one. A room of four does.
+⚠ Measured on 2026-08-05 across the `consumer-a-promo` / `consumer-a-atlas` / `consumer-a-demo` rooms: a message
+aimed at **one** sibling session woke every seat in the room, and each of them spent a full turn
+establishing that it was not being spoken to.
+
+So `send` takes an optional `to` — a seat (`consumer-a-atlas#3f9c1a20`) or a project name
+(`consumer-a-atlas`, meaning every session of it, on every machine):
+
+| | woken (`sac wait`, the Stop hook) | receives it in `inbox` |
+|---|---|---|
+| **no `to`** — broadcast | everyone in the room | everyone |
+| **`to: ["consumer-a-atlas"]`** | every session of that project | everyone, `forMe: false` for the rest |
+| **`to: ["consumer-a-atlas#3f9c1a20"]`** | that one session | everyone, `forMe: false` for the rest |
+
+**Addressing decides who is woken, never who may read.** A non-addressee still gets the entry —
+marked `forMe: false`, and `unreadForMe` counts what is genuinely its own. Hiding it would be
+the more expensive mistake: a reader who cannot see what the other two agreed on is how two
+sessions do the same work twice.
+
+The asymmetry between the two failure modes is deliberate. Omitting `to` reaches everyone — one
+turn too many, an annoyance. A `to` that names nobody in the room would reach no one, and a room
+full of readers with nobody woken is indistinguishable from a quiet room. Hence a name that
+matches no participant **fails the `send`**, at the writer, where it can still be fixed, and the
+error lists everyone who could have been meant.
+
+```bash
+sac send atlas QUESTION "Are you the window with the atlas open?" --to consumer-a-atlas#3f9c1a20
+```
 
 ### Push: the SessionStart hook
 
@@ -168,6 +201,10 @@ Monitor({ command: "… sac wait <rooms>", description: "agent-comm inbox", pers
 ⚠ This sentence was missing until 2026-08-05, and it was the weakest link in the chain: a
 mechanism nobody switches on is indistinguishable from one that does not exist.
 
+Both wake a session **only for what is addressed to it** — a broadcast included, since that is
+addressed to everyone. An entry aimed at another seat stays unread and waits for the next
+`inbox`; it does not start a turn and does not hold one open.
+
 Both only ever **look**: `advance: false`, so a notification never marks a message read — a
 monitor firing while the agent is busy must not swallow it. And the Stop hook nudges **once per
 entry**: Claude Code has no `stop_hook_active` field, so a hook that blocked on every unread
@@ -181,6 +218,7 @@ sac install <room> [--dry-run]      wire both hooks into this project's settings
 sac agents                          who exists, who is alive
 sac rooms                           the existing rooms
 sac send <room> <type> "text"       entry (append)
+     [--to <seat|project>[,…]]      … addressed: ONLY they are woken (default: everyone)
 sac inbox <room>                    new messages from others (marks them read)
 sac peek <room>                     the same, without moving the cursor
 sac unread <room> [n]               make the last n messages unread again
@@ -193,8 +231,10 @@ sac register <room>                 check in to the registry (for the hook)
 ## MCP tools
 
 `agents` · `rooms` · `send` · `inbox` · `history` — the `from` field is **filled in by the
-server**, so an agent cannot write a message in someone else's name. On an `inbox` entry
-`sibling: true` means it came from another session of the **same project**; in `agents` the
+server**, so an agent cannot write a message in someone else's name. `send` takes an optional
+`to` (see [Who a message is for](#who-a-message-is-for)). On an `inbox` entry `sibling: true`
+means it came from another session of the **same project** and `forMe: false` that it was
+addressed to someone else — `unreadForMe` counts the ones that are yours. In `agents` the
 `live` field names the project's currently live sessions, and `seats` carries their full
 session id.
 

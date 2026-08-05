@@ -90,7 +90,9 @@ export async function push({ room, log = () => {} }) {
         id: entryId(from, e.ts),
         writer: from,
         ts: e.ts,
-        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text })),
+        // The addressee travels INSIDE the ciphertext, with the text: who a message is for is
+        // as much the room's business as what it says, and the relay is not entitled to either.
+        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text, to: e.to })),
         _writer: writer,
       })
     }
@@ -151,7 +153,8 @@ export async function pull({ room, wait = 25, log = () => {} }) {
       log(`⚠ could not decrypt an entry from ${e.writer} in "${room}" — wrong room key?`)
       continue
     }
-    if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text })) written++
+    if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text,
+                 to: body.to })) written++
   }
   save(room, { cursor: out.seq, epoch: out.epoch })
   if (written) log(`received ${written} in ${room}`)
