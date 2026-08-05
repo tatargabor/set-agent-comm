@@ -51,19 +51,34 @@ broadcasts, which is what they were.
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 66 tests + the two-agent smoke test
+npm test                          # 69 tests + the two-agent smoke test
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
-Once per project, in **stdio** mode (this is the default):
+Once per project, in **stdio** mode (this is the default). ⚠ From here on the directory changes:
+these two lines belong to **the project you want on the bus**, not to this repo. **Type them
+into that project's own Claude Code session**, with the `!` prefix, which runs them right there:
 
 ```bash
-cd ~/code/web-app
-claude mcp add agent-comm -e SET_AGENT_ROOM=team -- set-agent-comm-mcp
+! claude mcp add agent-comm -e SET_AGENT_ROOM=team -- set-agent-comm-mcp
 # without a global install: -- node /path/to/set-agent-comm/src/stdio.mjs
 
-sac install team                  # the two hooks that make sure a message is NOTICED
+! sac install team                # the two hooks that make sure a message is NOTICED
 ```
+
+Why from inside the session, rather than from any terminal: **the working directory is the
+identity here.** `sac install` takes the agent's name from it, and bakes it — together with the
+absolute path of every hook and of the `sac wait` command inside the skill — into
+`.claude/settings.json` and `.claude/skills/agent-comm/`. In the session that directory is the
+project by construction. In a terminal it is wherever you happen to be standing, and a hook
+wired in under the wrong name does not fail: it fires, and checks in as somebody else. (From a
+plain terminal it works just as well — `cd` into the project first, and read back the name it
+printed.)
+
+It takes effect **at the next session start** — a `SessionStart` hook is read when a session
+begins, so restart or `/resume` afterwards. `sac install` prints exactly that, and the MCP line
+to go with it. (Both commands are safe to re-run: `install` updates its own entry instead of
+adding a second copy, and takes a backup before it writes.)
 
 The agent's name comes from the project's directory name (override with `SET_AGENT_NAME`).
 
@@ -173,10 +188,11 @@ answers:
 | **working** | `Stop` hook (`hooks/stop.mjs`) | it may not end the turn with unread mail — `decision: "block"` sends it back with the room named |
 | **idle** | `sac wait` inside a `Monitor` | the only thing that **starts a new turn**: every message is an event in the chat |
 
-Both hooks are wired in by one command, run in the project:
+Both hooks are wired in by one command, run in the project — from its own Claude Code session,
+for the reason given under [Install](#install):
 
 ```bash
-sac install team                  # --dry-run first if you want to see it
+! sac install team                # --dry-run first if you want to see it
 ```
 
 It adds them to `.claude/settings.json`, leaves every other hook alone, takes a backup before
@@ -216,7 +232,7 @@ saying something new.
 ```
 sac install <room> [--dry-run]      wire both hooks into this project's settings.json
 sac agents                          who exists, who is alive
-sac rooms                           the existing rooms
+sac rooms                           the rooms — and how far each one reaches
 sac send <room> <type> "text"       entry (append)
      [--to <seat|project>[,…]]      … addressed: ONLY they are woken (default: everyone)
 sac inbox <room>                    new messages from others (marks them read)
@@ -226,6 +242,12 @@ sac history <room> [n]              read back
 sac wait [--once] [room…]           block until a message arrives (for a Monitor)
 sac watch-paths <room>              the files to watch (for the hook)
 sac register <room>                 check in to the registry (for the hook)
+
+sac relay use <url> --secret <s>    point this machine at a relay (see Across machines)
+sac relay status                    the relay, and the rooms bridged to it
+sac invite <room> --for <device>    mint an invite for ONE room  [--ttl <seconds>]
+sac join sac-join:<code>            accept one, on the other machine
+sac sync [room…]                    push and pull once, without blocking
 ```
 
 ## MCP tools
@@ -280,15 +302,27 @@ downstream had to learn that a message can come from another machine.
 ```bash
 # on the machine that operates the relay
 sac relay use https://comm.example.com --secret $RELAY_SECRET
-sac invite atlas --for "macmini"        # → sac-join:…  (valid 15 minutes)
+sac invite atlas --for "zoli-mbp"       # → sac-join:…  (valid 15 minutes; --ttl <seconds>)
 
-# on the other machine
+# on the other machine — nothing else is needed, not the relay secret
 sac join sac-join:…
 sac install atlas                       # hooks + skill, as locally
 ```
 
+**An invite reaches exactly one room.** The token it turns into is stamped with `atlas`, and the
+relay checks that stamp on every call: with it you can neither post into nor read another room
+on the same relay (`403`, naming the room the token is actually for). This is what makes it
+sane to invite a colleague onto your own relay — they arrive in the room you meant, and the
+rest of it stays invisible to them. `sac rooms` shows, on each machine, which rooms it can
+reach and under what name.
+
 ⚠ **Hand the invite over out of band** (Signal, a call). It carries the room key, and that key
 is what keeps the relay unable to read the room — send it *through* the relay and that is gone.
+
+The **relay secret never travels**: it lives only on the machine that mints invites (in
+`~/.local/share/set-agent-comm/relays.json`, mode 600) and the joining device never sees it.
+What the device gets is a token good for **365 days** (`RELAY_DEVICE_TTL_DAYS`) — long enough
+that working together is not interrupted by an expiry, which was the point.
 
 ### Running the relay
 
@@ -309,6 +343,24 @@ a VPS, in Docker, behind Tailscale (no public endpoint at all), or on localhost 
 | **not an archive** | 7-day retention (`RELAY_RETENTION_HOURS`). An archive would have to be operated — which is what we are avoiding |
 | **not a reader** | bodies are AES-GCM ciphertext; the room key never leaves the participants' machines. The relay decides **who** may post, never learns **what** — this is measured, not asserted (`test/relay.test.mjs`) |
 | **stateless** | tokens are HMAC-signed, so there is no database and no volume. The cost, stated: a single token cannot be revoked on its own — rotating `RELAY_SECRET` invalidates all of them and everyone re-joins |
+
+### What the relay refuses
+
+A relay on the open internet is reachable by everyone, so the little it does, it does before
+anything else:
+
+| | |
+|---|---|
+| **an unencrypted URL** | the device token travels in a header on *every* call, so the client refuses plain `http://` outright — an invite cannot talk it into one either. The exception is a link that is already encrypted or never leaves the house: loopback, `.local`, `.ts.net` (Tailscale), and RFC1918 / CGNAT addresses |
+| **a flood** | per minute: **10 joins per IP**, **120 posts** and **60 polls per device token** (`RELAY_LIMIT_JOIN` / `_POST` / `_POLL`), answered with `429` and a `retry-after`. A long poll is one request for its whole 25 seconds, so a normal participant never comes near it |
+| **another room** | a device token carries the room it was issued for; a call about any other room ends in `403` before the body is read |
+| **another name** | the namespace is in the token too, so a device cannot post as `web-app@some-other-machine` |
+| **a replayed invite** | an invite is single-use — its `jti` is remembered until it would have expired anyway |
+
+What it deliberately does **not** protect against: someone who holds a valid device token can
+flood their own room within the limits, and a token cannot be revoked one by one (that is the
+price of being stateless — see the table above). Both are answered by rotating `RELAY_SECRET`,
+after which everyone re-joins.
 
 ### Names say how much to trust them
 

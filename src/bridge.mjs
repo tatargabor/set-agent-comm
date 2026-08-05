@@ -30,6 +30,32 @@ export function writeConfig(cfg) {
   try { chmodSync(CONFIG, 0o600) } catch { /* best effort, e.g. on a filesystem without modes */ }
 }
 
+/**
+ * A relay URL is only accepted over HTTPS — or over a link that is already encrypted end to
+ * end anyway (loopback, a LAN, a Tailscale tailnet).
+ *
+ * The device token travels in a header on every single call. Over plain `http://` on the open
+ * internet, anyone on the path reads it once and can post into the room from then on. They
+ * still could not FORGE a message — that takes the room key, which never leaves these machines
+ * — but they could flood it, and the fix is one line: refuse the URL.
+ */
+export function assertSecureUrl(url) {
+  let u
+  try { u = new URL(url) } catch { throw new Error(`not a URL: ${url}`) }
+  if (u.protocol === "https:") return u.origin
+  const h = u.hostname
+  const parts = h.split(".")
+  const isPrivate = h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]" ||
+    h.endsWith(".local") || h.endsWith(".ts.net") ||          // mDNS, Tailscale MagicDNS
+    h.startsWith("192.168.") || h.startsWith("10.") ||         // RFC1918
+    (parts[0] === "172" && +parts[1] >= 16 && +parts[1] <= 31) ||
+    (parts[0] === "100" && +parts[1] >= 64 && +parts[1] <= 127) // Tailscale CGNAT range
+  if (u.protocol === "http:" && isPrivate) return u.origin
+  throw new Error(
+    `refusing ${u.protocol}//${h}: the device token would travel unencrypted. ` +
+    `Use https://, or plain http only on loopback, a LAN or a Tailscale address.`)
+}
+
 /** This machine's name in remote writer names (`web-app@macmini#3f9c1a20`). */
 export const deviceName = () =>
   (process.env.SET_AGENT_DEVICE || hostname().split(".")[0]).replace(/[^A-Za-z0-9._-]/g, "-")

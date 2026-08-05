@@ -80,7 +80,20 @@ try {
       }
       break
     }
-    case "rooms": console.log(store.rooms().join("\n") || "(no rooms yet)"); break
+    case "rooms": {
+      // Where each room REACHES, not just its name — a room you were invited to is listed
+      // before its first message, and a local one says plainly that it stops at this machine.
+      const { readConfig } = await import("../src/bridge.mjs")
+      const remote = readConfig().rooms || {}
+      const all = [...new Set([...store.rooms(), ...Object.keys(remote)])].sort()
+      if (!all.length) { console.log("(no rooms yet)"); break }
+      for (const room of all) {
+        console.log(remote[room]
+          ? `${room.padEnd(18)} relay   as ${AGENT}@${remote[room].namespace}   ${remote[room].url}`
+          : `${room.padEnd(18)} local   (this machine only)`)
+      }
+      break
+    }
 
     case "send": {
       const { value: to, rest: args } = takeFlag(rest, "--to")
@@ -130,7 +143,9 @@ try {
         }
         // The secret is what mints invites, so it lives only on the machine that hands them
         // out. Devices that merely join never see it — they get a token instead.
-        cfg.relay = { url: url.replace(/\/$/, ""), secret }
+        // HTTPS is checked HERE, at configuration time: a token that has already been sent in
+        // clear cannot be un-sent, so the refusal has to come before the first call.
+        cfg.relay = { url: bridge.assertSecureUrl(url), secret }
         cfg.rooms ||= {}
         bridge.writeConfig(cfg)
         console.log(`relay: ${cfg.relay.url}\nstored in ${store.ROOT}/relays.json (mode 600)`)
@@ -199,6 +214,7 @@ try {
       if (!code?.startsWith("sac-join:")) throw new Error("usage: sac join sac-join:<code> [--as <device>]")
       const bridge = await import("../src/bridge.mjs")
       const { u, r, c, k } = JSON.parse(Buffer.from(code.slice("sac-join:".length), "base64url"))
+      bridge.assertSecureUrl(u)      // an invite may not talk us into an unencrypted relay
       const device = asName || bridge.deviceName()
       const res = await fetch(`${u}/join`, {
         method: "POST", headers: { "content-type": "application/json" },
@@ -431,7 +447,7 @@ try {
 agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   ·   store: ${store.ROOT}
 
   sac agents                          who exists, who is alive
-  sac rooms                           rooms
+  sac rooms                           rooms — and how far each one reaches
   sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
        [--to <seat|project>[,…]]      … addressed: ONLY they are woken (default: everyone)
   sac inbox <room>                    new messages from others (marks them read)
@@ -441,7 +457,14 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac install <room> [--dry-run]      wire both hooks into this project's settings.json
   sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)
   sac watch-paths <room>              the files to watch (for the hook)
-  sac register <room>                 check in to the registry`)
+  sac register <room>                 check in to the registry
+
+across machines (optional — see the README):
+  sac relay use <url> --secret <s>    point this machine at a relay
+  sac relay status                    the relay, and the rooms bridged to it
+  sac invite <room> --for <device>    mint an invite for ONE room  [--ttl <seconds>]
+  sac join sac-join:<code>            accept one, on the other machine
+  sac sync [room…]                    push and pull once, without blocking`)
       process.exit(cmd ? 1 : 0)
   }
 } catch (e) {

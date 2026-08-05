@@ -5,6 +5,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import * as store from "./store.mjs"
+import { seatBase } from "./store.mjs"
 
 const S = (props, required = []) =>
   ({ type: "object", properties: props, required, additionalProperties: false })
@@ -23,7 +24,14 @@ export const TOOL_DEFS = [
       "several sessions are open in that project — address the one you mean.",
     inputSchema: S({}),
   },
-  { name: "rooms", description: "The list of existing channels (rooms).", inputSchema: S({}) },
+  {
+    name: "rooms",
+    description:
+      "Which rooms exist and how far each one reaches: `local` is on this machine only, " +
+      "`relay` also reaches other machines (with the name you write under there). A room you " +
+      "were invited to appears here even before its first message.",
+    inputSchema: S({}),
+  },
   {
     name: "send",
     description:
@@ -111,7 +119,17 @@ export function createMcpServer(identify) {
       let out
       switch (req.params.name) {
         case "agents": out = store.agents(); break
-        case "rooms": out = store.rooms(); break
+        case "rooms": {
+          // Local AND invited: a room you hold a token for must be listed before its first
+          // message too, or an agent cannot tell that it may speak there at all.
+          const cfg = (await bridge()).readConfig()
+          const remote = cfg.rooms || {}
+          out = [...new Set([...store.rooms(), ...Object.keys(remote)])].sort().map(room =>
+            remote[room]
+              ? { room, reach: "relay", writingAs: `${seatBase(agent).split("@")[0]}@${remote[room].namespace}`, relay: remote[room].url }
+              : { room, reach: "local" })
+          break
+        }
         case "send": {
           const r = needRoom()
           out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to })

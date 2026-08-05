@@ -45,7 +45,51 @@ if (!SECRET) {
 
 const EPOCH = randomUUID()
 const rooms = new Map()          // room -> { seq, entries: [], waiters: [] }
-const usedInvites = new Set()    // best effort, see /join
+const usedInvites = new Map()    // jti -> expiry (see /join)
+
+// ── rate limiting ─────────────────────────────────────────────────────────────
+/**
+ * The endpoint is on the public internet the moment it is deployed, so the question is not
+ * whether someone will knock, but what happens when they do.
+ *
+ * What it does NOT defend against, so that nobody reads more into it than it gives: forging an
+ * entry (the room key does that — see crypto.mjs), and a determined distributed flood. What it
+ * DOES: a stolen device token cannot fill the room in seconds, and `/join` cannot be hammered.
+ * Guessing a token or an invite is hopeless anyway — both are HMAC-SHA256 — but "hopeless at
+ * unlimited speed" is still a free bandwidth bill.
+ *
+ * In memory, per minute, keyed by token where there is one and by IP where there is not.
+ * Nothing to configure, nothing to operate — the same rule as the rest of the relay.
+ */
+const LIMITS = {
+  join: parseInt(process.env.RELAY_LIMIT_JOIN || "10", 10),       // per minute, per IP
+  post: parseInt(process.env.RELAY_LIMIT_POST || "120", 10),      // per minute, per token
+  poll: parseInt(process.env.RELAY_LIMIT_POLL || "60", 10),       // per minute, per token
+}
+const hits = new Map()
+
+function overLimit(kind, key) {
+  const now = Date.now()
+  const slot = Math.floor(now / 60_000)
+  const id = `${kind}:${key}:${slot}`
+  // Sweep whenever the map grows: a leak on a public endpoint is a slow outage.
+  if (hits.size > 5000) for (const k of hits.keys()) if (!k.endsWith(`:${slot}`)) hits.delete(k)
+  const n = (hits.get(id) || 0) + 1
+  hits.set(id, n)
+  return n > LIMITS[kind]
+}
+
+const tooMany = (res, retryAfter = 60) => {
+  res.writeHead(429, { "content-type": "application/json", "retry-after": String(retryAfter) })
+  res.end(JSON.stringify({ error: "rate limit exceeded — slow down" }))
+}
+
+/** The caller's address. Behind a platform proxy the socket address is the proxy's. */
+const clientIp = req => {
+  const fwd = req.headers["x-forwarded-for"]
+  return (Array.isArray(fwd) ? fwd[0] : fwd || "").split(",")[0].trim() ||
+    req.socket.remoteAddress || "unknown"
+}
 
 /** The device namespace inside a writer name: `web-app@macmini#3f9c1a20` → `macmini`. */
 const nsOf = writer => (String(writer).split("@")[1] || "").split("#")[0]
@@ -96,6 +140,9 @@ const server = createServer(async (req, res) => {
 
     // ── join: an invite code becomes a lasting device token ────────────────────
     if (req.method === "POST" && path === "/join") {
+      // Per IP: an invite is HMAC-signed, so guessing is hopeless — but hopeless at unlimited
+      // speed still costs bandwidth, and a public endpoint gets knocked on.
+      if (overLimit("join", clientIp(req))) return tooMany(res)
       const { code, device } = await readBody(req)
       const claims = verify(SECRET, code)
       if (!claims || claims.kind !== "invite") return json(res, 401, { error: "invalid or expired invite" })
@@ -103,7 +150,10 @@ const server = createServer(async (req, res) => {
       // could be replayed until it expires. Stated rather than hidden — the window is the
       // invite's TTL (15 minutes by default), and the fix if it matters is a shorter TTL.
       if (usedInvites.has(claims.jti)) return json(res, 409, { error: "invite already used" })
-      usedInvites.add(claims.jti)
+      // Kept only until the invite would expire anyway — beyond that the entry proves nothing,
+      // and an unbounded set on a public endpoint is a slow leak.
+      for (const [jti, exp] of usedInvites) if (exp < Date.now()) usedInvites.delete(jti)
+      usedInvites.set(claims.jti, claims.exp * 1000)
       const namespace = String(device || claims.device || "device").replace(/[^A-Za-z0-9._-]/g, "-")
       return json(res, 200, {
         token: issue(SECRET, { kind: "device", room: claims.room, ns: namespace }, DEVICE_TTL),
@@ -130,6 +180,10 @@ const server = createServer(async (req, res) => {
       const claims = verify(SECRET, bearer(req))
       if (!claims || claims.kind !== "device") return json(res, 401, { error: "invalid or expired token" })
       if (claims.room !== m[1]) return json(res, 403, { error: `this token is for room '${claims.room}'` })
+      // Per token, not per IP: a stolen token is the realistic threat here, and it may not be
+      // able to fill the room faster than the participants can notice.
+      if (overLimit(req.method === "POST" ? "post" : "poll", `${claims.ns}:${claims.room}`))
+        return tooMany(res)
       const r = room(m[1])
 
       // ── post ────────────────────────────────────────────────────────────────
@@ -192,6 +246,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[relay] set-agent-comm relay on ${HOST}:${PORT}  ·  epoch ${EPOCH}` +
-    `  ·  retention ${Math.round(RETENTION_MS / 3600_000)}h`)
+    `  ·  retention ${Math.round(RETENTION_MS / 3600_000)}h` +
+    `  ·  limits ${LIMITS.join}/min join, ${LIMITS.post}/min post, ${LIMITS.poll}/min poll`)
 })
 server.on("error", e => { console.error("[relay]", e?.message ?? e); process.exit(1) })

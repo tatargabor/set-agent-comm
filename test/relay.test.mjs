@@ -40,9 +40,9 @@ const run = (root, device, args, timeoutMs = 20_000) => new Promise(resolve => {
   p.on("exit", code => { clearTimeout(timer); resolve({ code, out, err }) })
 })
 
-async function startRelay(p = port) {
+async function startRelay(p = port, extra = {}) {
   const proc = spawn(process.execPath, [RELAY], {
-    env: { ...process.env, PORT: String(p), RELAY_SECRET: SECRET, RELAY_HOST: "127.0.0.1" },
+    env: { ...process.env, PORT: String(p), RELAY_SECRET: SECRET, RELAY_HOST: "127.0.0.1", ...extra },
   })
   await new Promise((resolve, reject) => {
     proc.stdout.on("data", d => { if (String(d).includes("relay on")) resolve() })
@@ -166,4 +166,58 @@ test("A RELAY RESTART LOSES NOTHING — the bridge resyncs and duplicates are dr
   assert.match(after, /written while the relay was down/, "the message written during the outage never arrived")
   const count = s => (s.match(/Do not regenerate the atlas yet\./g) || []).length
   assert.equal(count(after), count(before), "the re-upload duplicated an entry that was already there")
+})
+
+test("HTTPS is required on the open internet — the token travels on every call", async () => {
+  // The device token sits in a header on every request. Over plain http on the public internet
+  // anyone on the path reads it once and can post into the room from then on. Refused at
+  // CONFIGURATION time: a token already sent in clear cannot be un-sent.
+  const { assertSecureUrl } = await import("../src/bridge.mjs")
+  assert.throws(() => assertSecureUrl("http://relay.example.com"), /unencrypted/)
+  assert.throws(() => assertSecureUrl("http://1.2.3.4:7511"), /unencrypted/)
+  assert.equal(assertSecureUrl("https://relay.example.com/"), "https://relay.example.com")
+  // …but a link that is already encrypted or closed stays usable, or the LAN and Tailscale
+  // setups — the ones we actually test with — would be locked out for no gain.
+  assert.equal(assertSecureUrl("http://127.0.0.1:7511"), "http://127.0.0.1:7511")
+  assert.equal(assertSecureUrl("http://100.100.212.67:7511"), "http://100.100.212.67:7511")
+  assert.equal(assertSecureUrl("http://workstation.local:7511"), "http://workstation.local:7511")
+})
+
+test("RATE LIMIT: /join cannot be hammered", async () => {
+  // Guessing an invite is hopeless (HMAC-SHA256) — but hopeless at unlimited speed is still a
+  // bandwidth bill, and the endpoint is public from the moment it is deployed.
+  const strictPort = port + 1
+  const strict = await startRelay(strictPort, { RELAY_LIMIT_JOIN: "3" })
+  try {
+    const codes = []
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(`http://127.0.0.1:${strictPort}/join`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: "bogus", device: "attacker" }),
+      })
+      codes.push(res.status)
+    }
+    assert.deepEqual(codes, [401, 401, 401, 429, 429],
+      `the limit did not bite where it should: ${codes.join(", ")}`)
+  } finally { strict.kill() }
+})
+
+test("A TOKEN IS BOUND TO ITS ROOM — it cannot reach another one", async () => {
+  // The whole point of inviting someone per room: the device token carries the room it was
+  // issued for, and the relay refuses everything else. This is what makes it safe to hand a
+  // colleague access to ONE collaboration room without opening the others.
+  const cfg = JSON.parse(readFileSync(join(B, "relays.json"), "utf8")).rooms[ROOM]
+  const other = "someone-elses-room"
+
+  const post = await fetch(`http://127.0.0.1:${port}/rooms/${other}/entries`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${cfg.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ entries: [{ id: "x", writer: "web-app@macmini#1", ts: new Date().toISOString(), cipher: "a.b.c" }] }),
+  })
+  assert.equal(post.status, 403, "a token wrote into a room it was not issued for")
+  assert.match((await post.json()).error, new RegExp(ROOM), "the refusal should name the room the token IS for")
+
+  const read = await fetch(`http://127.0.0.1:${port}/rooms/${other}/entries?after=0&wait=0`,
+    { headers: { authorization: `Bearer ${cfg.token}` } })
+  assert.equal(read.status, 403, "a token READ a room it was not issued for")
 })
