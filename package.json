@@ -16,6 +16,8 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "http": "node src/http.mjs",
+    "relay": "node src/relay.mjs",
+    "start": "node src/relay.mjs",
     "test": "node --test test/*.test.mjs && node test/smoke-mcp.mjs"
   },
   "dependencies": {

@@ -22,6 +22,7 @@
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { existsSync, mkdirSync, appendFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import * as store from "../src/store.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -47,6 +48,18 @@ const rooms = store.parseRooms(process.env.SET_AGENT_ROOM)
 const out = { hookSpecificOutput: { hookEventName: "SessionStart" } }
 const watchPaths = []
 const notices = []
+
+/**
+ * CATCH-UP for rooms that reach another machine: pull whatever arrived while no session was
+ * watching. Before the unread count is taken, so the note at the top of the session tells the
+ * truth about remote messages too.
+ *
+ * Time-boxed, and that is the whole point of the box: a slow or dead relay may not delay the
+ * start of a session. Being cut off mid-pull is safe — `ingest` is idempotent and the cursor is
+ * only saved at the end, so at worst the same entries are fetched again.
+ */
+spawnSync(process.execPath, [join(HERE, "..", "bin", "sac.mjs"), "sync", ...rooms],
+  { timeout: 2500, stdio: "ignore" })
 
 for (const room of rooms) {
   store.register({ agent, project: cwd, session, room, writer })

@@ -49,7 +49,7 @@ in by the server**, never by the model — measured on 2026-07-24 on the hand-ke
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 31 tests + the two-agent smoke test
+npm test                          # 42 tests + the two-agent smoke test
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
@@ -179,6 +179,7 @@ saying something new.
 ```
 sac install <room> [--dry-run]      wire both hooks into this project's settings.json
 sac agents                          who exists, who is alive
+sac rooms                           the existing rooms
 sac send <room> <type> "text"       entry (append)
 sac inbox <room>                    new messages from others (marks them read)
 sac peek <room>                     the same, without moving the cursor
@@ -186,6 +187,7 @@ sac unread <room> [n]               make the last n messages unread again
 sac history <room> [n]              read back
 sac wait [--once] [room…]           block until a message arrives (for a Monitor)
 sac watch-paths <room>              the files to watch (for the hook)
+sac register <room>                 check in to the registry (for the hook)
 ```
 
 ## MCP tools
@@ -211,10 +213,73 @@ global* state, whereas here we have to know **who writes**.
 
 ## Scope — what this DELIBERATELY cannot do
 
-- **One machine.** No auth, no network, no server to operate. Multiple machines (e.g. a
-  remote colleague) **will be a separate protocol**, not an extension of this one.
+- **Local by default.** No auth, no network, no server to operate. Reaching another machine is
+  opt-in and lives in a **separate layer** — a bridge plus a relay (see below) — which is how
+  the original "that will be a separate protocol, not an extension of this one" decision was
+  kept: the local protocol below did not change to make it possible.
 - **Not an ant farm.** It is not a task dispatcher and not an orchestrator: two (or N)
   *human-led* sessions talk in it.
+
+## Across machines (optional)
+
+The local rules are unchanged: every machine keeps its own append-only log, and that log is the
+source of truth. On top sits a **bridge** (in the client) and a **relay** (a small server).
+
+```
+machine A                    relay (Railway, VPS, Tailscale…)        machine B
+  send → local file  ──push──►  encrypted entries, 7-day retention  ──pull──►  local file
+  sac wait  ◄──────────────────  long poll  ────────────────────────────────►  sac wait
+```
+
+An incoming entry is appended to the remote writer's file **in the local room**, so from that
+moment `inbox`, the read cursor, the Stop hook and the skill work on it unchanged — nothing
+downstream had to learn that a message can come from another machine.
+
+### Handshake
+
+```bash
+# on the machine that operates the relay
+sac relay use https://comm.example.com --secret $RELAY_SECRET
+sac invite atlas --for "macmini"        # → sac-join:…  (valid 15 minutes)
+
+# on the other machine
+sac join sac-join:…
+sac install atlas                       # hooks + skill, as locally
+```
+
+⚠ **Hand the invite over out of band** (Signal, a call). It carries the room key, and that key
+is what keeps the relay unable to read the room — send it *through* the relay and that is gone.
+
+### Running the relay
+
+```bash
+RELAY_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))") \
+  npm run relay          # PORT defaults to 7511
+```
+
+On **Railway**: point it at the repo, set `RELAY_SECRET`, done — `npm start` runs the relay and
+`PORT` is supplied by the platform. Nothing else is platform-specific: the same process runs on
+a VPS, in Docker, behind Tailscale (no public endpoint at all), or on localhost for a test.
+
+### What the relay is, and is not
+
+| | |
+|---|---|
+| **not the source of truth** | lose it entirely and no message is lost: the machines re-upload, and duplicates are dropped by entry id |
+| **not an archive** | 7-day retention (`RELAY_RETENTION_HOURS`). An archive would have to be operated — which is what we are avoiding |
+| **not a reader** | bodies are AES-GCM ciphertext; the room key never leaves the participants' machines. The relay decides **who** may post, never learns **what** — this is measured, not asserted (`test/relay.test.mjs`) |
+| **stateless** | tokens are HMAC-signed, so there is no database and no volume. The cost, stated: a single token cannot be revoked on its own — rotating `RELAY_SECRET` invalidates all of them and everyone re-joins |
+
+### Names say how much to trust them
+
+```
+web-app#3f9c1a20            local   → unforgeable (cwd + session id)
+web-app@macmini#7b02e5d1    remote  → only as good as the device token behind it
+```
+
+The relay enforces the namespace in the token: a device cannot post under another machine's
+name. But `@macmini` is a weaker claim than a local name, and the reader is entitled to see
+which one it got.
 
 ## Prior art and relatives
 

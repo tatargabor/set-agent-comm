@@ -1,0 +1,171 @@
+// The BRIDGE — the client half of the remote leg. It has one job: make a message from another
+// machine indistinguishable, once it lands, from one written next door.
+//
+// Incoming entries are appended to the remote writer's file IN THE LOCAL ROOM. From that moment
+// `inbox`, the read cursor, `sibling`, the Stop hook and the skill all work on it without
+// knowing it came over the wire. Nothing downstream had to learn about the network — which is
+// why the remote leg is an addition and not a rewrite.
+//
+// The local log stays the source of truth. `send` writes locally first and uploads after, so a
+// dead relay is a delay, never a lost message: the outbox cursor picks it up on the next push.
+
+import { readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs"
+import { join } from "node:path"
+import { hostname } from "node:os"
+import { createHash } from "node:crypto"
+import { ROOT, busFiles, busFile, history, ingest, parseRooms } from "./store.mjs"
+import { encrypt, decrypt } from "./crypto.mjs"
+
+const CONFIG = join(ROOT, "relays.json")
+
+export const readConfig = () => {
+  try { return JSON.parse(readFileSync(CONFIG, "utf8")) } catch { return { rooms: {} } }
+}
+
+export function writeConfig(cfg) {
+  mkdirSync(ROOT, { recursive: true })
+  writeFileSync(CONFIG, JSON.stringify(cfg, null, 2) + "\n")
+  // It holds device tokens and room keys. Anyone who can read this file can post as us and
+  // decrypt the room, so it is not world-readable — the store's other files are harmless.
+  try { chmodSync(CONFIG, 0o600) } catch { /* best effort, e.g. on a filesystem without modes */ }
+}
+
+/** This machine's name in remote writer names (`web-app@macmini#3f9c1a20`). */
+export const deviceName = () =>
+  (process.env.SET_AGENT_DEVICE || hostname().split(".")[0]).replace(/[^A-Za-z0-9._-]/g, "-")
+
+export const roomConfig = room => readConfig().rooms?.[room] || null
+export const remoteRooms = () => Object.keys(readConfig().rooms || {})
+
+/** A local writer never carries `@`; a remote one always does. That is the whole test. */
+export const isRemote = writer => writer.includes("@")
+
+/**
+ * `web-app#3f9c1a20` + `macmini` → `web-app@macmini#3f9c1a20`.
+ *
+ * The device goes BEFORE the seat, not after, so that `seatBase` yields `web-app@macmini` —
+ * "that project on that machine". Same project name on two machines is two participants, and
+ * the grouping has to say so; appended at the end, the two would collapse into one.
+ */
+export const remoteName = (writer, ns) => {
+  const i = writer.indexOf("#")
+  return i === -1 ? `${writer}@${ns}` : `${writer.slice(0, i)}@${ns}${writer.slice(i)}`
+}
+
+const entryId = (writer, ts) => createHash("sha256").update(`${writer}|${ts}`).digest("base64url").slice(0, 22)
+
+const api = async (cfg, path, init = {}) => {
+  const res = await fetch(`${cfg.url.replace(/\/$/, "")}${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", authorization: `Bearer ${cfg.token}`, ...init.headers },
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.error || `relay ${res.status}`)
+  return body
+}
+
+/**
+ * Upload what this machine has written and the relay has not seen.
+ *
+ * The outbox cursor is per writer file, not a single global mark: files are independent logs,
+ * and one file failing to upload may not hold back the others. Entries are re-sent freely after
+ * a relay restart — the receiver drops what it already has by id, so re-sending is cheap and
+ * safe, while NOT re-sending would silently lose a message.
+ */
+export async function push({ room, log = () => {} }) {
+  const cfg = roomConfig(room)
+  if (!cfg) return { skipped: "no relay configured for this room" }
+  const ns = cfg.namespace || deviceName()
+  const outbox = cfg.outbox || {}
+  const entries = []
+
+  for (const path of busFiles(room)) {
+    const writer = path.split("/").pop().replace(/\.md$/, "")
+    if (isRemote(writer)) continue                       // never bounce someone else's entries back
+    const from = remoteName(writer, ns)
+    const since = outbox[writer] ? Date.parse(outbox[writer]) : 0
+    for (const e of history({ room, from: writer, limit: 10_000 }).messages) {
+      if (Date.parse(e.ts) <= since) continue
+      entries.push({
+        id: entryId(from, e.ts),
+        writer: from,
+        ts: e.ts,
+        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text })),
+        _writer: writer,
+      })
+    }
+  }
+  if (!entries.length) return { pushed: 0 }
+
+  const out = await api(cfg, `/rooms/${room}/entries`, {
+    method: "POST",
+    body: JSON.stringify({ entries: entries.map(({ _writer, ...e }) => e) }),
+  })
+  if (cfg.epoch && out.epoch !== cfg.epoch) {
+    // ⚠ Measured: without this the push SILENTLY HID the restart from the pull. It stored the
+    // new epoch as a side effect, the pull then saw nothing to reset, and everything uploaded
+    // before the restart — which the relay no longer had — was never sent again. The outbox is
+    // a record of what the relay has; when the relay forgets, the record is void.
+    save(room, { epoch: out.epoch, outbox: {}, cursor: 0 })
+    log(`relay restarted — re-uploading "${room}"`)
+    return push({ room, log })
+  }
+  // The cursor moves only after the relay has confirmed. A cursor that runs ahead of the
+  // upload is the one bug that would lose a message permanently, with nothing left to retry.
+  for (const e of entries) if (!outbox[e._writer] || Date.parse(outbox[e._writer]) < Date.parse(e.ts)) outbox[e._writer] = e.ts
+  save(room, { outbox, epoch: out.epoch })
+  log(`pushed ${entries.length} to ${room}`)
+  return { pushed: entries.length, accepted: out.accepted }
+}
+
+/**
+ * Fetch what the others wrote and write it into the local room.
+ *
+ * `wait` seconds is a long poll: the relay holds the request open until something arrives, so
+ * a remote message shows up as fast as a local one — the same shape as `sac wait` itself.
+ */
+export async function pull({ room, wait = 25, log = () => {} }) {
+  const cfg = roomConfig(room)
+  if (!cfg) return { skipped: "no relay configured for this room" }
+  const q = `after=${cfg.cursor || 0}&wait=${wait}` + (cfg.epoch ? `&epoch=${encodeURIComponent(cfg.epoch)}` : "")
+  const out = await api(cfg, `/rooms/${room}/entries?${q}`)
+
+  if (out.reset) {
+    // The relay was restarted (a redeploy, a crash): our cursor belongs to a previous life of
+    // it. Start from zero and re-upload — duplicates are dropped by id, gaps would not be.
+    //
+    // ⚠ And then FETCH AGAIN in the same call. Measured: returning here made a `sync` right
+    // after a restart report "nothing new" — it had only reset the cursor. Indistinguishable,
+    // from the outside, from a quiet room, which is the failure this project keeps hunting.
+    log(`relay restarted (new epoch) — resyncing "${room}"`)
+    save(room, { cursor: 0, epoch: out.epoch, outbox: {} })
+    return { ...(await pull({ room, wait: 0, log })), reset: true }
+  }
+
+  let written = 0
+  for (const e of out.entries || []) {
+    let body
+    try { body = JSON.parse(decrypt(cfg.roomKey, e.cipher)) } catch {
+      // Wrong key or tampered payload. LOUD, and we move on: silently skipping would look
+      // exactly like an empty room, and stopping would block every later entry too.
+      log(`⚠ could not decrypt an entry from ${e.writer} in "${room}" — wrong room key?`)
+      continue
+    }
+    if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text })) written++
+  }
+  save(room, { cursor: out.seq, epoch: out.epoch })
+  if (written) log(`received ${written} in ${room}`)
+  return { received: written, seq: out.seq }
+}
+
+function save(room, patch) {
+  const cfg = readConfig()
+  cfg.rooms[room] = { ...cfg.rooms[room], ...patch }
+  writeConfig(cfg)
+}
+
+/** Every room that has a relay AND is in this session's room list. */
+export const bridgedRooms = value => {
+  const configured = new Set(remoteRooms())
+  return parseRooms(value).filter(r => configured.has(r))
+}

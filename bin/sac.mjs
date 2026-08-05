@@ -13,10 +13,24 @@
 
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { randomUUID } from "node:crypto"
 import { watch, mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs"
 import * as store from "../src/store.mjs"
 
 const HOOKS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "hooks")
+
+/**
+ * Upload, and never let a relay problem look like a send problem: the entry is already on disk
+ * by the time this runs. The result is REPORTED (`relay: "queued (…)"`), not swallowed — a
+ * silent upload failure is indistinguishable from a delivered message, which is the one thing
+ * this project refuses to do.
+ */
+const relayPush = async room => {
+  const { push, roomConfig } = await import("../src/bridge.mjs")
+  if (!roomConfig(room)) return {}
+  try { const r = await push({ room }); return { relay: `pushed ${r.pushed ?? 0}` } }
+  catch (e) { return { relay: `queued (relay unreachable: ${e.message})` } }
+}
 
 const AGENT = process.env.SET_AGENT_NAME || basename(process.cwd())
 const SESSION = process.env.CLAUDE_CODE_SESSION_ID || null
@@ -59,7 +73,10 @@ try {
     case "send": {
       const [room, type, ...text] = rest
       if (!room || !text.length) throw new Error('usage: sac send <room> <type> "text"')
-      json(store.send({ room, from: ME, type, text: text.join(" ") }))
+      const out = store.send({ room, from: ME, type, text: text.join(" ") })
+      // LOCAL FIRST, then the wire. If the relay is down the entry is already safe on disk and
+      // the outbox cursor will carry it next time — a dead relay is a delay, not a lost message.
+      json({ ...out, ...(await relayPush(room)) })
       break
     }
     case "inbox":
@@ -86,6 +103,106 @@ try {
       for (const m of r.messages) console.log(fmt(m))
       break
     }
+    // ── the remote leg: handshake ─────────────────────────────────────────────
+    case "relay": {
+      // `sac relay use <url> --secret <s>` — the operator's machine remembers the relay.
+      // `sac relay status`                 — what is configured, and is it reachable.
+      const [sub, url] = rest
+      const bridge = await import("../src/bridge.mjs")
+      const cfg = bridge.readConfig()
+      if (sub === "use") {
+        const secret = rest[rest.indexOf("--secret") + 1]
+        if (!url || !rest.includes("--secret") || !secret) {
+          throw new Error("usage: sac relay use <url> --secret <RELAY_SECRET>")
+        }
+        // The secret is what mints invites, so it lives only on the machine that hands them
+        // out. Devices that merely join never see it — they get a token instead.
+        cfg.relay = { url: url.replace(/\/$/, ""), secret }
+        cfg.rooms ||= {}
+        bridge.writeConfig(cfg)
+        console.log(`relay: ${cfg.relay.url}\nstored in ${store.ROOT}/relays.json (mode 600)`)
+        break
+      }
+      if (sub === "status" || !sub) {
+        console.log(`relay:  ${cfg.relay?.url || "(none configured)"}`)
+        console.log(`device: ${bridge.deviceName()}`)
+        for (const [room, r] of Object.entries(cfg.rooms || {}))
+          console.log(`  ${room.padEnd(16)} ns=${r.namespace}  cursor=${r.cursor || 0}  ${r.url}`)
+        if (cfg.relay?.url) {
+          const res = await fetch(`${cfg.relay.url}/health`).then(r => r.json()).catch(e => ({ error: e.message }))
+          console.log(res.error ? `\n⚠ unreachable: ${res.error}` : `\nreachable · epoch ${res.epoch}`)
+        }
+        break
+      }
+      throw new Error("usage: sac relay use <url> --secret <s>   |   sac relay status")
+    }
+
+    case "invite": {
+      // Mints an invite LOCALLY with the relay secret, and puts the room key inside it. The
+      // key therefore never reaches the relay: it forwards ciphertext it cannot read. That is
+      // why the code must travel out of band — Signal, a phone call — and not through the relay
+      // or a shared channel.
+      const [room] = rest.filter(a => !a.startsWith("--"))
+      const device = rest[rest.indexOf("--for") + 1]
+      if (!room || !rest.includes("--for") || !device) {
+        throw new Error('usage: sac invite <room> --for "<device-name>"')
+      }
+      const bridge = await import("../src/bridge.mjs")
+      const { issue, newRoomKey } = await import("../src/crypto.mjs")
+      const cfg = bridge.readConfig()
+      if (!cfg.relay?.secret) throw new Error("no relay configured — run `sac relay use <url> --secret <s>` first")
+
+      // One key per room, created on first use and kept: rotating it would make every entry
+      // already on the relay undecryptable for whoever joins next.
+      cfg.rooms ||= {}
+      const key = cfg.rooms[room]?.roomKey || newRoomKey()
+      if (!cfg.rooms[room]) {
+        // The operator's own machine needs a device token too — it is a participant, not an
+        // authority. Same token type, same rules, so there is only one code path to trust.
+        cfg.rooms[room] = {
+          url: cfg.relay.url, roomKey: key, namespace: bridge.deviceName(),
+          token: issue(cfg.relay.secret, { kind: "device", room, ns: bridge.deviceName() }, 365 * 86400),
+          cursor: 0, outbox: {},
+        }
+        bridge.writeConfig(cfg)
+      }
+      const code = issue(cfg.relay.secret, {
+        kind: "invite", room, device, jti: randomUUID(),
+      }, Number(rest[rest.indexOf("--ttl") + 1]) || 900)
+      const payload = Buffer.from(JSON.stringify({ u: cfg.relay.url, r: room, c: code, k: key })).toString("base64url")
+      console.log(`sac-join:${payload}\n`)
+      console.log(`Valid for 15 minutes, for "${device}". On the other machine:\n` +
+        `  sac join sac-join:…\n\n` +
+        `⚠ Hand it over OUT OF BAND (Signal, a call). It carries the room key, which is what\n` +
+        `  keeps the relay unable to read the room — send it through the relay and that is gone.`)
+      break
+    }
+
+    case "join": {
+      const [code] = rest.filter(a => !a.startsWith("--"))
+      const asName = rest.includes("--as") ? rest[rest.indexOf("--as") + 1] : null
+      if (!code?.startsWith("sac-join:")) throw new Error("usage: sac join sac-join:<code> [--as <device>]")
+      const bridge = await import("../src/bridge.mjs")
+      const { u, r, c, k } = JSON.parse(Buffer.from(code.slice("sac-join:".length), "base64url"))
+      const device = asName || bridge.deviceName()
+      const res = await fetch(`${u}/join`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: c, device }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(`join refused: ${body.error || res.status}`)
+
+      const cfg = bridge.readConfig()
+      cfg.rooms ||= {}
+      cfg.rooms[r] = { url: u, token: body.token, roomKey: k, namespace: body.namespace,
+                       epoch: body.epoch, cursor: 0, outbox: {} }
+      bridge.writeConfig(cfg)
+      console.log(`joined "${r}" on ${u}\n` +
+        `your name on the bus: <project>@${body.namespace}#<session>\n\n` +
+        `Next:  sac install ${r}      (hooks + skill, so messages get noticed)`)
+      break
+    }
+
     case "install": {
       // Wires both hooks into THIS project's .claude/settings.json. It exists because the
       // alternative is hand-editing a settings file that already holds a dozen other hooks —
@@ -172,6 +289,29 @@ try {
         `node ${join(HOOKS, "..", "src", "stdio.mjs")}`)
       break
     }
+    case "sync": {
+      // ONE round of push + pull, then exit. Two callers need exactly this and not a long poll:
+      // the SessionStart hook (catch up on whatever arrived while no session was watching), and
+      // anything scripted. `wait` is for staying, `sync` is for catching up.
+      const bridge = await import("../src/bridge.mjs")
+      const asked = rest.filter(a => !a.startsWith("--")).flatMap(store.parseRooms)
+      const list = asked.length ? asked : bridge.remoteRooms()
+      if (!list.length) { console.log("(no room has a relay configured)"); break }
+      for (const room of list) {
+        if (!bridge.roomConfig(room)) { console.log(`${room}: no relay configured`); continue }
+        try {
+          const up = await bridge.push({ room })
+          const down = await bridge.pull({ room, wait: 0 })
+          console.log(`${room}: pushed ${up.pushed ?? 0}, received ${down.received ?? 0}` +
+            (down.reset ? " (relay restarted — resynced)" : ""))
+        } catch (e) {
+          // Reported, never swallowed: "could not reach the relay" and "nothing new" must not
+          // look the same from the outside.
+          console.log(`${room}: ⚠ relay unreachable (${e.message}) — local messages unaffected`)
+        }
+      }
+      break
+    }
     case "wait": {
       // LONG POLL — this is what a Claude Code `Monitor` runs, and it is the only thing that
       // starts a new turn in an IDLE session. Measured 2026-08-04: `watchPaths` + `FileChanged`
@@ -216,6 +356,32 @@ try {
       // The safety net. `fs.watch` misses events on some file systems, and a watcher that
       // silently stops looks exactly like a quiet room — the most dangerous false negative here.
       setInterval(check, 5000)
+
+      // THE REMOTE LEG rides on this same watcher: for rooms that have a relay we long-poll it
+      // in parallel, and what arrives is written into the local room — where the loop above
+      // finds it and reports it like any other message. No second daemon, and nothing
+      // downstream had to learn that a message can come from another machine.
+      const bridge = await import("../src/bridge.mjs")
+      for (const room of watched.filter(r => bridge.roomConfig(r))) {
+        void (async () => {
+          let backoff = 1000
+          for (;;) {
+            try {
+              await bridge.push({ room })                        // whatever the outbox still owes
+              await bridge.pull({ room, wait: 25, log: m => console.log(`[set-agent-comm] ${m}`) })
+              check()
+              backoff = 1000
+            } catch (e) {
+              // A relay outage may not kill the watch: local messages must keep flowing, and
+              // the remote ones catch up when it returns. Backing off keeps a dead relay from
+              // turning into a hot loop; the ceiling keeps recovery within a minute.
+              console.log(`[set-agent-comm] relay "${room}" unreachable (${e.message}) — retrying`)
+              await new Promise(r => setTimeout(r, backoff))
+              backoff = Math.min(backoff * 2, 60_000)
+            }
+          }
+        })()
+      }
       await new Promise(() => {})                // runs until the monitor kills it
       break
     }

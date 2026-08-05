@@ -1,0 +1,197 @@
+#!/usr/bin/env node
+/**
+ * The RELAY — the only piece that runs on a machine none of the agents sit at.
+ *
+ *   node src/relay.mjs            (or: npm run relay)
+ *   PORT=…  RELAY_SECRET=…
+ *
+ * Two environment variables, no database, no volume, no migration. That is a design goal, not
+ * an accident: this repo is MIT and someone else has to be able to run it in five minutes —
+ * on Railway, on a VPS, in Docker, behind Tailscale, or on localhost for a test.
+ *
+ * WHAT IT IS NOT:
+ *  - not the source of truth. Every machine keeps its own append-only log; this is a letterbox
+ *    that forwards. Lose it entirely and no message is lost — see EPOCH below.
+ *  - not an archive. Entries are dropped after RELAY_RETENTION_HOURS (default 168 = 7 days).
+ *    An archive would have to be operated, and operating it is what we are avoiding.
+ *  - not a reader. Bodies are AES-GCM ciphertext whose key never leaves the participants'
+ *    machines (see crypto.mjs). The relay decides WHO may post, never learns WHAT.
+ *
+ * EPOCH — the answer to ephemeral disks. The relay holds entries in memory, so a restart (a
+ * redeploy, a crash, a platform moving the container) starts a fresh `epoch`. A client that
+ * polls with a cursor from an older epoch is told `reset: true`, and re-uploads its recent
+ * entries. Duplicates are harmless: every entry has a stable id, and the receiver drops what
+ * it already has. So the failure mode of "the relay lost everything" is a few kilobytes of
+ * re-upload — never a silently missing message.
+ */
+import { createServer } from "node:http"
+import { randomUUID } from "node:crypto"
+import { verify, issue, adminToken } from "./crypto.mjs"
+
+const PORT = parseInt(process.env.PORT || "7511", 10)
+const HOST = process.env.RELAY_HOST || "0.0.0.0"
+const SECRET = process.env.RELAY_SECRET || ""
+const RETENTION_MS = parseFloat(process.env.RELAY_RETENTION_HOURS || "168") * 3600_000
+const DEVICE_TTL = parseInt(process.env.RELAY_DEVICE_TTL_DAYS || "365", 10) * 86400
+const MAX_ENTRY_BYTES = 256 * 1024
+const POLL_MAX_MS = 30_000
+
+if (!SECRET) {
+  console.error("[relay] RELAY_SECRET is not set — refusing to start.\n" +
+    "        Without it anyone could post into any room. Generate one:\n" +
+    "          node -e \"console.log(require('crypto').randomBytes(32).toString('base64url'))\"")
+  process.exit(1)
+}
+
+const EPOCH = randomUUID()
+const rooms = new Map()          // room -> { seq, entries: [], waiters: [] }
+const usedInvites = new Set()    // best effort, see /join
+
+/** The device namespace inside a writer name: `web-app@macmini#3f9c1a20` → `macmini`. */
+const nsOf = writer => (String(writer).split("@")[1] || "").split("#")[0]
+
+const room = name => {
+  if (!rooms.has(name)) rooms.set(name, { seq: 0, entries: [], waiters: [] })
+  return rooms.get(name)
+}
+
+const json = (res, code, body) => {
+  res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" })
+  res.end(JSON.stringify(body))
+}
+
+const readBody = req => new Promise((resolve, reject) => {
+  let data = "", size = 0
+  req.on("data", c => {
+    size += c.length
+    if (size > 4 * 1024 * 1024) { reject(new Error("body too large")); req.destroy(); return }
+    data += c
+  })
+  req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}) } catch (e) { reject(e) } })
+  req.on("error", reject)
+})
+
+const bearer = req => (req.headers.authorization || "").replace(/^Bearer\s+/i, "")
+
+/** Everyone waiting on this room gets what just arrived — this is the push half of the poll. */
+function wake(r) {
+  const waiters = r.waiters.splice(0)
+  for (const w of waiters) w()
+}
+
+function prune(r) {
+  const cutoff = Date.now() - RETENTION_MS
+  const keep = r.entries.findIndex(e => e.at >= cutoff)
+  if (keep > 0) r.entries.splice(0, keep)
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`)
+  const path = url.pathname
+
+  try {
+    // Liveness, for the platform's health check. Deliberately says nothing about rooms.
+    if (req.method === "GET" && (path === "/" || path === "/health"))
+      return json(res, 200, { ok: true, service: "set-agent-comm relay", epoch: EPOCH })
+
+    // ── join: an invite code becomes a lasting device token ────────────────────
+    if (req.method === "POST" && path === "/join") {
+      const { code, device } = await readBody(req)
+      const claims = verify(SECRET, code)
+      if (!claims || claims.kind !== "invite") return json(res, 401, { error: "invalid or expired invite" })
+      // Single use is BEST EFFORT: the set lives in memory, so a restart forgets it and a code
+      // could be replayed until it expires. Stated rather than hidden — the window is the
+      // invite's TTL (15 minutes by default), and the fix if it matters is a shorter TTL.
+      if (usedInvites.has(claims.jti)) return json(res, 409, { error: "invite already used" })
+      usedInvites.add(claims.jti)
+      const namespace = String(device || claims.device || "device").replace(/[^A-Za-z0-9._-]/g, "-")
+      return json(res, 200, {
+        token: issue(SECRET, { kind: "device", room: claims.room, ns: namespace }, DEVICE_TTL),
+        room: claims.room,
+        namespace,
+        epoch: EPOCH,
+      })
+    }
+
+    // ── invite: minted by whoever holds RELAY_SECRET ──────────────────────────
+    // Normally the CLI mints invites locally (it has the secret), so this endpoint is for the
+    // case where only the relay knows it. Same authority either way.
+    if (req.method === "POST" && path === "/invite") {
+      if (bearer(req) !== adminToken(SECRET)) return json(res, 401, { error: "admin token required" })
+      const { room: roomName, device, ttl = 900 } = await readBody(req)
+      if (!roomName) return json(res, 400, { error: "`room` is required" })
+      return json(res, 200, {
+        code: issue(SECRET, { kind: "invite", room: roomName, device, jti: randomUUID() }, ttl),
+      })
+    }
+
+    const m = path.match(/^\/rooms\/([A-Za-z0-9._-]+)\/entries$/)
+    if (m) {
+      const claims = verify(SECRET, bearer(req))
+      if (!claims || claims.kind !== "device") return json(res, 401, { error: "invalid or expired token" })
+      if (claims.room !== m[1]) return json(res, 403, { error: `this token is for room '${claims.room}'` })
+      const r = room(m[1])
+
+      // ── post ────────────────────────────────────────────────────────────────
+      if (req.method === "POST") {
+        const body = await readBody(req)
+        const incoming = Array.isArray(body.entries) ? body.entries : []
+        const accepted = []
+        for (const e of incoming) {
+          if (!e?.id || !e?.writer || !e?.cipher) continue
+          if (String(e.cipher).length > MAX_ENTRY_BYTES) continue
+          // The namespace in the token is enforced, not trusted from the body: a device may
+          // only write under the name it was issued for. This is the whole point of the token —
+          // the local `cwd`-based identity cannot reach across the network, so THIS is what
+          // stands in for it, and a name is only worth the token behind it.
+          if (nsOf(e.writer) !== claims.ns) continue
+          if (r.entries.some(x => x.id === e.id)) continue
+          const stored = { id: e.id, writer: e.writer, ts: e.ts, cipher: e.cipher, seq: ++r.seq, at: Date.now() }
+          r.entries.push(stored)
+          accepted.push(e.id)
+        }
+        prune(r)
+        if (accepted.length) wake(r)
+        return json(res, 200, { epoch: EPOCH, seq: r.seq, accepted: accepted.length, rejected: incoming.length - accepted.length })
+      }
+
+      // ── long poll ───────────────────────────────────────────────────────────
+      if (req.method === "GET") {
+        const after = parseInt(url.searchParams.get("after") || "0", 10)
+        const since = url.searchParams.get("epoch")
+        // A cursor from a previous life of this relay cannot be compared with the current seq —
+        // saying "nothing new" to it would be a lie that loses messages silently.
+        if (since && since !== EPOCH)
+          return json(res, 200, { epoch: EPOCH, reset: true, seq: r.seq, entries: [] })
+
+        const mine = () => r.entries.filter(e => e.seq > after && nsOf(e.writer) !== claims.ns)
+        const waitMs = Math.min(parseInt(url.searchParams.get("wait") || "25", 10) * 1000, POLL_MAX_MS)
+        let batch = mine()
+        if (!batch.length && waitMs > 0) {
+          await new Promise(resolve => {
+            const timer = setTimeout(() => {
+              r.waiters = r.waiters.filter(w => w !== fire)
+              resolve()
+            }, waitMs)
+            const fire = () => { clearTimeout(timer); resolve() }
+            r.waiters.push(fire)
+            // A client that hangs up must not leave a waiter (and a timer) behind for 25s.
+            req.on("close", fire)
+          })
+          batch = mine()
+        }
+        return json(res, 200, { epoch: EPOCH, seq: r.seq, entries: batch })
+      }
+    }
+
+    json(res, 404, { error: "not found" })
+  } catch (e) {
+    if (!res.headersSent) json(res, 400, { error: e?.message || String(e) })
+  }
+})
+
+server.listen(PORT, HOST, () => {
+  console.log(`[relay] set-agent-comm relay on ${HOST}:${PORT}  ·  epoch ${EPOCH}` +
+    `  ·  retention ${Math.round(RETENTION_MS / 3600_000)}h`)
+})
+server.on("error", e => { console.error("[relay]", e?.message ?? e); process.exit(1) })

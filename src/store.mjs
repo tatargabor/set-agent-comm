@@ -367,6 +367,54 @@ export function send({ room, from, type = "FACT", text, re }) {
   return { ts, room, from, type, path, ...(warning && { warning }) }
 }
 
+/**
+ * Write an entry that arrived FROM ANOTHER MACHINE into the local room (see bridge.mjs).
+ *
+ * Once it is in the writer's file, nothing downstream can tell it apart from a local one:
+ * `inbox`, the cursor, the Stop hook, `sac wait` all treat it the same. That is deliberate —
+ * the network is a delivery detail, not a second kind of message.
+ *
+ * Idempotent on `(writer, ts)`, and that is what makes the whole remote leg safe: the bridge
+ * may re-upload freely after a relay restart, because a duplicate is dropped here. The reverse
+ * — being clever about not re-sending — would trade harmless duplicates for silent gaps.
+ *
+ * @returns true if it was new
+ */
+export function ingest({ room, writer, ts, type = "FACT", re, text }) {
+  if (!room || !writer || !ts) throw new Error("ingest: `room`, `writer` and `ts` are required")
+  if (!text?.trim()) throw new Error("ingest: empty message")
+  const path = busFile(room, writer)
+  if (parse(path, writer).some(e => e.ts === ts)) return false
+  mkdirSync(dirname(path), { recursive: true })
+  const head = `## ${ts} — ${normalizeType(type)}${re ? ` (re: ${re})` : ""}`
+  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${text.trim()}\n`)
+  noteRemote(writer, room)
+  return true
+}
+
+/**
+ * A remote participant in the registry, so `agents` can answer "who can I talk to" for them too.
+ *
+ * ⚠ No pid and no session: `lastSeen` is when the entry REACHED US, not the sender's clock —
+ * clocks differ between machines, and this project has already paid once for a timestamp that
+ * was not measured. Its liveness is therefore always "we don't know" or "silent for long",
+ * never a confident `true`, which is the honest answer for a machine we cannot see.
+ */
+function noteRemote(writer, room) {
+  const agent = seatBase(writer)
+  const reg = readJson(REGISTRY, { agents: {} })
+  const prev = reg.agents[agent] || {}
+  const seats = { ...(prev.seats || {}) }
+  seats[writer] = { ...(seats[writer] || {}), session: null, writers: {}, remote: true,
+    firstSeen: seats[writer]?.firstSeen || now(), lastSeen: now() }
+  reg.agents[agent] = {
+    ...prev, agent, remote: true, host: agent.split("@")[1] || null,
+    rooms: [...new Set([...(prev.rooms || []), room])],
+    seats, firstSeen: prev.firstSeen || now(), lastSeen: now(),
+  }
+  writeJson(REGISTRY, reg)
+}
+
 /** The entries of one file, newest at the bottom (as they stand in the file). */
 function parse(path, agent) {
   let raw
