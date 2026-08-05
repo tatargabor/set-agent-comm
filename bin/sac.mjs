@@ -232,10 +232,14 @@ try {
         }
       }
 
+      // ⚠ The INTERPRETER IS SPELLED OUT (`process.execPath`), never a bare `node`. Measured on
+      // a Mac mini: node lived in `~/.local/node/bin`, which reaches the PATH from `~/.zshrc` —
+      // and hooks do not run in an interactive shell. A bare `node` would have failed there
+      // with "command not found", which from the outside is a hook that simply never fires.
       const env = `SET_AGENT_NAME=${AGENT} SET_AGENT_ROOM=${rooms.join(",")}`
       const scripts = { SessionStart: "session-start.mjs", Stop: "stop.mjs" }
       const wanted = Object.fromEntries(Object.entries(scripts)
-        .map(([event, script]) => [event, `${env} node ${join(HOOKS, script)}`]))
+        .map(([event, script]) => [event, `${env} ${process.execPath} ${join(HOOKS, script)}`]))
       const changes = []
       settings.hooks ||= {}
       for (const [event, command] of Object.entries(wanted)) {
@@ -262,8 +266,8 @@ try {
       // guessing at a path is an agent that silently does not watch.
       const skill = readFileSync(skillFrom, "utf8")
         .replaceAll("{{ROOMS}}", rooms.join(", "))
-        .replaceAll("{{SAC}}", `node ${sac}`)
-        .replaceAll("{{WAIT_COMMAND}}", `SET_AGENT_NAME=${AGENT} node ${sac} wait ${rooms.join(",")}`)
+        .replaceAll("{{SAC}}", `${process.execPath} ${sac}`)
+        .replaceAll("{{WAIT_COMMAND}}", `SET_AGENT_NAME=${AGENT} ${process.execPath} ${sac} wait ${rooms.join(",")}`)
       const skillState = !existsSync(skillTo) ? "installed"
         : readFileSync(skillTo, "utf8") === skill ? "already current" : "updated"
       changes.push(`skill: ${skillState}`)
@@ -294,7 +298,7 @@ try {
 
       console.log(`\nRestart (or resume) the session for it to take effect.\n` +
         `The MCP server, separately:  claude mcp add agent-comm -e SET_AGENT_ROOM=${rooms.join(",")} -- ` +
-        `node ${join(HOOKS, "..", "src", "stdio.mjs")}`)
+        `${process.execPath} ${join(HOOKS, "..", "src", "stdio.mjs")}`)
       break
     }
     case "sync": {

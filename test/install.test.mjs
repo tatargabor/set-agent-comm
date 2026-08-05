@@ -34,6 +34,11 @@ test("it adds both hooks and leaves everything else alone", () => {
   assert.deepEqual(s.env, { FOO: "bar" }, "it touched a part of the file that is none of its business")
   assert.equal(commands(s, "SessionStart").filter(c => c.includes("session-start.mjs")).length, 1)
   assert.equal(commands(s, "Stop").filter(c => c.includes("stop.mjs")).length, 1)
+  // The interpreter is an absolute path, not a bare `node`: hooks run in a non-interactive
+  // shell, and on macOS node commonly lives under the home directory, reaching PATH only from
+  // an interactive profile. A bare `node` there is a hook that silently never fires.
+  for (const c of [...commands(s, "SessionStart"), ...commands(s, "Stop")].filter(c => c.includes(".mjs")))
+    assert.match(c, /\s\/\S*node\S*\s/, `the hook command relies on PATH: ${c}`)
 })
 
 test("it installs the skill too, with the commands baked in", () => {

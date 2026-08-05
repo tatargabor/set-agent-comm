@@ -121,7 +121,9 @@ const siblings = writer !== agent
  * an agent guessing at a command is an agent that silently does not watch.
  */
 const SAC = join(HERE, "..", "bin", "sac.mjs")
-const waitCmd = `SET_AGENT_NAME=${agent} node ${SAC} wait ${rooms.join(",")}`
+// `process.execPath`, not `node`: the Monitor runs this in a shell whose PATH we do not
+// control — measured on macOS, where node sits under the home directory.
+const waitCmd = `SET_AGENT_NAME=${agent} ${process.execPath} ${SAC} wait ${rooms.join(",")}`
 const monitor = rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
     `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +
