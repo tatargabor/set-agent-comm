@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { hostname } from "node:os"
 import { createHash } from "node:crypto"
 import { ROOT, busFiles, busFile, history, ingest, parseRooms } from "./store.mjs"
-import { encrypt, decrypt } from "./crypto.mjs"
+import { encrypt, decrypt, entryAad } from "./crypto.mjs"
 
 const CONFIG = join(ROOT, "relays.json")
 
@@ -118,7 +118,8 @@ export async function push({ room, log = () => {} }) {
         ts: e.ts,
         // The addressee travels INSIDE the ciphertext, with the text: who a message is for is
         // as much the room's business as what it says, and the relay is not entitled to either.
-        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text, to: e.to })),
+        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text, to: e.to }),
+                        entryAad(from, e.ts)),
         _writer: writer,
       })
     }
@@ -173,14 +174,25 @@ export async function pull({ room, wait = 25, log = () => {} }) {
   let written = 0
   for (const e of out.entries || []) {
     let body
-    try { body = JSON.parse(decrypt(cfg.roomKey, e.cipher)) } catch {
-      // Wrong key or tampered payload. LOUD, and we move on: silently skipping would look
-      // exactly like an empty room, and stopping would block every later entry too.
-      log(`⚠ could not decrypt an entry from ${e.writer} in "${room}" — wrong room key?`)
+    // The sender and the timestamp are AAD (see `entryAad`), so this decrypt is also the
+    // authorship check: an entry served under a name other than the one it was written under
+    // fails here, and no room key is needed to attempt that re-attribution — only the relay.
+    try { body = JSON.parse(decrypt(cfg.roomKey, e.cipher, entryAad(e.writer, e.ts))) } catch {
+      // Wrong key, tampered payload, or a forged sender. LOUD, and we move on: silently
+      // skipping would look exactly like an empty room, and stopping would block every later
+      // entry too.
+      log(`⚠ refused an entry from ${e.writer} in "${room}" — wrong room key, ` +
+        `a tampered payload, or a sender that does not match what was signed`)
       continue
     }
-    if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text,
-                 to: body.to })) written++
+    // A writer name becomes a FILE NAME on this machine. `ingest` refuses one that would leave
+    // the room's directory; that refusal must drop the entry, not the whole batch.
+    try {
+      if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text,
+                   to: body.to })) written++
+    } catch (err) {
+      log(`⚠ refused an entry from ${e.writer} in "${room}": ${err.message}`)
+    }
   }
   save(room, { cursor: out.seq, epoch: out.epoch })
   if (written) log(`received ${written} in ${room}`)

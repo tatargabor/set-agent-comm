@@ -51,7 +51,7 @@ broadcasts, which is what they were.
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 69 tests + the two-agent smoke test
+npm test                          # 84 tests + the two-agent smoke test
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
@@ -354,13 +354,26 @@ anything else:
 | **an unencrypted URL** | the device token travels in a header on *every* call, so the client refuses plain `http://` outright — an invite cannot talk it into one either. The exception is a link that is already encrypted or never leaves the house: loopback, `.local`, `.ts.net` (Tailscale), and RFC1918 / CGNAT addresses |
 | **a flood** | per minute: **10 joins per IP**, **120 posts** and **60 polls per device token** (`RELAY_LIMIT_JOIN` / `_POST` / `_POLL`), answered with `429` and a `retry-after`. A long poll is one request for its whole 25 seconds, so a normal participant never comes near it |
 | **another room** | a device token carries the room it was issued for; a call about any other room ends in `403` before the body is read |
-| **another name** | the namespace is in the token too, so a device cannot post as `web-app@some-other-machine` |
+| **another name** | the namespace is in the token too, so a device cannot post as `web-app@some-other-machine`. The name is decided by the **invite**, not by whoever redeems it — otherwise a joiner could ask for a namespace already in use and write under it |
 | **a replayed invite** | an invite is single-use — its `jti` is remembered until it would have expired anyway |
+| **a name that is a path** | `writer` and `ts` become a **file name** and a **header line** on every receiving machine. Anything carrying a separator, a control character or a `..` segment is dropped — by the relay *and*, independently, by the receiver |
+| **a squatted id** | entries are deduplicated on `(writer, ts)` derived at the relay, never on the id the client sends. The id is `sha256(writer\|ts)` — predictable — so accepting it would let a member pre-claim the ids of someone else's future entries and have the real ones dropped as duplicates. Silently |
+| **an unbounded room** | 5000 entries and 64 MB per room (`RELAY_MAX_ROOM_ENTRIES`, `RELAY_MAX_ROOM_MB`), oldest first. Time-based retention alone is not a ceiling: at the post limit one valid token is half a gigabyte a minute, and this is all in memory |
+
+**Who wrote it is part of what was written.** The sender and the timestamp travel in the clear —
+the relay routes by them — so they are bound to the ciphertext as additional authenticated data
+(`entryAad`). Change either in transit and the decrypt *fails*. Without that binding the relay
+could re-attribute any entry it forwards **without ever having the room key**: take a real
+ciphertext from A and serve it as B's. The body would decrypt perfectly, because the body never
+said who wrote it — and "an agent cannot write in someone else's name", which the local bus gets
+for free from the working directory, would have stopped at the network's edge.
 
 What it deliberately does **not** protect against: someone who holds a valid device token can
 flood their own room within the limits, and a token cannot be revoked one by one (that is the
 price of being stateless — see the table above). Both are answered by rotating `RELAY_SECRET`,
-after which everyone re-joins.
+after which everyone re-joins. And the relay still sees **metadata**: who writes, when, and how
+much. It cannot read a word of it, but "cannot read the room" is not the same as "cannot see the
+traffic".
 
 ### Names say how much to trust them
 

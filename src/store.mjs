@@ -348,6 +348,39 @@ export const channelDir = room => join(CHANNELS, room)
 export const busFile = (room, agent) => join(channelDir(room), `${agent}.md`)
 const writerOf = path => path.split("/").pop().replace(/\.md$/, "")
 
+/**
+ * A WRITER NAME BECOMES A FILE NAME — so a name that arrived from another machine has to be
+ * checked before it is one.
+ *
+ * ⚠ Measured 2026-08-05 while reviewing the relay: `ingest` with the writer
+ * `../../../../pwned@mac#1` wrote a file FOUR DIRECTORIES ABOVE the store. The relay let it
+ * through, because its own check only looks at the `@ns` part of the name. The `.md` suffix is
+ * no protection at all — `../../.claude/skills/agent-comm/SKILL` plus `.md` is a skill file,
+ * i.e. instructions the agent loads on its next start.
+ *
+ * Deliberately a REFUSAL on dangerous shape rather than a whitelist of characters: project
+ * names come from directory names, and rejecting an accented or spaced one would drop real
+ * messages. Path separators, NUL and traversal segments are what make a name a path.
+ */
+export function assertSafeWriter(writer) {
+  const w = String(writer)
+  const bad = !w || w.length > 200 || /[\\/\u0000-\u001f]/.test(w) ||
+    w.split(/[@#]/).some(part => part === "." || part === "..")
+  // Belt and braces: whatever the name looks like, the file it resolves to must be IN the room.
+  if (!bad && dirname(busFile("x", w)) === channelDir("x")) return
+  throw new Error(`unsafe writer name '${w.slice(0, 80)}' — it would not stay inside the room`)
+}
+
+/**
+ * The timestamp is written verbatim into an entry's header line, so it may not carry one.
+ * A newline in `ts` lets a remote sender forge extra headers inside its own file — attributed
+ * to itself, but with any type, addressee and time it likes.
+ */
+export function assertSafeTs(ts) {
+  if (!/^\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:\d{2}|Z)?$/.test(String(ts)))
+    throw new Error(`unusable timestamp '${String(ts).slice(0, 40)}'`)
+}
+
 /** Every writer file in the room — this is what the hook registers as `watchPaths`. */
 export function busFiles(room) {
   try {
@@ -474,6 +507,12 @@ export function participants(room) {
 export function ingest({ room, writer, ts, type = "FACT", re, text, to }) {
   if (!room || !writer || !ts) throw new Error("ingest: `room`, `writer` and `ts` are required")
   if (!text?.trim()) throw new Error("ingest: empty message")
+  assertSafeWriter(writer)
+  assertSafeTs(ts)
+  // The type is written into the header too, and an unknown one would make the entry
+  // unparseable for every reader — including the sender's next `history`.
+  type = normalizeType(type)
+  if (!TYPES.includes(type)) throw new Error(`ingest: unknown type '${String(type).slice(0, 40)}'`)
   const path = busFile(room, writer)
   if (parse(path, writer).some(e => e.ts === ts)) return false
   mkdirSync(dirname(path), { recursive: true })

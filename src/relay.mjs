@@ -26,7 +26,7 @@
  */
 import { createServer } from "node:http"
 import { randomUUID } from "node:crypto"
-import { verify, issue, adminToken } from "./crypto.mjs"
+import { verify, issue, adminToken, equal } from "./crypto.mjs"
 
 const PORT = parseInt(process.env.PORT || "7511", 10)
 const HOST = process.env.RELAY_HOST || "0.0.0.0"
@@ -91,6 +91,20 @@ const clientIp = req => {
     req.socket.remoteAddress || "unknown"
 }
 
+/**
+ * A name that must never become a path or a header line. The receiving machine turns `writer`
+ * into a FILE NAME and writes `ts` verbatim into an entry's header — measured 2026-08-05, a
+ * writer of `../../../../pwned@mac#1` landed a file four directories above the store, and the
+ * relay's namespace check waved it through because it only ever looked at the `@ns` part.
+ * The client refuses it too; a letterbox that hands out such a name to everyone in the room
+ * is a bad letterbox.
+ */
+const unsafeName = v => {
+  const s = String(v ?? "")
+  return !s || s.length > 200 || /[\\/\u0000-\u001f]/.test(s) ||
+    s.split(/[@#]/).some(p => p === "." || p === "..")
+}
+
 /** The device namespace inside a writer name: `web-app@macmini#3f9c1a20` → `macmini`. */
 const nsOf = writer => (String(writer).split("@")[1] || "").split("#")[0]
 
@@ -104,14 +118,21 @@ const json = (res, code, body) => {
   res.end(JSON.stringify(body))
 }
 
+// ⚠ CHUNKS ARE BYTES, and they are kept as bytes until the end. `data += chunk` decodes each
+// chunk on its own, so a multi-byte character split across a boundary becomes two replacement
+// characters — an accented project name in a writer would corrupt at ~64 KB, intermittently.
 const readBody = req => new Promise((resolve, reject) => {
-  let data = "", size = 0
+  const chunks = []
+  let size = 0
   req.on("data", c => {
     size += c.length
     if (size > 4 * 1024 * 1024) { reject(new Error("body too large")); req.destroy(); return }
-    data += c
+    chunks.push(c)
   })
-  req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}) } catch (e) { reject(e) } })
+  req.on("end", () => {
+    const data = Buffer.concat(chunks).toString("utf8")
+    try { resolve(data ? JSON.parse(data) : {}) } catch (e) { reject(e) }
+  })
   req.on("error", reject)
 })
 
@@ -123,10 +144,24 @@ function wake(r) {
   for (const w of waiters) w()
 }
 
+/**
+ * Retention is a TIME limit, and time alone is not a ceiling: 4 MB per request, ~16 entries in
+ * each, 120 posts a minute is half a gigabyte a minute — one valid token could take the relay
+ * down in about that long, and it holds everything in memory. So a room also has a hard count
+ * and a hard size, and the OLDEST go first: the local logs are the source of truth, and a
+ * client that falls behind resyncs. Losing the tail of a letterbox is recoverable; losing the
+ * process is not.
+ */
+const MAX_ROOM_ENTRIES = parseInt(process.env.RELAY_MAX_ROOM_ENTRIES || "5000", 10)
+const MAX_ROOM_BYTES = parseInt(process.env.RELAY_MAX_ROOM_MB || "64", 10) * 1024 * 1024
+
 function prune(r) {
   const cutoff = Date.now() - RETENTION_MS
   const keep = r.entries.findIndex(e => e.at >= cutoff)
   if (keep > 0) r.entries.splice(0, keep)
+  if (r.entries.length > MAX_ROOM_ENTRIES) r.entries.splice(0, r.entries.length - MAX_ROOM_ENTRIES)
+  let bytes = r.entries.reduce((n, e) => n + e.cipher.length, 0)
+  while (bytes > MAX_ROOM_BYTES && r.entries.length > 1) bytes -= r.entries.shift().cipher.length
 }
 
 const server = createServer(async (req, res) => {
@@ -154,7 +189,11 @@ const server = createServer(async (req, res) => {
       // and an unbounded set on a public endpoint is a slow leak.
       for (const [jti, exp] of usedInvites) if (exp < Date.now()) usedInvites.delete(jti)
       usedInvites.set(claims.jti, claims.exp * 1000)
-      const namespace = String(device || claims.device || "device").replace(/[^A-Za-z0-9._-]/g, "-")
+      // ⚠ THE INVITE DECIDES THE NAME, not the joiner. Measured 2026-08-05: with the joiner's
+      // wish first, whoever redeemed an invite could ask for a namespace ALREADY IN USE in that
+      // room — and from then on write, legitimately signed, under another machine's writer
+      // names. The joiner may only choose when the inviter left it open.
+      const namespace = String(claims.device || device || "device").replace(/[^A-Za-z0-9._-]/g, "-")
       return json(res, 200, {
         token: issue(SECRET, { kind: "device", room: claims.room, ns: namespace }, DEVICE_TTL),
         room: claims.room,
@@ -167,7 +206,9 @@ const server = createServer(async (req, res) => {
     // Normally the CLI mints invites locally (it has the secret), so this endpoint is for the
     // case where only the relay knows it. Same authority either way.
     if (req.method === "POST" && path === "/invite") {
-      if (bearer(req) !== adminToken(SECRET)) return json(res, 401, { error: "admin token required" })
+      // Timing-safe, like every other secret comparison here: `!==` on a string leaks its
+      // matching prefix, and this one mints invites.
+      if (!equal(bearer(req), adminToken(SECRET))) return json(res, 401, { error: "admin token required" })
       const { room: roomName, device, ttl = 900 } = await readBody(req)
       if (!roomName) return json(res, 400, { error: "`room` is required" })
       return json(res, 200, {
@@ -199,8 +240,18 @@ const server = createServer(async (req, res) => {
           // the local `cwd`-based identity cannot reach across the network, so THIS is what
           // stands in for it, and a name is only worth the token behind it.
           if (nsOf(e.writer) !== claims.ns) continue
-          if (r.entries.some(x => x.id === e.id)) continue
-          const stored = { id: e.id, writer: e.writer, ts: e.ts, cipher: e.cipher, seq: ++r.seq, at: Date.now() }
+          // A writer name becomes a FILE NAME on every receiving machine. The client checks it
+          // too, but a name that could leave the room's directory has no business being stored
+          // and handed to everyone else in the first place.
+          if (unsafeName(e.writer) || unsafeName(e.ts)) continue
+          // ⚠ DEDUP ON (writer, ts), DERIVED HERE — never on the client's `id`. The id is
+          // `sha256(writer|ts)`, so it is PREDICTABLE: a member could post entries carrying the
+          // ids another writer's future entries will have, and the real ones would then be
+          // dropped here as duplicates. Silently. That is the failure mode this whole project
+          // is built against, and it would have been reachable from inside the room.
+          const key = `${e.writer}|${e.ts}`
+          if (r.entries.some(x => x.key === key)) continue
+          const stored = { key, id: e.id, writer: e.writer, ts: e.ts, cipher: e.cipher, seq: ++r.seq, at: Date.now() }
           r.entries.push(stored)
           accepted.push(e.id)
         }

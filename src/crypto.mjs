@@ -21,21 +21,37 @@ const unb64 = s => Buffer.from(s, "base64url")
 export const newRoomKey = () => b64(randomBytes(32))
 
 /**
+ * WHO WROTE IT IS PART OF WHAT WAS WRITTEN. The sender and the timestamp travel in the clear —
+ * the relay routes by them — so they are bound to the ciphertext as ADDITIONAL AUTHENTICATED
+ * DATA. Change either one in transit and the decrypt FAILS; it does not quietly yield a message
+ * under a new name.
+ *
+ * ⚠ Without this the relay could re-attribute any entry it forwards WITHOUT THE ROOM KEY: take
+ * a real ciphertext from A and serve it as B's. The body would decrypt perfectly, because the
+ * body never said who wrote it. The receiving side has nothing to notice — and "an agent cannot
+ * write in someone else's name", the invariant the local bus gets for free from the working
+ * directory, would have stopped at the network's edge.
+ */
+export const entryAad = (writer, ts) => `set-agent-comm:v1|${writer}|${ts}`
+
+/**
  * AES-256-GCM. The nonce is random per message and travels with the ciphertext; the auth tag
  * makes tampering detectable — a relay that flips a byte gets a failed decrypt, not a subtly
  * altered instruction. That matters here: the payload is instructions between agents.
  */
-export function encrypt(roomKey, plaintext) {
+export function encrypt(roomKey, plaintext, aad) {
   const iv = randomBytes(12)
   const c = createCipheriv("aes-256-gcm", unb64(roomKey), iv)
+  if (aad) c.setAAD(Buffer.from(aad, "utf8"))
   const body = Buffer.concat([c.update(plaintext, "utf8"), c.final()])
   return `${b64(iv)}.${b64(body)}.${b64(c.getAuthTag())}`
 }
 
-export function decrypt(roomKey, blob) {
+export function decrypt(roomKey, blob, aad) {
   const [iv, body, tag] = String(blob).split(".")
   if (!iv || !body || !tag) throw new Error("malformed ciphertext")
   const d = createDecipheriv("aes-256-gcm", unb64(roomKey), unb64(iv))
+  if (aad) d.setAAD(Buffer.from(aad, "utf8"))
   d.setAuthTag(unb64(tag))
   return d.update(unb64(body)) + d.final("utf8")
 }
@@ -44,7 +60,7 @@ export function decrypt(roomKey, blob) {
 
 const sign = (secret, payload) => b64(createHmac("sha256", secret).update(payload).digest())
 
-const equal = (a, b) => {
+export const equal = (a, b) => {
   const x = Buffer.from(a), y = Buffer.from(b)
   // Length must be compared first: `timingSafeEqual` throws on a mismatch instead of returning
   // false, and an exception is as good a signal to an attacker as a fast `false`.
