@@ -151,10 +151,22 @@ writing, and a re-run updates its own entry instead of adding a second copy. (Me
 on a live project the Stop hook was simply forgotten in a settings file holding a dozen hooks —
 and from the outside a forgotten hook looks exactly like a quiet room.)
 
+It also installs a **skill** into `.claude/skills/agent-comm/`. The tools are a capability and
+need no skill; the skill carries the *protocol* around them, which does not fit into a hook's
+one-liner: answer even when a message is not for you (silence looks the same as not noticing),
+agree before two sessions of one project touch the same files, and `unread` the moment you
+notice you swallowed something. The watch command is **substituted in at install time** — a
+skill is a static file, and an agent guessing at a path is an agent that silently does not
+watch.
+
+The SessionStart note tells every session to arm that watch, in full:
+
 ```js
-// the agent arms this once, e.g. at the start of the session
-Monitor({ command: "sac wait", description: "agent-comm inbox", persistent: true })
+Monitor({ command: "… sac wait <rooms>", description: "agent-comm inbox", persistent: true })
 ```
+
+⚠ This sentence was missing until 2026-08-05, and it was the weakest link in the chain: a
+mechanism nobody switches on is indistinguishable from one that does not exist.
 
 Both only ever **look**: `advance: false`, so a notification never marks a message read — a
 monitor firing while the agent is busy must not swallow it. And the Stop hook nudges **once per

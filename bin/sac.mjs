@@ -126,11 +126,29 @@ try {
         else changes.push(`${event}: already wired`)
       }
 
+      // The SKILL is the third piece, next to the two hooks: the hooks make sure a message is
+      // NOTICED, the skill says what to do with it. The tools (`send`, `inbox`) are a capability
+      // and need no skill; the protocol around them — answer even when it is not for you, agree
+      // before touching shared files, arm the monitor — does not fit into a hook's one-liner.
+      const sac = join(HOOKS, "..", "bin", "sac.mjs")
+      const skillFrom = join(HOOKS, "..", "skills", "agent-comm", "SKILL.md")
+      const skillTo = join(process.cwd(), ".claude", "skills", "agent-comm", "SKILL.md")
+      // The commands are baked in at install time: the skill is a static file, and an agent
+      // guessing at a path is an agent that silently does not watch.
+      const skill = readFileSync(skillFrom, "utf8")
+        .replaceAll("{{ROOMS}}", rooms.join(", "))
+        .replaceAll("{{SAC}}", `node ${sac}`)
+        .replaceAll("{{WAIT_COMMAND}}", `SET_AGENT_NAME=${AGENT} node ${sac} wait ${rooms.join(",")}`)
+      const skillState = !existsSync(skillTo) ? "installed"
+        : readFileSync(skillTo, "utf8") === skill ? "already current" : "updated"
+      changes.push(`skill: ${skillState}`)
+
       console.log(`${dry ? "[dry run] " : ""}${file}`)
       for (const c of changes) console.log(`  ${c}`)
       for (const [e, c] of Object.entries(wanted)) console.log(`  ${e} → ${c}`)
+      console.log(`  skill  → ${skillTo}`)
       if (dry) break
-      if (changes.every(c => c.endsWith("already wired"))) break
+      if (changes.every(c => c.endsWith("already wired") || c.endsWith("already current"))) break
 
       mkdirSync(dirname(file), { recursive: true })
       // A backup before every write. This file is not ours, and it is not reconstructible.
@@ -140,6 +158,15 @@ try {
         console.log(`  backup: ${bak}`)
       }
       writeFileSync(file, JSON.stringify(settings, null, 2) + "\n")
+
+      if (skillState !== "already current") {
+        mkdirSync(dirname(skillTo), { recursive: true })
+        // The skill file is ours end to end, so it is overwritten — but a hand-edited copy is
+        // still someone's work, so it is backed up first.
+        if (skillState === "updated") copyFileSync(skillTo, `${skillTo}.bak.${store.now().replace(/[:.]/g, "-")}`)
+        writeFileSync(skillTo, skill)
+      }
+
       console.log(`\nRestart (or resume) the session for it to take effect.\n` +
         `The MCP server, separately:  claude mcp add agent-comm -e SET_AGENT_ROOM=${rooms.join(",")} -- ` +
         `node ${join(HOOKS, "..", "src", "stdio.mjs")}`)

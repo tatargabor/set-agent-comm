@@ -12,7 +12,7 @@
     "sac": "./bin/sac.mjs",
     "set-agent-comm-mcp": "./src/stdio.mjs"
   },
-  "files": ["bin", "src", "hooks", "README.md", "LICENSE"],
+  "files": ["bin", "src", "hooks", "skills", "README.md", "LICENSE"],
   "engines": { "node": ">=20" },
   "scripts": {
     "http": "node src/http.mjs",

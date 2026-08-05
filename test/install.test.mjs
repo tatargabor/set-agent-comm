@@ -36,6 +36,16 @@ test("it adds both hooks and leaves everything else alone", () => {
   assert.equal(commands(s, "Stop").filter(c => c.includes("stop.mjs")).length, 1)
 })
 
+test("it installs the skill too, with the commands baked in", () => {
+  // The hooks make sure a message is NOTICED; the skill says what to do with it. The commands
+  // are substituted at install time because a skill is a static file, and an agent guessing at
+  // a path is an agent that silently does not watch.
+  const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
+  assert.doesNotMatch(skill, /\{\{/, "a placeholder was left in the installed skill")
+  assert.match(skill, /Monitor\(\{ command: ".*sac\.mjs wait team"/, "the watch command is not spelled out")
+  assert.match(skill, /^---\nname: agent-comm$/m, "the frontmatter is not what Claude Code reads")
+})
+
 test("it takes a backup before writing — this file is not reconstructible", () => {
   assert.ok(readdirSync(join(PROJ, ".claude")).some(f => f.startsWith("settings.json.bak.")))
 })

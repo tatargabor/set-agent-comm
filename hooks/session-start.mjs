@@ -19,9 +19,12 @@
  * ⚠ We do NOT register a non-existent path: a silent no-op looks exactly like working
  * watching from the outside.
  */
-import { basename } from "node:path"
+import { basename, dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { existsSync, mkdirSync, appendFileSync } from "node:fs"
 import * as store from "../src/store.mjs"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 const chunks = []
 for await (const c of process.stdin) chunks.push(c)      // the stdin JSON has to be consumed
@@ -94,7 +97,26 @@ const siblings = writer !== agent
         `you receive each other's messages.`
       : "")
   : ""
-if (notices.length || siblings) {
+/**
+ * ARM THE MONITOR. This sentence is the weakest link of the whole chain, and it was missing
+ * until 2026-08-05: `sac wait` in a Monitor is the ONLY thing that starts a turn in an idle
+ * session (`watchPaths` → `FileChanged` runs while idle but cannot wake it), and nothing asked
+ * the agent to arm it. A mechanism nobody switches on is indistinguishable from one that does
+ * not exist — and that is exactly how a delivered message went unanswered for half an hour.
+ *
+ * The command is spelled out in full, with an absolute path: `sac` may not be on the PATH, and
+ * an agent guessing at a command is an agent that silently does not watch.
+ */
+const SAC = join(HERE, "..", "bin", "sac.mjs")
+const waitCmd = `SET_AGENT_NAME=${agent} node ${SAC} wait ${rooms.join(",")}`
+const monitor = rooms.length
+  ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
+    `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +
+    `are idle at the prompt, so without it a message addressed to you waits until someone ` +
+    `happens to write to you here.`
+  : ""
+
+if (notices.length || siblings || monitor) {
   out.hookSpecificOutput.additionalContext =
     `[set-agent-comm]` +
     (notices.length
@@ -102,7 +124,8 @@ if (notices.length || siblings) {
         `touching the shared work.`
       : "") +
     siblings +
-    (rooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "")
+    (rooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "") +
+    monitor
 }
 
 process.stdout.write(JSON.stringify(out))
