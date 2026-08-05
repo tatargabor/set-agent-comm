@@ -18,7 +18,8 @@ export const TOOL_DEFS = [
       "Who is registered in the registry, and when they last gave a sign of life. " +
       "`silentMinutes: null` means WE DO NOT KNOW — not that they are dead. " +
       "`seats` lists the project's sessions with their full session id, `live` the ones open " +
-      "right now: more than one name there (`web-app#3f9c1a20`, `web-app#7b02e5d1`) means " +
+      "right now, and `lastWrote` when each last APPENDED anything — `lastSeen` is only a check-in, " +
+      "so do not read it as 'went quiet'. More than one live name (`web-app#3f9c1a20`, `web-app#7b02e5d1`) means " +
       "several sessions are open in that project — address the one you mean.",
     inputSchema: S({}),
   },

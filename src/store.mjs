@@ -247,6 +247,7 @@ export function register({ agent, project, session, room, pid = process.pid, wri
   return {
     ...reg.agents[agent],
     writer: seat,
+    seatSession: mine.session,
     coWriters: Object.keys(mine.writers).map(Number).filter(p => p !== pid),
   }
 }
@@ -267,6 +268,18 @@ export function heartbeat(agent) {
  * "definitely dead" are two different claims, and a false `false` errs in the wrong
  * direction: the caller would give up on a live partner.
  */
+/** When this seat last APPENDED anything, across its rooms — from the file's mtime. */
+function lastWrote(writer, rooms) {
+  let newest = 0
+  for (const room of rooms) {
+    try {
+      const st = statSync(busFile(room, writer))
+      if (st.size && st.mtimeMs > newest) newest = st.mtimeMs
+    } catch { /* no file in that room — it never wrote there */ }
+  }
+  return newest ? now(new Date(newest)) : null
+}
+
 export function agents() {
   const reg = readJson(REGISTRY, { agents: {} })
   return Object.values(reg.agents).map(a => {
@@ -276,8 +289,14 @@ export function agents() {
     // The FULL session id is reported, not the shortened form in the name: that is what can be
     // matched against what Claude Code shows for a session, which is the point of the whole
     // naming scheme — to be able to say WHICH window that seat is.
+    //
+    // `lastWrote` is a SEPARATE fact from `lastSeen`, and conflating them misleads: checking in
+    // is not writing. Measured 2026-08-05 — an agent read "silent since 09:03" off the registry
+    // for a seat and concluded it had gone quiet. Cheap to answer honestly: the mtime of that
+    // seat's files, no parsing.
     const seats = Object.entries(a.seats || {}).map(([writer, s]) => ({
       writer, session: s.session ?? null, live: seatState(s), lastSeen: s.lastSeen ?? null,
+      lastWrote: lastWrote(writer, a.rooms || []),
     }))
     return {
       ...a,
@@ -353,14 +372,19 @@ export function send({ room, from, type = "FACT", text, re }) {
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
   // `from` is a SEAT, so the registry entry belongs to the project behind it. `writer` keeps
   // the seat as it is: sending a message may not reshuffle who sits where.
-  const { coWriters } = register({ agent: seatBase(from), writer: from, room })
+  const { coWriters, seatSession } = register({ agent: seatBase(from), writer: from, room })
   // Told to the WRITER, at the moment of writing: by the time the reader notices that one
-  // sender is contradicting itself, the wrong instruction has already been acted on. With a
-  // session id every session has its own seat, so this can now only fire for a caller that
-  // has none (cron, a bare terminal, a non-Claude-Code client).
-  const warning = coWriters.length
+  // sender is contradicting itself, the wrong instruction has already been acted on.
+  //
+  // ⚠ ONLY for a seat with no session (cron, a bare terminal, a non-Claude-Code client). A
+  // seat that HAS one belongs to exactly one session by construction, and several live pids on
+  // it are that session's own processes — the MCP server, the hook, the `sac wait` monitor.
+  // Measured 2026-08-05 on the live bus: warning on those made an agent report "two writers on
+  // one file" as a standing condition of the project. It was false, and a false alarm is worse
+  // than none — it was reasoned from correctly, all the way to a wrong conclusion.
+  const warning = coWriters.length && !seatSession
     ? `⚠ ${coWriters.length} other live process(es) write into the SAME file as \`${from}\` ` +
-      `(pid ${coWriters.join(", ")}) — they have no session id, so they got no seat of their own. ` +
+      `(pid ${coWriters.join(", ")}) — this name has no session id, so they share your file. ` +
       `The reader cannot tell your entries from theirs: say which thread you are, and do not ` +
       `assume an earlier entry under this name was yours.`
     : undefined

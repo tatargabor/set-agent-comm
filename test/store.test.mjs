@@ -182,6 +182,37 @@ test("`agents` reports the FULL session id — that is what identifies the windo
   assert.equal(seat.live, true, "a seat with a live process must not be reported as uncertain")
 })
 
+test("REGRESSION: several processes of ONE session are not a co-writer warning", () => {
+  // Measured 2026-08-05 on the live bus. A session runs several processes — the MCP server, the
+  // hook, the `sac wait` monitor — and they all check in on the same seat. Warning on that made
+  // an agent report "two writers on one file" as a standing condition of the project. It was
+  // false; a seat with a session belongs to exactly one session by construction.
+  const s = "aa11bb22-cccc-4e61-9f8d-000000000009"
+  const w = store.claimSeat({ agent: "multiproc", session: s })
+  store.register({ agent: "multiproc", session: s, room: "mp", writer: w, pid: process.ppid })  // another live process
+  const out = store.send({ room: "mp", from: w, type: "FACT", text: "one session, two processes" })
+  assert.equal(out.warning, undefined, `a session's own second process was reported as a rival writer: ${out.warning}`)
+})
+
+test("but a SESSIONLESS name shared by live processes still warns", () => {
+  // The case the warning exists for: no session id, so several callers really do share a file.
+  store.register({ agent: "sessionless", room: "mp", pid: process.ppid })
+  const out = store.send({ room: "mp", from: "sessionless", type: "FACT", text: "who am I" })
+  assert.ok(out.warning, "a genuinely shared file was not announced")
+  assert.match(out.warning, new RegExp(String(process.ppid)))
+})
+
+test("`agents` reports when a seat last WROTE, not only when it checked in", () => {
+  // Measured: an agent read "silent since 09:03" off the registry and concluded a seat had gone
+  // quiet. Checking in and writing are different facts, and the registry only carried the first.
+  const seat = store.agents().find(a => a.agent === "multiproc").seats[0]
+  assert.ok(seat.lastWrote, "a seat that has written has no lastWrote")
+  assert.ok(Date.parse(seat.lastWrote) > 0)
+  const silent = store.agents().find(a => a.agent === "twinproj")
+    .seats.find(s => s.writer === "twinproj#7b02e5d1")
+  assert.equal(silent.lastWrote, null, "a seat that never wrote must say so, not guess")
+})
+
 test("`live` has three values — 'we do not know' is not 'dead'", () => {
   // The same rule as `silentMinutes`. A session running with only the hook and the CLI has no
   // lasting process, so a missing pid alone may not be called dead — that would send the

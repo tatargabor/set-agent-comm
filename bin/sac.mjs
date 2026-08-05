@@ -63,8 +63,11 @@ try {
         // now and what to address them by. The suffix of the name is the session id, so it can
         // be matched against the session a Claude Code window reports for itself.
         const live = (a.seats || []).filter(x => x.live !== false)
+        // `wrote` is shown next to the seat, because "checked in" and "wrote" are different
+        // facts and reading one as the other is how a live session gets called silent.
         live.forEach((x, i) => console.log(
-          `  ${i === live.length - 1 ? "└" : "├"} ${x.writer}${x.live === null ? "  (?)" : ""}`))
+          `  ${i === live.length - 1 ? "└" : "├"} ${x.writer.padEnd(26)}${x.live === null ? "(?) " : "    "}` +
+          (x.lastWrote ? `wrote ${x.lastWrote.slice(11, 16)}` : "never wrote")))
       }
       break
     }
