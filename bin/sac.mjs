@@ -169,12 +169,14 @@ try {
         }
         bridge.writeConfig(cfg)
       }
-      const code = issue(cfg.relay.secret, {
-        kind: "invite", room, device, jti: randomUUID(),
-      }, Number(rest[rest.indexOf("--ttl") + 1]) || 900)
+      // The stated validity must be the REAL one: a `--ttl` that the printed text contradicts
+      // is the kind of small lie that makes someone trust the next sentence less.
+      const ttl = Number(rest[rest.indexOf("--ttl") + 1]) || 900
+      const code = issue(cfg.relay.secret, { kind: "invite", room, device, jti: randomUUID() }, ttl)
       const payload = Buffer.from(JSON.stringify({ u: cfg.relay.url, r: room, c: code, k: key })).toString("base64url")
       console.log(`sac-join:${payload}\n`)
-      console.log(`Valid for 15 minutes, for "${device}". On the other machine:\n` +
+      const human = ttl % 3600 === 0 ? `${ttl / 3600} hour(s)` : `${Math.round(ttl / 60)} minutes`
+      console.log(`Valid for ${human}, for "${device}". On the other machine:\n` +
         `  sac join sac-join:…\n\n` +
         `⚠ Hand it over OUT OF BAND (Signal, a call). It carries the room key, which is what\n` +
         `  keeps the relay unable to read the room — send it through the relay and that is gone.`)
