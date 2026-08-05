@@ -65,8 +65,11 @@ try {
         const live = (a.seats || []).filter(x => x.live !== false)
         // `wrote` is shown next to the seat, because "checked in" and "wrote" are different
         // facts and reading one as the other is how a live session gets called silent.
+        // The column is sized to the longest name present: a remote seat carries its machine
+        // (`set-agent-comm@workstation`) and a fixed width ran the columns together.
+        const w = Math.max(20, ...live.map(x => x.writer.length))
         live.forEach((x, i) => console.log(
-          `  ${i === live.length - 1 ? "└" : "├"} ${x.writer.padEnd(26)}${x.live === null ? "(?) " : "    "}` +
+          `  ${i === live.length - 1 ? "└" : "├"} ${x.writer.padEnd(w)}  ${x.live === null ? "(?) " : "    "}` +
           (x.lastWrote ? `wrote ${x.lastWrote.slice(11, 16)}` : "never wrote")))
       }
       break
