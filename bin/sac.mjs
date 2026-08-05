@@ -25,12 +25,7 @@ const HOOKS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "hooks")
  * silent upload failure is indistinguishable from a delivered message, which is the one thing
  * this project refuses to do.
  */
-const relayPush = async room => {
-  const { push, roomConfig } = await import("../src/bridge.mjs")
-  if (!roomConfig(room)) return {}
-  try { const r = await push({ room }); return { relay: `pushed ${r.pushed ?? 0}` } }
-  catch (e) { return { relay: `queued (relay unreachable: ${e.message})` } }
-}
+const relayPush = async room => (await import("../src/bridge.mjs")).pushReport(room)
 
 const AGENT = process.env.SET_AGENT_NAME || basename(process.cwd())
 const SESSION = process.env.CLAUDE_CODE_SESSION_ID || null

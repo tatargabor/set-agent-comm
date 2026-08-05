@@ -90,16 +90,36 @@ export function createMcpServer(identify) {
         throw new Error(
           `No room given and no default. Existing rooms: ${store.rooms().join(", ") || "(none)"}`)
       }
+      // ⚠ THE REMOTE LEG BELONGS HERE TOO. Measured 2026-08-05 on a Mac mini: the relay push
+      // lived only in the CLI, so an agent — which always works through MCP, never the CLI —
+      // wrote locally, saw a successful `send`, and nothing ever left the machine. Its eight
+      // messages were invisible to the other side. Loaded lazily so the local path stays
+      // dependency-free and pays nothing when no relay is configured.
+      const bridge = async () => await import("./bridge.mjs")
       let out
       switch (req.params.name) {
         case "agents": out = store.agents(); break
         case "rooms": out = store.rooms(); break
-        case "send":
-          out = store.send({ room: needRoom(), from: agent, type: a.type, text: a.text, re: a.re }); break
-        case "inbox":
-          out = store.inbox({ room: needRoom(), agent, advance: a.advance !== false, limit: a.limit }); break
-        case "history":
-          out = store.history({ room: needRoom(), from: a.from, limit: a.limit }); break
+        case "send": {
+          const r = needRoom()
+          out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re })
+          out = { ...out, ...(await (await bridge()).pushReport(r)) }
+          break
+        }
+        case "inbox": {
+          const r = needRoom()
+          // Fetch first, then read: otherwise "no new messages" would be answered while the
+          // message waits one HTTP call away.
+          const fetched = await (await bridge()).pullReport(r)
+          out = { ...store.inbox({ room: r, agent, advance: a.advance !== false, limit: a.limit }), ...fetched }
+          break
+        }
+        case "history": {
+          const r = needRoom()
+          const fetched = await (await bridge()).pullReport(r)
+          out = { ...store.history({ room: r, from: a.from, limit: a.limit }), ...fetched }
+          break
+        }
         default: throw new Error(`unknown tool: ${req.params.name}`)
       }
       return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] }

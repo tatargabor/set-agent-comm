@@ -164,6 +164,26 @@ function save(room, patch) {
   writeConfig(cfg)
 }
 
+/**
+ * Push, and REPORT what happened — the shape every caller needs, so that "the relay is down"
+ * can never be dressed up as a delivered message. Never throws: the entry is already on disk.
+ */
+export async function pushReport(room) {
+  if (!roomConfig(room)) return {}
+  try { const r = await push({ room }); return { relay: `pushed ${r.pushed ?? 0}` } }
+  catch (e) { return { relay: `queued (relay unreachable: ${e.message})` } }
+}
+
+/**
+ * Fetch anything waiting on the relay before a read. Same rule in reverse: "nothing new here"
+ * must not be the answer when the message is sitting one HTTP call away.
+ */
+export async function pullReport(room) {
+  if (!roomConfig(room)) return {}
+  try { const r = await pull({ room, wait: 0 }); return r.received ? { relayReceived: r.received } : {} }
+  catch (e) { return { relay: `not fetched (relay unreachable: ${e.message})` } }
+}
+
 /** Every room that has a relay AND is in this session's room list. */
 export const bridgedRooms = value => {
   const configured = new Set(remoteRooms())
