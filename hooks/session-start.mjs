@@ -48,6 +48,7 @@ const rooms = store.parseRooms(process.env.SET_AGENT_ROOM)
 const out = { hookSpecificOutput: { hookEventName: "SessionStart" } }
 const watchPaths = []
 const notices = []
+const backlog = []
 
 /**
  * CATCH-UP for rooms that reach another machine: pull whatever arrived while no session was
@@ -90,11 +91,14 @@ for (const room of rooms) {
   // of it, so it cannot break anything.
   watchPaths.push(dir, ...watch)
 
-  // The count that matters at startup is what is FOR US — but the rest is named too, because
-  // "3 unread" and "3 unread, none of them yours" lead to different first moves.
-  const { unread, unreadForMe } = store.inbox({ room, agent: writer, advance: false })
-  if (unread) notices.push(`${unreadForMe} for you in "${room}"` +
-    (unread > unreadForMe ? ` (+${unread - unreadForMe} for others)` : "") + ` (\`sac inbox ${room}\`)`)
+  // ⚠ ONLY WHAT NEEDS AN ANSWER IS ANNOUNCED HERE (see `store.wakes`). A fresh seat routinely
+  // inherits a large backlog — measured 2026-08-06: a session born at 09:56 was told "48 unread
+  // FOR YOU" — and a number that large at the top of a session is not information, it is a wall.
+  // The backlog is mentioned in one clause, without a call to action: it is history, and
+  // `history` is what it is for.
+  const { unread, unreadWaking } = store.inbox({ room, agent: writer, advance: false })
+  if (unreadWaking) notices.push(`${unreadWaking} in "${room}" needing an answer (\`sac inbox ${room}\`)`)
+  else if (unread) backlog.push(`${unread} in "${room}"`)
 }
 
 if (watchPaths.length) out.hookSpecificOutput.watchPaths = watchPaths
@@ -134,16 +138,22 @@ const monitor = rooms.length
     `happens to write to you here.`
   : ""
 
-if (notices.length || siblings || monitor) {
+if (notices.length || backlog.length || siblings || monitor) {
   out.hookSpecificOutput.additionalContext =
     `[set-agent-comm]` +
     (notices.length
-      ? ` Unread messages: ${notices.join(", ")}. Read them with the \`inbox\` tool before ` +
+      ? ` Waiting for you: ${notices.join(", ")}. Read it with the \`inbox\` tool before ` +
         `touching the shared work.`
       : "") +
+    (backlog.length ? ` Unread but not urgent: ${backlog.join(", ")}.` : "") +
     siblings +
     (rooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "") +
-    monitor
+    monitor +
+    // The habit is cheap to start and expensive to retrofit: an undeclared focus is what makes
+    // both the letterbox and every other session guess at what this window is doing.
+    (rooms.length ? ` When you start a piece of work, say so once with the \`focus\` tool ` +
+      `(one sentence + the paths) — the others read it instead of asking, and the inbox watch ` +
+      `uses it to decide what is worth interrupting you for.` : "")
 }
 
 process.stdout.write(JSON.stringify(out))

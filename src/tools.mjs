@@ -16,13 +16,31 @@ export const TOOL_DEFS = [
   {
     name: "agents",
     description:
-      "Who is registered in the registry, and when they last gave a sign of life. " +
+      "Who is registered in the registry, when they last gave a sign of life, AND WHAT EACH IS " +
+      "WORKING ON (`focus`). Read this before asking the room who is doing what — that is a " +
+      "lookup, not a conversation. " +
       "`silentMinutes: null` means WE DO NOT KNOW — not that they are dead. " +
       "`seats` lists the project's sessions with their full session id, `live` the ones open " +
       "right now, and `lastWrote` when each last APPENDED anything — `lastSeen` is only a check-in, " +
       "so do not read it as 'went quiet'. More than one live name (`web-app#3f9c1a20`, `web-app#7b02e5d1`) means " +
       "several sessions are open in that project — address the one you mean.",
     inputSchema: S({}),
+  },
+  {
+    name: "focus",
+    description:
+      "Declare in one sentence what you are working on, and which paths you are in. Two jobs: " +
+      "the others read it with `agents` instead of asking you, and the watcher that decides " +
+      "whether an incoming message should interrupt you measures it against this. " +
+      "Set it when you start a piece of work and when you switch; call it with no arguments to " +
+      "read back what you last declared. An empty `text` clears it.",
+    inputSchema: S({
+      text: { type: "string", description: "One sentence: what you are doing now" },
+      files: {
+        type: "array", items: { type: "string" },
+        description: "The paths you are working in — this is what tells a sibling session to stay out",
+      },
+    }),
   },
   {
     name: "rooms",
@@ -37,19 +55,44 @@ export const TOOL_DEFS = [
     description:
       "Append an entry to your own file in the room (append, not rewrite). " +
       "The sender and the timestamp are generated SERVER-SIDE — do not write a name or a date into the text yourself. " +
-      "`to` says WHO it is for; without it the entry is a broadcast and wakes every session in the room.",
+      "WHO IS INTERRUPTED FOLLOWS FROM WHAT YOU SEND: `to` claims that agent's attention; without " +
+      "`to`, a QUESTION or REQUEST interrupts the whole room and a FACT or ANSWER interrupts " +
+      "nobody — it is delivered and read when they next look. So address it when you need an " +
+      "answer, and broadcast a FACT freely: it costs the others nothing. " +
+      "BEFORE YOU SEND, ASK: does anyone have to DO something because of this? If not, broadcast a " +
+      "FACT. If yes and you know who, make it a REQUEST or QUESTION addressed to that one seat. A " +
+      "FACT with an errand hidden inside it wakes NOBODY and waits until someone happens to look — " +
+      "measured: a six-session run in which all five entries were broadcast FACTs, two of them " +
+      "carrying work for other projects. " +
+      "Do not send acknowledgements ('received', 'agreed', 'closing this off') — silence after a " +
+      "FACT is the correct response, and an ack is a message the others must still read. " +
+      "THE RESULT TELLS YOU WHAT THE ENTRY DID: `wakes` lists the seats it will interrupt, and " +
+      "`notice` appears when that list is empty or the text is long. If it woke nobody and " +
+      "somebody did have to act, send it again addressed — do not wait for an answer.",
     inputSchema: S({
       room: ROOM,
       type: { type: "string", enum: store.TYPES, description: "The type of the entry" },
-      text: { type: "string", description: "The text of the entry (markdown)" },
+      text: {
+        type: "string",
+        description:
+          "The text of the entry (markdown). A SHORT PARAGRAPH: the decision and what it changes " +
+          "for someone else. Measured average on the live bus: 2168 characters, every one of them " +
+          "read by every seat in the room. The reasoning and the code belong in the files — name " +
+          "the file and the symbol instead of quoting them.",
+      },
       re: { type: "string", description: "Which entry this answers — its timestamp" },
       to: {
         type: "array", items: { type: "string" },
         description:
-          "Who it is addressed to: a seat (`consumer-a-atlas#3f9c1a20`) or a project name " +
-          "(`consumer-a-atlas` — every session of it, on every machine). ONLY the addressees are woken; " +
-          "everyone else still sees the entry in their inbox, marked `forMe: false`. " +
-          "Leave it out in a room of two, or when it genuinely concerns everyone. " +
+          "Who it is addressed to: a SEAT (`consumer-a-atlas#3f9c1a20`) or a project name " +
+          "(`consumer-a-atlas` — every session of it, on every machine). " +
+          "PREFER THE SEAT: a project with four open sessions wakes all four, and three of them " +
+          "will spend a turn working out it was not them. When you reply, the seat you want is " +
+          "the `from` of the entry you are answering. " +
+          "ONE NAME, NOT A LIST: naming one seat is never second-guessed, naming several is judged " +
+          "as the broadcast it is. Two seats owing you two different things is TWO sends. " +
+          "Everyone else still receives the entry, marked `forMe: false` — addressing restricts " +
+          "who is interrupted, never who may read. " +
           "A name that is in no room is an ERROR, never a silent non-delivery — `agents` lists who is there.",
       },
     }, ["text"]),
@@ -61,8 +104,12 @@ export const TOOL_DEFS = [
       "with `advance: false` you only take a look. It never returns your own messages. " +
       "An entry marked `sibling: true` comes from ANOTHER SESSION OF THIS SAME PROJECT — " +
       "it works in the same working directory as you do. " +
-      "`forMe: false` means it was addressed to someone else (`to`) — you are reading along, " +
-      "you were not asked; `unreadForMe` counts the ones that ARE yours.",
+      "`forMe: false` means it was addressed to someone else — you are reading along, you were " +
+      "not asked. `wakes: true` marks the ones that are a claim on your attention and are owed " +
+      "an answer (`unreadWaking` counts them); everything else is yours to read and act on or " +
+      "not, and needs no reply. " +
+      "A long entry that does NOT wake you arrives as its opening, with `clipped: <full length>` " +
+      "— use `history` if you need the whole thing. An entry that wakes you is never clipped.",
     inputSchema: S({
       room: ROOM,
       advance: { type: "boolean", description: "Should the read cursor move forward (default: true)" },
@@ -119,6 +166,13 @@ export function createMcpServer(identify) {
       let out
       switch (req.params.name) {
         case "agents": out = store.agents(); break
+        case "focus":
+          // No `text` at all is a QUERY, not a clear — clearing is `text: ""`. An agent calling
+          // `focus` to see what it declared may not thereby erase it.
+          out = a.text === undefined
+            ? (store.getFocus(agent) || { agent, focus: null })
+            : store.setFocus({ agent, text: a.text, files: a.files })
+          break
         case "rooms": {
           // Local AND invited: a room you hold a token for must be listed before its first
           // message too, or an agent cannot tell that it may speak there at all.

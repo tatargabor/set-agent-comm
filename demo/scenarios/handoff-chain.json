@@ -1,0 +1,77 @@
+{
+  "name": "átadási lánc — a hír, aminek van következménye",
+  "room": "team",
+  "model": "claude-sonnet-5",
+  "projects": {
+    "catalog": ["a terméktörzs és az SKU-k (src/sku.mjs)", "a kategóriafa (src/tree.mjs)"],
+    "pricing": ["az árlisták (src/pricelist.mjs)", "a kedvezményszabályok (src/discount.mjs)"],
+    "invoicing": ["a számlasorok (src/line.mjs)", "a számla-evalok (tests/eval/)"]
+  },
+  "files": {
+    "catalog": {
+      "src/sku.mjs": "export const skus = [\"A-1X\", \"B-2\", \"C-3\"]\n",
+      "src/tree.mjs": "export const tree = { root: [\"A\", \"B\", \"C\"] }\n"
+    },
+    "pricing": {
+      "src/pricelist.mjs": "export const list = [{ sku: \"A-1\", net: 1000 }, { sku: \"B-2\", net: 500 }]\n",
+      "src/discount.mjs": "export const discount = (net, pct) => net * (1 - pct)\n"
+    },
+    "invoicing": {
+      "src/line.mjs": "export const line = (sku, net, qty) => ({ sku, amount: net * qty })\n",
+      "tests/eval/cases.json": "[{\"sku\": \"A-1\", \"net\": 1000, \"qty\": 2, \"expect\": 2000}]\n"
+    }
+  },
+
+  "intro": "Te a(z) {{PROJECT}} projekt egyik ülése vagy, a sávod: {{ROLE}}. Nézd meg a fájljaidat, és készülj a munkára. Ne írj a szobába — most csak helyezkedj el.",
+
+  "rounds": [
+    {
+      "title": "hír, aminek EGY sáv issza meg a levét — megtalálja-e, melyik",
+      "seat": "catalog/0",
+      "prompt": "Az A-1 SKU-t átneveztük A-1X-re, a src/sku.mjs-ben már ez áll — nézd meg. Aki bárhol a régi kódot használja, annál el fog törni. Neked innen nincs több dolgod vele. Intézd el, ahogy jónak látod."
+    },
+    {
+      "title": "a lánc közepe: aki megkapta, csinálja meg és adja tovább, ha van kinek",
+      "seat": "pricing/0",
+      "prompt": "Folytasd a munkád."
+    },
+    {
+      "title": "a lánc vége: a törött eval",
+      "seat": "invoicing/1",
+      "prompt": "Folytasd a munkád."
+    },
+    {
+      "title": "gazdátlan döntés: két sávot érint, egyiké sem",
+      "seat": "pricing/1",
+      "prompt": "Ki kell mondani, hogy a kedvezmény az ÁFÁS vagy az ÁFA nélküli összegre vonatkozik-e. A src/discount.mjs nettóval számol, de a számlán bruttó szerepel — a döntés a te sávodat ÉS a számlázást is meghatározza, és egyedül egyik sáv sem dönthet róla. Vidd dűlőre."
+    },
+    {
+      "title": "amit egyedül is meg tud csinálni — a csend a helyes eredmény",
+      "seat": "catalog/1",
+      "prompt": "Vedd fel a C-3 SKU-t a kategóriafába a src/tree.mjs-ben a 'C' ág alá. Csak a te fájlod, senki másnak nincs vele dolga."
+    },
+    {
+      "title": "testvér-ütközés: mindketten ugyanahhoz a fájlhoz nyúlnának",
+      "parallel": [
+        { "seat": "catalog/0", "prompt": "A következő munkád a src/tree.mjs átrendezése: a leveleket ábécésorrendbe kell tenni. Mielőtt hozzákezdesz, győződj meg róla, hogy nem ütközöl senkivel." },
+        { "seat": "invoicing/0", "prompt": "Folytasd a munkád." }
+      ]
+    },
+    {
+      "title": "a válaszkör — itt derül ki, visszatér-e a nyugtázás",
+      "parallel": [
+        { "seat": "invoicing/0", "prompt": "Folytasd a munkád." },
+        { "seat": "pricing/1", "prompt": "Folytasd a munkád." },
+        { "seat": "catalog/1", "prompt": "Folytasd a munkád." }
+      ]
+    },
+    {
+      "title": "utolsó kör: senkinek nincs valódi mondanivalója",
+      "parallel": [
+        { "seat": "pricing/0", "prompt": "Folytasd a munkád." },
+        { "seat": "invoicing/1", "prompt": "Folytasd a munkád." },
+        { "seat": "catalog/0", "prompt": "Folytasd a munkád." }
+      ]
+    }
+  ]
+}

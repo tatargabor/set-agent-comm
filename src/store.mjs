@@ -10,6 +10,9 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, un
          existsSync, renameSync, openSync, fsyncSync, closeSync, statSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { homedir, hostname } from "node:os"
+// Only for the non-Linux branch of `parentOf` — everything else here stays dependency-free and
+// synchronous, because hooks and cron call it where there is no node_modules and no event loop.
+import { execFileSync } from "node:child_process"
 
 export const ROOT = process.env.SET_AGENT_COMM_DIR
   || join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "set-agent-comm")
@@ -18,8 +21,24 @@ const REGISTRY = join(ROOT, "registry.json")
 const CHANNELS = join(ROOT, "channels")
 const CURSORS = join(ROOT, "cursors.json")
 const NUDGES = join(ROOT, "nudges.json")
+const FOCUS = join(ROOT, "focus.json")
 
 export const TYPES = ["QUESTION", "ANSWER", "FACT", "REQUEST"]
+
+// Where "long" starts. Not a limit — `send` never refuses — the point at which the writer is told
+// how much everyone else is about to read. The measured average was 2168 characters; entries of
+// 2701 and 3284 were still going out two days after the wake-up rule landed.
+const LONG_CHARS = Number(process.env.SET_AGENT_LONG_CHARS) || 1500
+
+// Where an entry stops being delivered whole to a reader who was NOT woken by it. 0 turns it off.
+//
+// ⚠ This is the only lever on the READER's bill, and the reader's bill is the big one. Measured
+// across the live rooms on 2026-08-06: `consumer-a-atlas` alone held 157 entries averaging 2338
+// characters — with three sessions open that is roughly 1.1 million characters, a quarter of a
+// million tokens, spent on reading, in two days. An entry that is entitled to interrupt you always
+// arrives whole; the rest arrive lede-first, with `history` one call away.
+const INBOX_CHARS = process.env.SET_AGENT_INBOX_CHARS === undefined
+  ? 1200 : Number(process.env.SET_AGENT_INBOX_CHARS)
 
 /**
  * The entry type lives ON DISK, so the pre-English keywords are still out there in existing
@@ -69,6 +88,66 @@ export function isForMe(entry, me) {
   if (!entry.to?.length) return true
   const forms = addressForms(me)
   return entry.to.some(n => forms.has(n))
+}
+
+/**
+ * DOES THIS ENTRY START A TURN? — a strictly narrower question than `isForMe`, and the two were
+ * conflated until 2026-08-06. Reading is cheap; being woken is not. A wake-up is a whole turn of
+ * the main agent, on the expensive model, with the room's context pulled in behind it.
+ *
+ * ⚠ THE MEASUREMENT THIS RULE COMES FROM, taken over the first two days of live use across the
+ * `consumer-a-atlas` / `consumer-a-promo` / `consumer-a-demo` rooms:
+ *
+ *   190 entries were written. 190 of them were broadcasts — `to` was used ZERO times, in
+ *   47 opportunities after it existed. So "only the addressee is woken" was correct code that
+ *   nothing ever invoked, and in practice EVERY entry woke EVERY seat.
+ *
+ *   In `consumer-a-atlas` this produced a closing handshake that could not terminate: 23 entries in
+ *   8 minutes between four seats, every one of them a broadcast `FACT` averaging 2168
+ *   characters, every one of them `re:`-chained to the last, with content like "Vettem — és jól
+ *   tetted…" and "Ezzel tényleg lezárom." The message announcing the end of the conversation
+ *   woke everyone and asked, by the protocol then in force, for another answer.
+ *
+ * So the default flips, and it flips HERE rather than in a prompt — an optional field that
+ * 190 entries declined to use is not a mechanism, it is a suggestion:
+ *
+ *   named in `to`                    → wakes. Addressing someone is now the ONLY way to claim
+ *                                      a specific agent's attention, which is what makes `to`
+ *                                      worth typing.
+ *   `re:` points at MY entry         → wakes, WHATEVER THE TYPE. A reply to what I wrote is
+ *                                      aimed at me in all but name.
+ *   broadcast QUESTION / REQUEST     → wakes. A question with no addressee is a question to the
+ *                                      room, and the room is allowed to be interrupted by one.
+ *   anything else                    → DOES NOT WAKE. It is delivered, it is unread, `inbox`
+ *                                      hands it over — it simply does not buy a turn.
+ *
+ * Against the measured traffic this is a 91% cut: of 133 entries in `consumer-a-atlas`, 12 would have
+ * woken anyone (11 REQUEST + 1 KÉRÉS), instead of all 133.
+ *
+ * ⚠ THE `re:` RULE IS TYPE-BLIND, and it was not until a live run on 2026-08-06 proved it had to
+ * be. In `demo/scenarios/three-projects-two-seats.json`, `invoicing` asked a QUESTION addressed to
+ * a `pricing` seat; another `pricing` seat answered it — correctly, with `re:` pointing straight at
+ * the question — but typed the entry `FACT` rather than `ANSWER`. The old rule looked at `re:` only
+ * on an `ANSWER`, so `unreadWaking` was 0 and the asker was never woken. Two rounds later it was
+ * still writing "no answer from pricing yet, I am waiting". Delivered, unread, nobody woken, the
+ * waiting party blocked — the exact failure this whole project exists to prevent, reintroduced by
+ * my own rule through a type the sender happened to pick.
+ *
+ * A sender's choice of type may not decide whether the person they are replying to hears them.
+ *
+ * @param mine  the timestamps THIS seat has written in the room (see `ownTimestamps`) — without
+ *              it the `re:` rule is off, and a reply reaches nobody by that route.
+ */
+export function wakes(entry, me, mine) {
+  if (!isForMe(entry, me)) return false
+  if (entry.to?.length) return true
+  if (entry.re && mine?.has(entry.re)) return true
+  return entry.type === "QUESTION" || entry.type === "REQUEST"
+}
+
+/** The timestamps this seat has written in the room — what someone else's `re:` can point at. */
+export function ownTimestamps(room, agent) {
+  return new Set(parse(busFile(room, agent), agent).map(e => e.ts))
 }
 
 /**
@@ -134,6 +213,65 @@ const alive = pid => {
   try { process.kill(pid, 0); return true } catch (e) { return e.code === "EPERM" }
 }
 
+// ── which window are we in ────────────────────────────────────────────────────
+/**
+ * The pid and name of a process's parent. Linux from `/proc`, everything else through `ps`.
+ * `/proc/<pid>/stat` is `pid (comm) state ppid …`, and the comm may itself contain spaces and
+ * parentheses — hence the search for the LAST `)` rather than a split on whitespace.
+ */
+function parentOf(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    const close = stat.lastIndexOf(")")
+    return { comm: stat.slice(stat.indexOf("(") + 1, close), ppid: Number(stat.slice(close + 2).split(" ")[1]) }
+  } catch { /* not Linux, or the process is gone */ }
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8" }).trim()
+    const [pp, ...rest] = out.split(/\s+/)
+    return { comm: rest.join(" "), ppid: Number(pp) }
+  } catch { return null }
+}
+
+/**
+ * WHICH CLAUDE CODE WINDOW THIS PROCESS BELONGS TO — the pid of the nearest `claude` ancestor.
+ *
+ * ⚠ Measured 2026-08-06 in a live `consumer-a` window, and it is the reason this exists. The MCP
+ * server (pid 1669607) was started by that window's own `claude` process (1668522) at 10:46:15,
+ * and Claude Code put `CLAUDE_CODE_SESSION_ID=fef3e62f…` into its environment — an id with NO
+ * TRANSCRIPT ON DISK, while the session was demonstrably writing `8a31f74c….jsonl` at the time.
+ * The SessionStart hook, in the same window, got the real one. So the two claimed two seats, two
+ * empty files appeared in the room within a minute for one window, and the agent read its inbox
+ * on a cursor that belonged to nobody: the hook said "1 unread", the tool said "0".
+ *
+ * The session id is therefore not something we can rely on being the same for both halves. The
+ * owning `claude` process is: the MCP server is its child, and a hook or a `sac` call is its
+ * grandchild through a shell. That pid is unforgeable, needs no configuration, and is identical
+ * for everything running inside one window.
+ *
+ * `SET_AGENT_OWNER_PID` overrides it — for a wrapper that knows better, and for the tests, which
+ * cannot conjure a `claude` ancestor.
+ */
+export function ownerPid(start = process.pid) {
+  // `SET_AGENT_OWNER_PID=0` (or any non-positive value) says "no window" and stops the walk —
+  // that is the honest answer for cron, a bare terminal, and the tests, where a `claude` ancestor
+  // would be found but would not be the caller's window.
+  const forced = process.env.SET_AGENT_OWNER_PID
+  if (forced) return Number(forced) > 0 ? Number(forced) : null
+  let pid = start
+  for (let i = 0; i < 12 && pid > 1; i++) {
+    const p = parentOf(pid)
+    if (!p) return null
+    if (/(^|\/)claude$/.test(p.comm)) return pid
+    pid = p.ppid
+  }
+  return null
+}
+
+/** The seat this window already holds, whatever either half thinks its session id is. */
+const seatOfOwner = (seats, owner) => owner
+  ? Object.keys(seats).find(n => seats[n].owner === owner && seatState(seats[n]) !== false)
+  : undefined
+
 // ── seats: one session, one writer file ───────────────────────────────────────
 /**
  * A SEAT is the writer identity: the name of the file this session appends to. The agent name
@@ -192,15 +330,23 @@ const seatState = seat => {
 }
 
 /** Record this process on the seat, and forget the processes that have exited. */
-function touchSeat(seats, name, { session = null, pid }) {
+function touchSeat(seats, name, { session = null, pid, owner = null }) {
   const held = seats[name]
   // A seat held by ANOTHER session is not ours to inherit — start a fresh record. Without a
   // session id we do not overwrite the holder: the CLI must not evict a live session.
-  const prev = held && (!session || !held.session || held.session === session) ? held : {}
+  //
+  // ⚠ SAME OWNER COUNTS AS OURS, even when the session ids differ, and that exception is the
+  // whole point of `ownerPid`: the MCP server and the hook of ONE window disagree about the id
+  // (measured — see `ownerPid`), and without this the second one to arrive would wipe the
+  // first's record and take the seat over as a stranger.
+  const ours = held && (!session || !held.session || held.session === session ||
+                        (owner && held.owner === owner))
+  const prev = ours ? held : {}
   const writers = { ...(prev.writers || {}), [pid]: now() }
   for (const p of Object.keys(writers)) if (Number(p) !== pid && !alive(Number(p))) delete writers[p]
   seats[name] = {
-    session: session ?? prev.session ?? null,
+    session: prev.session ?? session ?? null,   // the FIRST id claimed for the window stands
+    owner: owner ?? prev.owner ?? null,
     writers,
     firstSeen: prev.firstSeen || now(),
     lastSeen: now(),
@@ -213,26 +359,58 @@ function touchSeat(seats, name, { session = null, pid }) {
  * negotiation: two sessions starting at the same moment cannot pick the same one, and a
  * restarted session with the same id gets its file and its cursor back.
  */
-export function claimSeat({ agent, session, pid = process.pid }) {
+export function claimSeat({ agent, session, pid = process.pid, owner = ownerPid() }) {
   if (!agent) throw new Error("claimSeat: `agent` is required")
-  if (!session) return agent
   const reg = readJson(REGISTRY, { agents: {} })
   const rec = (reg.agents[agent] ||= { agent })
   const seats = (rec.seats ||= {})
-  const name = seatFor(seats, agent, session)
-  touchSeat(seats, name, { session, pid })
+  // ⚠ ONE WINDOW, ONE SEAT. The owning `claude` process decides first, and the session id only
+  // gets to NAME a seat that does not exist yet — because the two halves of a window do not
+  // reliably agree on the id (see `ownerPid`), and disagreeing about the id is survivable while
+  // writing into two files with two cursors is not. Whoever arrives first names it; the other
+  // adopts it. That also means a window keeps its seat when only one half is restarted.
+  const held = seatOfOwner(seats, owner)
+  if (!held && !session) return agent           // no window, no id — the bare project name, as before
+  const name = held || seatFor(seats, agent, session, owner)
+  touchSeat(seats, name, { session, pid, owner })
   writeJson(REGISTRY, reg)
   return name
 }
 
-/** The shortest form of the id that is not already held by a DIFFERENT session. */
-function seatFor(seats, agent, session) {
+/**
+ * The shortest form of the id that is not already held by a DIFFERENT session — or by a
+ * different live WINDOW.
+ *
+ * ⚠ The second half of that is not paranoia. The id an MCP server is handed can be one no
+ * session on disk answers to (see `ownerPid`), so "the session ids match" is not proof that two
+ * claimants are the same session — and if it lets a second window onto a seat, the two share a
+ * file and a cursor, which is the exact failure seats were built to end.
+ */
+function seatFor(seats, agent, session, owner = null) {
   for (const len of SEAT_LENGTHS) {
     const name = seatName(agent, session, len)
-    if (!seats[name] || seats[name].session === session) return name
+    const held = seats[name]
+    if (!held || (held.session === session && !otherWindow(held, owner))) return name
   }
   return seatName(agent, session, session.length)
 }
+
+/**
+ * Is this seat held by a DIFFERENT window that still exists? The pid decides, not the clock.
+ *
+ * ⚠ Measured 2026-08-06 in `demo/scenarios/handoff-chain.json`: six sessions produced NINETEEN
+ * seats. Every round resumed the same session ids, but `claude --resume` is a NEW PROCESS each
+ * time, so the owner pid changed under a seat whose id had not. Judged on recency alone the
+ * previous round's owner — dead for forty seconds — still counted as a live window, so the seat
+ * was refused and the name grew a syllable: `catalog#21215117`, `…-2da`, `…-2daa-45`,
+ * `…-2daa-45a0-8cae-df47b53fbe66`. Four files, four cursors, and the focus left behind on each.
+ * That is the same shape as the seat sprawl seen on every restart of a live window.
+ *
+ * A dead owner cannot be in a conflict with anyone. Recency stays in the test as well: a pid is
+ * reused eventually, and a seat nobody has touched for hours is not a window either.
+ */
+const otherWindow = (held, owner) =>
+  !!held?.owner && held.owner !== owner && alive(held.owner) && seatState(held) !== false
 
 /**
  * Which seat is this session's — WITHOUT claiming one. For read-only callers.
@@ -242,10 +420,19 @@ function seatFor(seats, agent, session) {
  * therefore invented a third session in a project that had two. Reading may not change the
  * state it reports on.
  */
-export function seatOf({ agent, session }) {
-  if (!session) return agent
+export function seatOf({ agent, session, owner = ownerPid() }) {
   const seats = readJson(REGISTRY, { agents: {} }).agents?.[agent]?.seats || {}
-  return Object.keys(seats).find(n => seats[n].session === session) || seatFor(seats, agent, session)
+  // The window first, for the reason given in `claimSeat`: a reader that resolves itself to a
+  // different seat than the writer half of the same window reads the wrong cursor, which is
+  // exactly how "the hook says 1 unread, the tool says 0" happens.
+  const held = seatOfOwner(seats, owner)
+  if (held) return held
+  if (!session) return agent
+  // Same test as `seatFor`: the seat of a session that was resumed is held by an owner pid that
+  // no longer exists, and a dead window is not a competing one.
+  return Object.keys(seats).find(n => seats[n].session === session && seatState(seats[n]) !== false &&
+                                      !otherWindow(seats[n], owner))
+    || seatFor(seats, agent, session, owner)
 }
 
 /**
@@ -254,13 +441,16 @@ export function seatOf({ agent, session }) {
  * With a `session` the check-in claims a seat (see `claimSeat`); `writer` skips the claim for
  * a seat that is already known — `send` uses that, so writing a message never reshuffles seats.
  */
-export function register({ agent, project, session, room, pid = process.pid, writer }) {
+export function register({ agent, project, session, room, pid = process.pid, writer,
+                           owner = ownerPid() }) {
   if (!agent) throw new Error("register: `agent` is required")
-  const seat = writer || (session ? claimSeat({ agent, session, pid }) : agent)
+  const seat = writer || claimSeat({ agent, session, pid, owner })
   const reg = readJson(REGISTRY, { agents: {} })
   const prev = reg.agents[agent] || {}
   const seats = { ...(prev.seats || {}) }
-  const mine = touchSeat(seats, seat, { session, pid })
+  // `owner` is passed through, not re-derived: without it a check-in whose session id differs
+  // from the one that named the seat would read as a stranger and wipe the window's record.
+  const mine = touchSeat(seats, seat, { session, pid, owner })
 
   reg.agents[agent] = {
     ...prev,
@@ -327,9 +517,12 @@ export function agents() {
     // is not writing. Measured 2026-08-05 — an agent read "silent since 09:03" off the registry
     // for a seat and concluded it had gone quiet. Cheap to answer honestly: the mtime of that
     // seat's files, no parsing.
+    // `focus` rides along with the seat: "who is in which files" is the question agents were
+    // burning whole broadcast rounds on, and it is answerable from here.
     const seats = Object.entries(a.seats || {}).map(([writer, s]) => ({
       writer, session: s.session ?? null, live: seatState(s), lastSeen: s.lastSeen ?? null,
       lastWrote: lastWrote(writer, a.rooms || []),
+      focus: getFocus(writer),
     }))
     return {
       ...a,
@@ -467,7 +660,45 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       `The reader cannot tell your entries from theirs: say which thread you are, and do not ` +
       `assume an earlier entry under this name was yours.`
     : undefined
-  return { ts, room, from, type, to: addressed, path, ...(warning && { warning }) }
+  // ── what this entry actually did, told to the writer, now ───────────────────
+  // ⚠ The two failures left standing after the wake-up rule landed were both invisible at the
+  // moment of writing, and both were measured rather than suspected:
+  //
+  //   · 2026-08-06, six live sessions: ALL FIVE entries were broadcast FACTs — including the one
+  //     renaming an id that two other projects had to follow. A FACT wakes nobody, so the errand
+  //     inside it waited for someone to happen to look. Every sender believed they had told the
+  //     others.
+  //   · The average entry on the live bus is 2168 characters and did not move when the rule did.
+  //     Entries of 2701 and 3284 characters were still going out two days later, each read in
+  //     full by every seat in the room.
+  //
+  // Neither is a thing the sender can look up afterwards, and neither is a thing to leave to good
+  // intentions. So the server answers both here: who this woke, and how long it was. Reported,
+  // never enforced — `send` refusing a message would be a far worse failure than a verbose one.
+  const live = liveSeats(room)
+  const woke = live.filter(s => s !== from &&
+    wakes({ ts, from, type, to: addressed, re }, s, ownTimestamps(room, s)))
+  const others = live.filter(s => s !== from).length
+  const notice = []
+  // A name is valid for as long as the registry remembers it, and the registry remembers a seat
+  // long after its window closed — 25 of them for one project, measured. Addressing one of those
+  // is not an error (the entry waits in the room, and a session that comes back reads it), but it
+  // is not delivery either, and the difference is invisible unless it is said out loud.
+  const dormant = addressed.filter(n => !live.some(s => isForMe({ to: [n] }, s)))
+  if (dormant.length)
+    notice.push(`No session of ${dormant.map(n => `'${n}'`).join(", ")} is running. The entry ` +
+      `waits in the room and is read if that session comes back — \`agents\` lists who is live now.`)
+  if (!woke.length && others)
+    notice.push(`This wakes NOBODY — ${others} live seat(s) will read it when they next look. ` +
+      `That is right for a fact nobody must act on. If someone has to DO something because of ` +
+      `this, it needs \`to\` (one seat), or the QUESTION / REQUEST type.`)
+  if (body.length > LONG_CHARS)
+    notice.push(`${body.length} characters — every seat in the room reads all of it. The decision ` +
+      `and what it changes for someone else is the message; the reasoning and the code are in the ` +
+      `files, and they can read those.`)
+
+  return { ts, room, from, type, to: addressed, path, wakes: woke,
+           ...(notice.length && { notice }), ...(warning && { warning }) }
 }
 
 /**
@@ -478,6 +709,47 @@ export function send({ room, from, type = "FACT", text, re, to }) {
  * too, because "I am talking to consumer-a" is a statement about the project, not about which of
  * its machines happens to hold the open window.
  */
+/** The seats in a room that are not known to be gone — who an entry can still reach today. */
+export function liveSeats(room) {
+  const reg = readJson(REGISTRY, { agents: {} })
+  const out = []
+  for (const a of Object.values(reg.agents)) {
+    if (!(a.rooms || []).includes(room)) continue
+    for (const [w, s] of Object.entries(a.seats || {})) if (seatState(s) !== false) out.push(w)
+  }
+  return out
+}
+
+/**
+ * Forget the seats of windows that are long gone. THE REGISTRY ONLY — never a message file.
+ *
+ * ⚠ What this may not do is lose anything: a seat's entries are its file on disk, and that file
+ * is the log. Pruning drops the *name* from the roster, so the room stops offering an addressee
+ * that nothing will ever read, and `agents` stops describing a project by sessions that closed
+ * days ago. Measured 2026-08-06: 32 seats in the registry, 25 of them one project's, 2 alive.
+ *
+ * Conservative on purpose — a seat is kept unless ALL of these hold: no live process on it, its
+ * owning window is gone, and it has been silent longer than `days`. A session that is merely
+ * closed for the evening is inside that window and keeps its name, its cursor and its focus.
+ */
+export function pruneSeats({ days = 7, dry = false } = {}) {
+  const cutoff = Date.now() - days * 86400_000
+  const reg = readJson(REGISTRY, { agents: {} })
+  const dropped = []
+  for (const a of Object.values(reg.agents)) {
+    for (const [name, s] of Object.entries(a.seats || {})) {
+      const silent = (Date.parse(s.lastSeen) || 0) < cutoff
+      if (seatState(s) === false && !(s.owner && alive(s.owner)) && silent) {
+        delete a.seats[name]
+        dropped.push({ seat: name, lastSeen: s.lastSeen ?? null })
+      }
+    }
+  }
+  if (dropped.length && !dry) writeJson(REGISTRY, reg)
+  return { dropped, dry,
+           kept: Object.values(reg.agents).reduce((n, a) => n + Object.keys(a.seats || {}).length, 0) }
+}
+
 export function participants(room) {
   const names = new Set()
   for (const p of busFiles(room)) { const w = writerOf(p); names.add(w); names.add(seatBase(w)) }
@@ -643,10 +915,33 @@ function seedCursor(room, writer) {
  * Stop hook); reading is never the thing we restrict, because a reader who cannot see what the
  * others agreed on is how two sessions end up doing the same work twice.
  */
+/**
+ * A long entry that is NOT entitled to interrupt you, shortened to its opening.
+ *
+ * ⚠ What is never clipped: anything with `wakes: true`. Reading half of a question you have to
+ * answer is worse than reading all of one you do not — so the cut falls only where the entry was
+ * already "read it if it is useful to you", which is what a broadcast FACT is by construction.
+ *
+ * It cuts at a paragraph or sentence boundary when one is near the limit, because a line severed
+ * mid-clause reads as data loss rather than as a summary, and it says how much is missing and
+ * where to get it. `history` returns every entry whole and is one call away.
+ */
+function clip(e) {
+  if (e.wakes || !INBOX_CHARS || e.text.length <= INBOX_CHARS) return e
+  const cut = e.text.slice(0, INBOX_CHARS)
+  const at = Math.max(cut.lastIndexOf("\n\n"), cut.lastIndexOf(". "))
+  const head = (at > INBOX_CHARS * 0.6 ? cut.slice(0, at + 1) : cut).trimEnd()
+  return { ...e, clipped: e.text.length,
+           text: `${head}\n\n… +${e.text.length - head.length} characters — \`history\` for the whole entry` }
+}
+
 export function inbox({ room, agent, advance = true, limit = 20 }) {
   const cursors = readJson(CURSORS, {})
   const key = `${room}::${agent}`
   const base = seatBase(agent)
+  // Read ONCE for the whole call: `wakes` needs to know what this seat asked, and re-reading
+  // its own file per entry would turn a linear pass into a quadratic one on a busy room.
+  const mine = ownTimestamps(room, agent)
   // A seat with no cursor of its own (nobody registered it) falls back to the base seat's —
   // erring towards "unread" rather than swallowing the first message.
   const seen = cursors[key] || (agent === base ? {} : { ...(cursors[`${room}::${base}`] || {}) })
@@ -657,23 +952,30 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push({ ...e, forMe: isForMe(e, agent), ...(seatBase(writer) === base && { sibling: true }) })
+        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine),
+                     ...(seatBase(writer) === base && { sibling: true }) })
     }
   }
   fresh.sort(byTime)
-  const shown = fresh.slice(-limit)
+  const shown = fresh.slice(-limit).map(clip)
   if (advance && fresh.length) {
     for (const e of fresh) seen[e.from] = seen[e.from] && t(seen[e.from]) > t(e.ts) ? seen[e.from] : e.ts
     cursors[key] = seen
     writeJson(CURSORS, cursors)
   }
-  // `unreadForMe` is counted over ALL fresh entries, not just the page shown — the wake-up
-  // paths (`sac wait`, the Stop hook) decide on this number, and deciding on a truncated
-  // count is how a message addressed to you would fail to wake you.
+  // Counted over ALL fresh entries, not just the page shown — the wake-up paths (`sac wait`,
+  // the Stop hook) decide on these numbers, and deciding on a truncated count is how a message
+  // addressed to you would fail to wake you.
+  //
+  // THREE counts, because they answer three different questions and the middle one used to
+  // stand in for the last: `unread` is what is in the room for you to read, `unreadForMe` what
+  // is not aimed past you, and `unreadWaking` what is entitled to interrupt you. Only the third
+  // may ever start a turn (see `wakes`).
   return {
     room, agent,
     unread: fresh.length,
     unreadForMe: fresh.filter(e => e.forMe).length,
+    unreadWaking: fresh.filter(e => e.wakes).length,
     truncated: fresh.length - shown.length,
     messages: shown,
   }
@@ -737,14 +1039,89 @@ export function history({ room, from, limit = 20 }) {
  * So we nudge ONCE per entry. If the agent reads it, good; if it does not, it is not held
  * hostage. The message is not lost either way: it stays unread until the cursor advances.
  * A nudge is not a delivery — it never touches the cursor.
+ *
+ * ⚠ IT LIVES ON DISK, and that is the whole point — measured 2026-08-06 in session
+ * `consumer-a#6cd8f60e`. `sac wait` kept its own ledger in a variable, so every restart of the
+ * monitor process re-announced the entire backlog: the same three notifications, byte for byte,
+ * 32 seconds apart, one of them reading "48 unread FOR YOU". Nineteen wake-ups in one session,
+ * on a day when nobody had written a single new entry. A ledger that does not survive the
+ * process that keeps it is not a ledger.
+ *
+ * @param via which watcher is asking. The Stop hook and the monitor keep SEPARATE ledgers: they
+ *   catch different states (working / idle), and one having spoken is no reason for the other to
+ *   stay silent. `stop` keeps the un-suffixed key, so ledgers written before this existed stand.
  */
-export function shouldNudge({ room, agent, ts }) {
+export function shouldNudge({ room, agent, ts, via = "stop" }) {
   const all = readJson(NUDGES, {})
-  const key = `${room}::${agent}`
+  const key = `${room}::${agent}${via === "stop" ? "" : `::${via}`}`
   if (all[key] && t(all[key]) >= t(ts)) return false
   all[key] = ts
   writeJson(NUDGES, all)
   return true
+}
+
+/**
+ * True exactly ONCE per key, ever — on the same on-disk ledger the nudges use.
+ *
+ * For the things that are worth saying to a session once and are noise the second time. It has to
+ * be on disk for the same reason `shouldNudge` does: a hook is a fresh process every time, so
+ * anything remembered in memory is remembered for the length of one invocation.
+ */
+export function firstTime(key) {
+  const all = readJson(NUDGES, {})
+  if (all[key]) return false
+  all[key] = now()
+  writeJson(NUDGES, all)
+  return true
+}
+
+// ── focus: what each seat is working on ───────────────────────────────────────
+
+/**
+ * A seat's DECLARED SCOPE, in one sentence, plus the paths it is in.
+ *
+ * Two jobs, and it was built for both at once:
+ *
+ *  1. It is what the letterbox reasons about (see `triage.mjs`). A cheap model cannot tell
+ *     whether an entry concerns this agent without knowing what this agent is doing; without a
+ *     focus it has only the room's history to guess from.
+ *
+ *  2. It REPLACES a conversation. Measured over the first two days: 46 entries in `consumer-a-atlas`
+ *     carried scope-negotiation ("hatókör", "ki mit csinál", "ne ütközzünk") — agents spending
+ *     turns, in a broadcast that woke everyone, to establish who was touching what. That is a
+ *     lookup, not a discussion: `agents` now reports it, so the answer costs one tool call and
+ *     wakes nobody.
+ *
+ * Kept per SEAT, not per project: two sessions of one project are exactly the pair that needs to
+ * know they are in different files.
+ */
+const FOCUS_STALE_MS = 4 * 60 * 60_000
+
+export function setFocus({ agent, text, files }) {
+  if (!agent) throw new Error("focus: `agent` is required")
+  const all = readJson(FOCUS, {})
+  if (!text?.trim()) { delete all[agent]; writeJson(FOCUS, all); return { agent, cleared: true } }
+  all[agent] = {
+    text: text.trim(),
+    files: [...new Set((Array.isArray(files) ? files : String(files ?? "").split(","))
+      .map(s => String(s).trim()).filter(Boolean))],
+    ts: now(),
+  }
+  writeJson(FOCUS, all)
+  return { agent, ...all[agent] }
+}
+
+/**
+ * What a seat said it was doing — with `stale: true` once it is old enough to be a lie.
+ * A four-hour-old focus is reported, never silently dropped: "they said X, four hours ago" is
+ * usable, "we know nothing" is not, and pretending the two are the same throws away the only
+ * fact we have.
+ */
+export function getFocus(agent) {
+  const f = readJson(FOCUS, {})[agent]
+  if (!f) return null
+  const ageMs = Date.now() - (Date.parse(f.ts) || 0)
+  return { ...f, ageMinutes: Math.round(ageMs / 60000), stale: ageMs > FOCUS_STALE_MS }
 }
 
 /** Existing rooms. */

@@ -24,11 +24,18 @@ const rooms = parseRooms(process.env.SET_AGENT_ROOM)
 const room = rooms.length === 1 ? rooms[0] : null
 
 /**
- * WHICH SESSION are we? Measured 2026-08-04: `CLAUDE_CODE_SESSION_ID` is present in this
- * process's environment (Claude Code starts the MCP server with it), and the SessionStart
- * hook and every `sac` call inherit the SAME value — so all three land on the same seat
- * without any configuration. Two sessions in one project therefore write into two files and
- * can hear each other; without the variable everything works exactly as before, on one seat.
+ * WHICH SESSION are we? `CLAUDE_CODE_SESSION_ID` is in this process's environment (Claude Code
+ * starts the MCP server with it), and it is what NAMES a seat.
+ *
+ * ⚠ IT IS NOT WHAT IDENTIFIES THE WINDOW, and believing it was cost a live session on
+ * 2026-08-06. Measured in `consumer-a`: this process was started by its window's own `claude` at
+ * 10:46:15 and handed `CLAUDE_CODE_SESSION_ID=fef3e62f…`, an id with no transcript on disk,
+ * while that same window was writing `8a31f74c….jsonl`. The SessionStart hook got the real id.
+ * Two seats, two files, two cursors, one window — the hook announced "1 unread" and this server
+ * answered "0", and the agent went round it with the CLI.
+ *
+ * So the window is identified by the `claude` process that owns us — our own parent (see
+ * `ownerPid`) — and the session id only gets to name a seat nobody has claimed for it yet.
  */
 const session = process.env.CLAUDE_CODE_SESSION_ID || null
 const writer = claimSeat({ agent, session })

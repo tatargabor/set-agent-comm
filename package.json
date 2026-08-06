@@ -18,7 +18,11 @@
     "http": "node src/http.mjs",
     "relay": "node src/relay.mjs",
     "start": "node src/relay.mjs",
-    "test": "node --test test/*.test.mjs && node test/smoke-mcp.mjs"
+    "test": "node --test test/*.test.mjs && node test/smoke-mcp.mjs && node demo/smoke.mjs && node demo/smoke-remote.mjs",
+    "demo": "node demo/harness.mjs demo/scenarios/three-projects-two-seats.json",
+    "demo:handoff": "node demo/harness.mjs demo/scenarios/handoff-chain.json",
+    "demo:remote": "node demo/harness.mjs demo/scenarios/handoff-chain-remote.json",
+    "demo:smoke": "node demo/smoke.mjs && node demo/smoke-remote.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"

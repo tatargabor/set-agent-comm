@@ -1,0 +1,69 @@
+{
+  "name": "három projekt, mindegyik két üléssel",
+  "room": "team",
+  "model": "claude-sonnet-5",
+  "projects": {
+    "pricing": ["az ÁFA és a kerekítés (src/config.mjs, src/round.mjs)", "az árlisták és a kedvezmények (src/pricelist.mjs)"],
+    "invoicing": ["a számlakiállítás (src/invoice.mjs)", "a számla-evalok (tests/eval/)"],
+    "catalog": ["a terméktörzs és az SKU-k (src/sku.mjs)", "a kategóriafa (src/tree.mjs)"]
+  },
+  "files": {
+    "pricing": {
+      "src/config.mjs": "export const VAT = 0.27\nexport const ROUNDING = \"banker\"\n",
+      "src/round.mjs": "export const round = n => Math.round(n * 100) / 100\n",
+      "src/pricelist.mjs": "export const list = [{ sku: \"A-1\", net: 1000 }]\n"
+    },
+    "invoicing": {
+      "src/invoice.mjs": "export const total = (net, vat) => net * (1 + vat)\n",
+      "tests/eval/cases.json": "[{\"net\": 1000, \"expect\": 1270}]\n"
+    },
+    "catalog": {
+      "src/sku.mjs": "export const skus = [\"A-1\", \"B-2\"]\n",
+      "src/tree.mjs": "export const tree = { root: [\"A\", \"B\"] }\n"
+    }
+  },
+
+  "intro": "Te a(z) {{PROJECT}} projekt egyik ülése vagy, a sávod: {{ROLE}}. Nézd meg a fájljaidat, és készülj a munkára. Ne írj a szobába — most csak helyezkedj el.",
+
+  "rounds": [
+    {
+      "title": "egy tény, ami senkinek nem ad dolgot + egy kérés, ami EGYVALAKINEK szól",
+      "seat": "pricing/0",
+      "prompt": "Befejezted a kerekítés javítását: a src/config.mjs ROUNDING konstansa mostantól 'banker' — nézd meg, ott van. Két következménye van. (1) A csapatnak érdemes tudnia, hogy ez megtörtént. (2) Az invoicing számla-evaljainak a várt értékei el fognak mozdulni, azokat újra kell futtatni és frissíteni — ez nem a te dolgod. Intézd el, ahogy jónak látod."
+    },
+    {
+      "title": "mindenki folytatja a munkáját — ki szólal meg és ki nem",
+      "parallel": [
+        { "seat": "invoicing/1", "prompt": "Folytasd a munkád." },
+        { "seat": "catalog/0", "prompt": "Folytasd a munkád." },
+        { "seat": "catalog/1", "prompt": "Folytasd a munkád." }
+      ]
+    },
+    {
+      "title": "testvér-ülés ütközés: ugyanahhoz a fájlhoz nyúlnának",
+      "seat": "pricing/1",
+      "prompt": "A következő munkád: a kedvezmények kerekítését egységesíteni kell a src/pricelist.mjs-ben, és ehhez a src/config.mjs-ben lévő ROUNDING konstansra is rá kell nyúlnod. Mielőtt hozzákezdesz, győződj meg róla, hogy nem ütközöl senkivel."
+    },
+    {
+      "title": "a kérdés, amit csak egyvalaki tud megválaszolni",
+      "seat": "invoicing/0",
+      "prompt": "A számlakiállításnál kiderült, hogy nem tudod, a bruttó összeget a kerekítés ELŐTT vagy UTÁN kell számolni. Nem a te sávod, és a döntés befolyásolja, amit írsz. Derítsd ki."
+    },
+    {
+      "title": "a válasz, majd mindenki folytat — itt derül ki, visszatér-e a nyugtázási kör",
+      "parallel": [
+        { "seat": "pricing/0", "prompt": "Folytasd a munkád." },
+        { "seat": "invoicing/1", "prompt": "Folytasd a munkád." },
+        { "seat": "catalog/0", "prompt": "Folytasd a munkád." }
+      ]
+    },
+    {
+      "title": "utolsó kör: mindenki folytat, senkinek nincs valódi mondanivalója",
+      "parallel": [
+        { "seat": "pricing/1", "prompt": "Folytasd a munkád." },
+        { "seat": "invoicing/0", "prompt": "Folytasd a munkád." },
+        { "seat": "catalog/1", "prompt": "Folytasd a munkád." }
+      ]
+    }
+  ]
+}

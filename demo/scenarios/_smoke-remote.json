@@ -1,0 +1,34 @@
+{
+  "name": "smoke — két gép, egy relay, modell nélkül",
+  "room": "team",
+  "machines": {
+    "local": ["alpha"],
+    "mini": ["beta"]
+  },
+  "projects": {
+    "alpha": ["az egyik sáv", "a másik sáv"],
+    "beta": ["az egyik sáv", "a másik sáv"]
+  },
+  "files": {
+    "alpha": { "src/a.mjs": "export const a = 1\n" },
+    "beta": { "src/b.mjs": "export const b = 2\n" }
+  },
+
+  "intro": "Te a(z) {{PROJECT}} projekt egyik ülése vagy, a sávod: {{ROLE}}.\n@focus {{ROLE}} | src/x.mjs\n@inbox",
+
+  "rounds": [
+    {
+      "title": "az egyik gép ír",
+      "parallel": [
+        { "seat": "alpha/0", "prompt": "@send FACT Az A-1 SKU mostantól A-1X, a régi azonosító törni fog." }
+      ]
+    },
+    {
+      "title": "a másik gép olvassa — ez az egész remote láb egyetlen kérdése",
+      "parallel": [
+        { "seat": "beta/0", "prompt": "@inbox" },
+        { "seat": "beta/1", "prompt": "@inbox" }
+      ]
+    }
+  ]
+}

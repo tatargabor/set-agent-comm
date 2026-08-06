@@ -10,6 +10,7 @@
 //   sac history <room> [n]              read back
 //   sac watch-paths <room>              the files to watch (for the hook)
 //   sac register <room>                 check in to the registry
+//   sac prune [--days N] [--dry-run]    forget seats of windows long gone (registry only)
 
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -39,7 +40,7 @@ const [cmd, ...rest] = process.argv.slice(2)
 // A seat is CLAIMED only by a command that writes or that keeps a read cursor. Measured: with
 // an unconditional claim `sac agents` — a pure listing — invented a third session in a project
 // that had two.
-const CLAIMS = new Set(["send", "inbox", "peek", "unread", "register"])
+const CLAIMS = new Set(["send", "inbox", "peek", "unread", "register", "focus"])
 const seat = { agent: AGENT, session: SESSION }
 const ME = CLAIMS.has(cmd) ? store.claimSeat(seat) : store.seatOf(seat)
 const json = v => console.log(JSON.stringify(v, null, 2))
@@ -74,9 +75,17 @@ try {
         // The column is sized to the longest name present: a remote seat carries its machine
         // (`set-agent-comm@workstation`) and a fixed width ran the columns together.
         const w = Math.max(20, ...live.map(x => x.writer.length))
-        live.forEach((x, i) => console.log(
-          `  ${i === live.length - 1 ? "└" : "├"} ${x.writer.padEnd(w)}  ${x.live === null ? "(?) " : "    "}` +
-          (x.lastWrote ? `wrote ${x.lastWrote.slice(11, 16)}` : "never wrote")))
+        live.forEach((x, i) => {
+          console.log(
+            `  ${i === live.length - 1 ? "└" : "├"} ${x.writer.padEnd(w)}  ${x.live === null ? "(?) " : "    "}` +
+            (x.lastWrote ? `wrote ${x.lastWrote.slice(11, 16)}` : "never wrote"))
+          // What that session says it is doing — the answer to "who is in these files", without
+          // anyone having to ask it in the room. `(stale)` because a four-hour-old claim is worth
+          // reporting and worth doubting, and silently dropping it would leave nothing at all.
+          if (x.focus) console.log(`  ${i === live.length - 1 ? " " : "│"}   ↳ ${x.focus.text}` +
+            (x.focus.files.length ? `  [${x.focus.files.join(", ")}]` : "") +
+            (x.focus.stale ? `  (stale — ${x.focus.ageMinutes}m old)` : ""))
+        })
       }
       break
     }
@@ -113,6 +122,26 @@ try {
       if (!r.unread) { console.log("(no new messages)"); break }
       if (r.truncated) console.log(`… ${r.truncated} older skipped\n`)
       for (const m of r.messages) console.log(fmt(m))
+      break
+    }
+    case "focus": {
+      // `sac focus` alone reports; with text it declares. The declaration is what the letterbox
+      // reasons about AND what `agents` shows the others — the scope negotiation that cost 46
+      // broadcast entries in two days becomes a field they can read.
+      const { value: files, rest: args } = takeFlag(rest, "--files")
+      if (!args.length) { json(store.getFocus(ME) || { agent: ME, focus: null }); break }
+      json(store.setFocus({ agent: ME, text: args.join(" "), files }))
+      break
+    }
+    case "prune": {
+      // Registry hygiene, and nothing else: the message files are the log and are never touched.
+      // Measured 2026-08-06 — 32 seats remembered, 2 of them alive, 25 belonging to one project.
+      const { value: days, rest: args } = takeFlag(rest, "--days")
+      const dry = args.includes("--dry-run")
+      const r = store.pruneSeats({ days: Number(days) || 7, dry })
+      for (const d of r.dropped) console.log(`${dry ? "would drop" : "dropped  "} ${d.seat.padEnd(44)} last seen ${d.lastSeen || "never"}`)
+      console.log(`${r.dropped.length} seat(s) ${dry ? "would be forgotten" : "forgotten"}, ${r.kept} kept` +
+        ` — no message file is ever touched${dry ? " (dry run: nothing was written)" : ""}`)
       break
     }
     case "unread": {
@@ -366,41 +395,117 @@ try {
         .flatMap(store.parseRooms)
       if (!watched.length) throw new Error("usage: sac wait [--once] <room> […]   (or set SET_AGENT_ROOM)")
 
-      // ⚠ ONLY WHAT IS ADDRESSED TO US WAKES US. A broadcast (no `to`) counts as addressed to
-      // everyone — that is the default, so nothing that used to wake a session stops doing so.
-      // What this drops is the case measured 2026-08-05 in the consumer-a rooms: a message aimed at
-      // ONE sibling session started a turn in every seat of the room, each of which spent it
-      // establishing that it was not being spoken to. Those entries are NOT lost — they stay
-      // unread, the next `inbox` returns them, and the line below says how many there are.
-      const reported = {}
-      const check = () => {
+      // ⚠ TWO GATES BEFORE A LINE IS PRINTED, because a printed line IS a turn of the main agent.
+      //
+      //  1. `wakes` (free, in the store): a broadcast FACT never wakes anyone. This is what the
+      //     first two days of live traffic argued for — see the comment on `store.wakes`.
+      //  2. the letterbox (a cheap model, see triage.mjs): of what survives gate 1, does THIS
+      //     agent need to be the one to deal with it? A message addressed to a project with four
+      //     open sessions passes gate 1 for all four; usually at most one of them is meant.
+      //
+      // Both gates fail towards waking. Neither ever touches the cursor: an entry we decline to
+      // wake on stays unread and the next `inbox` hands it over.
+      const QUIET_MS = Number(process.env.SET_AGENT_QUIET_MS) || 3000
+      const triage = await import("../src/triage.mjs")
+
+      // ⚠ THE THIRD GATE, pointed the other way — see `rescue` in triage.mjs. Gates 1 and 2 both
+      // guard against a needless turn; nothing guarded against the expensive mistake, which is the
+      // rule declining an entry that really was this seat's. Measured: six live sessions, five
+      // broadcast FACTs, one of them a rename two other projects had to follow, nobody woken.
+      // It runs ONLY where nothing else was announced, on the newest unjudged entry, once per
+      // entry per seat, and it FAILS CLOSED — a net that guesses yes rebuilds the storm.
+      const NET = process.env.SET_AGENT_SAFETY_NET !== "off"
+
+      /**
+       * The net, run only where nothing was announced. One entry — the newest the rule declined
+       * and nobody has judged yet — because this is the layer that could quietly become a model
+       * call per entry per seat per poll if it were let off the leash. The ledger is the leash.
+       */
+      const net = async (room, r) => {
+        if (!NET) return
+        const missed = r.messages.filter(m => !m.wakes).at(-1)
+        if (!missed) return
+        if (!store.shouldNudge({ room, agent: ME, ts: missed.ts, via: "net" })) return
+        const v = await triage.rescue({ entry: missed, room, seat: ME })
+        if (!v.wake) return
+        const preview = missed.text.replace(/\s+/g, " ").slice(0, 240)
+        // Said plainly: the rule declined this one, and the net overruled it. An agent that is
+        // woken by something the protocol said was not urgent deserves to know which layer did it.
+        console.log(`[set-agent-comm] ${missed.type} from ${missed.from} in "${room}" was NOT ` +
+          `addressed to you, but looks like yours anyway (${v.why}): "${preview}" ` +
+          `— read it with \`inbox\` (room: ${room}).`)
+        if (once) process.exit(0)
+      }
+
+      const check = async () => {
         for (const room of watched) {
           const r = store.inbox({ room, agent: ME, advance: false })
-          const mine = r.messages.filter(m => m.forMe)
-          const last = mine.at(-1)
-          if (!last) continue
-          if (reported[room] && Date.parse(reported[room]) >= Date.parse(last.ts)) continue
-          reported[room] = last.ts
-          const who = [...new Set(mine.map(m => m.from))].join(", ")
-          const others = r.unread - r.unreadForMe
-          console.log(`[set-agent-comm] ${r.unreadForMe} unread FOR YOU in "${room}" from ${who} — ` +
-            `call the \`inbox\` tool (room: ${room}) and answer.` +
-            (others ? ` (${others} more ${others === 1 ? "entry is" : "entries are"} addressed to ` +
-              `someone else — read them when you like.)` : ""))
+          const waking = r.messages.filter(m => m.wakes)
+          const last = waking.at(-1)
+          if (!last) { await net(room, r); continue }
+          // ⚠ THE LEDGER IS ON DISK (`shouldNudge`), not in a variable here. Measured 2026-08-06:
+          // an in-memory ledger meant every restart of this process re-announced the whole
+          // backlog — the same three notifications, 32 seconds apart, one of them "48 unread FOR
+          // YOU", on a day when nobody had written anything. Marked BEFORE the letterbox runs:
+          // having decided about an entry is what the ledger records, not having shouted about it.
+          if (!store.shouldNudge({ room, agent: ME, ts: last.ts, via: "wait" })) { await net(room, r); continue }
+
+          // At most the three newest, judged in parallel: one waking entry may hide behind
+          // another, and three model calls is the point where the letterbox stops being cheap.
+          const seat = store.agents().find(a => a.agent === store.seatBase(ME))
+          const live = seat?.live || []
+          const candidates = waking.slice(-3)
+          const judged = await Promise.all(candidates.map(m =>
+            triage.triage({ entry: m, room, seat: ME, live })))
+          // ⚠ findLAST, not findFirst. The older entries are still unread — an agent that was
+          // woken and did not answer keeps them — so the first approved one is routinely something
+          // this seat has already been told about. Reporting it again is the storm in miniature.
+          const yes = judged.findLastIndex(v => v.wake)
+          if (yes === -1) { await net(room, r); continue }   // delivered, unread, not worth a turn
+
+          const woke = candidates[yes]
+          const preview = woke.text.replace(/\s+/g, " ").slice(0, 240)
+          const rest = r.unread - 1
+          // ⚠ The TEXT rides along, not just a count. The agent can often answer — or decide it
+          // has nothing to add — without an `inbox` round trip at all, and a count on its own
+          // ("48 unread") is what made these notifications unreadable in the first place.
+          console.log(`[set-agent-comm] ${woke.type} from ${woke.from} in "${room}": "${preview}" ` +
+            `— read it with \`inbox\` (room: ${room}) and answer.` +
+            (rest > 0 ? ` (${rest} other unread ${rest === 1 ? "entry" : "entries"} here, none urgent.)` : ""))
           if (once) process.exit(0)
         }
       }
 
-      check()                                    // what is ALREADY waiting counts as an event
+      // Coalesce a burst. Four seats answering each other inside a minute is one conversation,
+      // not four interruptions — measured: 23 entries in 8 minutes across four seats.
+      let quiet = null
+      const soon = () => { clearTimeout(quiet); quiet = setTimeout(() => void check(), QUIET_MS) }
+
+      await check()                              // what is ALREADY waiting counts as an event
       for (const room of watched) {
         const dir = store.channelDir(room)
         mkdirSync(dir, { recursive: true })
         // A new participant's file appearing is an event too, so we watch the DIRECTORY.
-        try { watch(dir, () => setTimeout(check, 50)) } catch { /* the poll below covers it */ }
+        try { watch(dir, soon) } catch { /* the poll below covers it */ }
       }
       // The safety net. `fs.watch` misses events on some file systems, and a watcher that
       // silently stops looks exactly like a quiet room — the most dangerous false negative here.
-      setInterval(check, 5000)
+      setInterval(() => void check(), 5000)
+
+      // ⚠ DIE WITH THE SESSION. Measured 2026-08-06: five `sac wait` processes were alive at once,
+      // four of them for `consumer-a`, the oldest from the previous morning — a monitor outlives the
+      // Claude Code session that armed it, and the next session arms another. Their notifications
+      // still land, out of a dead session's context and off a cursor nobody advances.
+      //
+      // The parent is the shell the Monitor started us from; when the session goes, so does it,
+      // and Linux reparents us to pid 1. That is the signal, and it costs one integer comparison.
+      const PARENT = process.ppid
+      setInterval(() => {
+        if (process.ppid !== PARENT) {
+          console.log(`[set-agent-comm] the session that started this watch is gone — stopping.`)
+          process.exit(0)
+        }
+      }, 30_000).unref()
 
       // THE REMOTE LEG rides on this same watcher: for rooms that have a relay we long-poll it
       // in parallel, and what arrives is written into the local room — where the loop above
@@ -449,7 +554,8 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac agents                          who exists, who is alive
   sac rooms                           rooms — and how far each one reaches
   sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
-       [--to <seat|project>[,…]]      … addressed: ONLY they are woken (default: everyone)
+       [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
+  sac focus ["what you are on"]       declare your scope [--files a,b] — read it back with no args
   sac inbox <room>                    new messages from others (marks them read)
   sac peek <room>                     the same, without moving the cursor
   sac unread <room> [n]               make the last n messages unread again
@@ -458,6 +564,7 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)
   sac watch-paths <room>              the files to watch (for the hook)
   sac register <room>                 check in to the registry
+  sac prune [--days N] [--dry-run]    forget seats whose window is long gone (registry only)
 
 across machines (optional — see the README):
   sac relay use <url> --secret <s>    point this machine at a relay

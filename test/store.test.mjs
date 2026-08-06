@@ -9,6 +9,11 @@ import { spawnSync } from "node:child_process"
 
 const ROOT = mkdtempSync(join(tmpdir(), "sac-test-"))
 process.env.SET_AGENT_COMM_DIR = ROOT
+// "no window": these tests call the store in ONE process while pretending to be many sessions,
+// and the real `claude` ancestor above the test runner would collapse them all onto one seat —
+// correctly, which is exactly why it has to be said out loud here. The window-reconciliation
+// tests below pass `owner` explicitly instead.
+process.env.SET_AGENT_OWNER_PID = "0"
 const store = await import("../src/store.mjs")
 process.on("exit", () => rmSync(ROOT, { recursive: true, force: true }))
 
@@ -415,4 +420,184 @@ test("a remote seat is addressable BY ITS PROJECT, machine and session id aside"
   const r = store.inbox({ room: "addr", agent: "far@mini#c0ffee", advance: false })
   assert.equal(r.messages.at(-1).forMe, true,
     "addressing the project did not reach its seat on the other machine")
+})
+
+// ── who is entitled to interrupt ──────────────────────────────────────────────
+// The rule that replaced "every broadcast wakes everyone" on 2026-08-06. Reading is free; a
+// wake-up is a turn of the expensive model. See the comment on `store.wakes` for the traffic
+// this was measured against — 190 broadcasts out of 190 entries.
+
+for (const who of ["alpha", "beta", "gamma"]) store.register({ agent: who, room: "wake" })
+
+// ⚠ Entries are picked out BY TEXT here, never with `.at(-1)`. Two sends can land in the same
+// millisecond, and on a tie the order falls back to the file names — so `.at(-1)` silently returns
+// the OTHER entry and the test fails about one run in three. (Measured on this very suite: 101/101
+// then 100/101, green in isolation.)
+const seenBy = (room, agent, text) =>
+  store.inbox({ room, agent, advance: false }).messages.find(m => m.text === text)
+
+test("a broadcast FACT is delivered and wakes nobody", () => {
+  store.send({ room: "wake", from: "alpha", type: "FACT", text: "rebuilt the atlas" })
+  const r = store.inbox({ room: "wake", agent: "beta", advance: false })
+  assert.equal(r.unread, 1, "it was not delivered — that is a different bug and a worse one")
+  assert.equal(r.unreadWaking, 0, "a plain fact bought a turn of someone else's day")
+  assert.equal(r.messages.at(-1).forMe, true, "…but it is still theirs to read")
+})
+
+test("a broadcast QUESTION or REQUEST wakes the room — that is what the types are for", () => {
+  store.send({ room: "wake", from: "alpha", type: "REQUEST", text: "please re-run the eval" })
+  assert.equal(store.inbox({ room: "wake", agent: "beta", advance: false }).unreadWaking, 1)
+})
+
+test("addressing wakes whatever the type is — naming someone IS the claim on attention", () => {
+  const t = "heads up, your file moved"
+  store.send({ room: "wake", from: "alpha", type: "FACT", text: t, to: "beta" })
+  assert.equal(seenBy("wake", "beta", t).wakes, true)
+  assert.equal(seenBy("wake", "gamma", t).wakes, false, "an entry aimed at beta woke gamma as well")
+})
+
+test("an ANSWER wakes the one who ASKED, and nobody else", () => {
+  const q = store.send({ room: "wake", from: "beta", type: "QUESTION", text: "is the draft ready?" })
+  store.send({ room: "wake", from: "alpha", type: "ANSWER", text: "yes it is", re: q.ts })
+  assert.equal(seenBy("wake", "beta", "yes it is").wakes, true,
+    "the answer to my own question did not reach me")
+  assert.equal(seenBy("wake", "gamma", "yes it is").wakes, false,
+    "someone else's answer started a turn — this is the ack storm")
+})
+
+// ── what the writer is told at the moment of writing ──────────────────────────
+// ⚠ Both of these were measured, and both were invisible to the sender. In a six-session run all
+// five entries were broadcast FACTs — one of them renaming an id two other projects had to follow
+// — and every sender believed they had told the others. And the average entry on the live bus was
+// 2168 characters, unmoved by the wake-up rule, read in full by every seat in the room.
+
+test("a broadcast FACT reports, to its writer, that it woke nobody", () => {
+  const r = store.send({ room: "wake", from: "alpha", type: "FACT", text: "the atlas is rebuilt" })
+  assert.deepEqual(r.wakes, [], "a plain fact claimed someone's attention")
+  assert.match(r.notice?.join(" ") || "", /wakes NOBODY/,
+    "the sender was left believing the room had been told — this is the FACT-with-an-errand trap")
+})
+
+test("…and an addressed REQUEST names who it woke, with nothing to warn about", () => {
+  const r = store.send({ room: "wake", from: "alpha", type: "REQUEST", text: "re-run the eval", to: "beta" })
+  assert.deepEqual(r.wakes, ["beta"])
+  assert.equal((r.notice || []).some(n => /wakes NOBODY/.test(n)), false,
+    "a correctly addressed request was scolded — the notice would become noise and be ignored")
+})
+
+test("a long entry is measured back to its writer, and still sent", () => {
+  const long = "x".repeat(1600)
+  const r = store.send({ room: "wake", from: "alpha", type: "FACT", text: long, to: "beta" })
+  assert.match(r.notice?.join(" ") || "", /1600 characters/)
+  assert.ok(seenBy("wake", "beta", long),
+    "the notice turned into a refusal — a verbose message beats a lost one every time")
+})
+
+// ── the reader's bill ─────────────────────────────────────────────────────────
+// ⚠ Measured 2026-08-06 across the live rooms: `consumer-a-atlas` held 157 entries averaging 2338
+// characters. With three sessions open that is ~1.1M characters — a quarter of a million tokens —
+// spent on READING, in two days. Addressing decides who is interrupted; it does nothing about this.
+
+test("a long entry that does not wake me arrives as its opening, and says so", () => {
+  const long = "Az első bekezdés, a döntés. " + "y".repeat(5000)
+  store.send({ room: "wake", from: "alpha", type: "FACT", text: long })
+  const m = store.inbox({ room: "wake", agent: "gamma", advance: false })
+    .messages.find(x => x.text.startsWith("Az első bekezdés"))
+  assert.equal(m.clipped, long.length, "the full length was not reported back")
+  assert.ok(m.text.length < 1400, `the clip saved nothing: ${m.text.length} characters`)
+  assert.match(m.text, /^Az első bekezdés, a döntés\./, "the lede was cut off — the wrong end was kept")
+  assert.match(m.text, /`history` for the whole entry/, "clipped and left without a way back")
+})
+
+test("…but an entry entitled to interrupt me arrives WHOLE", () => {
+  const long = "Kérdés: " + "z".repeat(2000)
+  store.send({ room: "wake", from: "alpha", type: "QUESTION", text: long, to: "gamma" })
+  const m = store.inbox({ room: "wake", agent: "gamma", advance: false }).messages.find(x => x.text.startsWith("Kérdés:"))
+  assert.equal(m.clipped, undefined)
+  assert.equal(m.text, long,
+    "half of a question this seat has to answer — worse than all of one it does not")
+})
+
+test("`history` is the way back, and it is never clipped", () => {
+  const h = store.history({ room: "wake" }).messages.find(x => x.text.startsWith("Az első bekezdés"))
+  assert.ok(h.text.length > 2000, "the escape hatch clips too, so there is no escape hatch")
+})
+
+test("`focus` is per seat, ages, and is reported honestly rather than dropped", () => {
+  store.setFocus({ agent: "alpha#1", text: "the relay token check", files: "src/relay.mjs, x.mjs" })
+  const f = store.getFocus("alpha#1")
+  assert.deepEqual(f.files, ["src/relay.mjs", "x.mjs"])
+  assert.equal(f.stale, false)
+  assert.equal(store.getFocus("alpha#2"), null, "a focus leaked across seats")
+  store.setFocus({ agent: "alpha#1", text: "" })
+  assert.equal(store.getFocus("alpha#1"), null, "an empty text did not clear it")
+})
+
+// ── one window, one seat ──────────────────────────────────────────────────────
+// ⚠ Measured 2026-08-06 in a live `consumer-a` window and it broke that session's inbox. Claude
+// Code started the MCP server with `CLAUDE_CODE_SESSION_ID=fef3e62f…` — an id with no transcript
+// on disk — while the same window's SessionStart hook got `8a31f74c…`, the id it was actually
+// writing. Two seats, two empty files a minute apart, two cursors: the hook announced "1 unread"
+// and the tool answered "0". The session id names a seat; the owning `claude` process is what
+// says WHICH WINDOW, and the two halves only ever agree on the latter.
+
+// ⚠ These owners are REAL, LIVE pids, and that is load-bearing: a window is "another window" only
+// while its process exists. Invented numbers would all be dead and every one of these would pass
+// for the wrong reason.
+const WIN_A = process.pid, WIN_B = process.ppid
+
+test("the two halves of one window land on ONE seat, disagreeing ids and all", () => {
+  const hookSeat = store.claimSeat({ agent: "drift", session: "8a31f74c-real", owner: WIN_A })
+  const mcpSeat = store.claimSeat({ agent: "drift", session: "fef3e62f-phantom", owner: WIN_A })
+  assert.equal(mcpSeat, hookSeat,
+    "the MCP half took a seat of its own — that is two files and two cursors for one window")
+  assert.equal(store.seatOf({ agent: "drift", session: "fef3e62f-phantom", owner: WIN_A }), hookSeat,
+    "a read-only lookup from the drifting half resolves elsewhere — this is the '1 unread / 0 unread' split")
+})
+
+test("…and the window that arrived first keeps the name it was given", () => {
+  assert.equal(store.claimSeat({ agent: "drift", session: "fef3e62f-phantom", owner: WIN_A }),
+    "drift#8a31f74c", "the phantom id renamed the seat, orphaning the file and the cursor behind it")
+})
+
+test("a DIFFERENT LIVE window is still a different seat — this may not merge two real sessions", () => {
+  const other = store.claimSeat({ agent: "drift", session: "8a31f74c-real", owner: WIN_B })
+  assert.notEqual(other, "drift#8a31f74c",
+    "two windows collapsed onto one seat: they would share a file and a cursor, the very bug seats exist to prevent")
+})
+
+// ⚠ Measured 2026-08-06: six sessions, nineteen seats. `claude --resume` is a NEW PROCESS on the
+// SAME session id, so the owner pid changes under a seat whose name should not. Judged on recency
+// alone the previous process — dead for seconds — still read as a live window, the seat was
+// refused, and the name grew a syllable per round: `catalog#21215117`, `…-2da`, `…-2daa-45`,
+// `…-2daa-45a0-8cae-df47b53fbe66`. Each one a fresh file, a fresh cursor and a lost `focus`, which
+// is exactly the sprawl a restarted live window had been showing all along.
+test("a session that is RESUMED gets its seat back, new process and all", () => {
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid      // a pid that is real and has exited
+  const first = store.claimSeat({ agent: "resumed", session: "c0ffee11-x", owner: dead })
+  assert.equal(first, "resumed#c0ffee11")
+  const again = store.claimSeat({ agent: "resumed", session: "c0ffee11-x", owner: WIN_A })
+  assert.equal(again, first,
+    "the resumed session was handed a second seat — a new file, a new cursor and the focus left behind on the old one")
+  assert.equal(store.seatOf({ agent: "resumed", session: "c0ffee11-x", owner: WIN_A }), first,
+    "…and a read-only lookup disagrees with the claim, which is the '1 unread / 0 unread' split again")
+})
+
+test("no window (cron, a bare terminal) falls back to the session id, as before", () => {
+  assert.equal(store.claimSeat({ agent: "nowin", session: "abcdef12-x", owner: null }), "nowin#abcdef12")
+  assert.equal(store.claimSeat({ agent: "nowin", session: null, owner: null }), "nowin")
+})
+
+// ⚠ Measured in a live run on 2026-08-06 (`demo/scenarios/three-projects-two-seats.json`):
+// `invoicing` asked a QUESTION, a `pricing` seat answered it with `re:` pointing straight at the
+// question — and typed the entry FACT. The rule looked at `re:` only on an ANSWER, so the asker
+// was never woken and two rounds later was still writing "no answer yet, I am waiting".
+test("a reply to MY entry wakes me whatever type the sender picked", () => {
+  const q = store.send({ room: "wake", from: "beta", type: "QUESTION", text: "kerekítés előtt vagy után?" })
+  const a = "után — és itt a miért"
+  store.send({ room: "wake", from: "alpha", type: "FACT", text: a, re: q.ts })
+  assert.equal(seenBy("wake", "beta", a).wakes, true,
+    "the answer to my own question sat unread and unannounced — the failure this project exists to prevent")
+  assert.equal(seenBy("wake", "gamma", a).wakes, false,
+    "…but it woke a bystander too, which is how the storm starts")
 })

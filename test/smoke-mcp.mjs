@@ -28,6 +28,10 @@ async function connect(agent, room = ROOM, session = `smoke-${agent}-${room}`) {
       // the environment of the test runner's own session would leak in and every client
       // would look like the same session.
       CLAUDE_CODE_SESSION_ID: session,
+      // WHICH WINDOW: each simulated client is its own Claude Code window. Without this they
+      // would share the test runner's `claude` ancestor and — correctly, per `ownerPid` — all
+      // land on one seat, which is the opposite of what this smoke test is demonstrating.
+      SET_AGENT_OWNER_PID: String(900000 + [...session].reduce((n, c) => (n * 31 + c.charCodeAt(0)) % 9000, 7)),
     },
   }))
   return client
@@ -47,7 +51,7 @@ const api = await connect("api-service", ROOM, "a1")
 
 try {
   const tools = (await web.listTools()).tools.map(t => t.name).sort()
-  assert.deepEqual(tools, ["agents", "history", "inbox", "rooms", "send"])
+  assert.deepEqual(tools, ["agents", "focus", "history", "inbox", "rooms", "send"])
   ok(`both servers came up, 5 tools: ${tools.join(", ")}`)
 
   await call(web, "send", { type: "REQUEST", text: "Need the new field on the orders endpoint." })

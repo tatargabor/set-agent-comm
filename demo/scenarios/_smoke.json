@@ -1,0 +1,31 @@
+{
+  "name": "smoke — a harness próbája, modell nélkül",
+  "room": "team",
+  "projects": {
+    "alpha": ["az egyik sáv", "a másik sáv"],
+    "beta": ["az egyik sáv", "a másik sáv"]
+  },
+  "files": {
+    "alpha": { "src/a.mjs": "export const a = 1\n" },
+    "beta": { "src/b.mjs": "export const b = 2\n" }
+  },
+
+  "intro": "Te a(z) {{PROJECT}} projekt egyik ülése vagy, a sávod: {{ROLE}}.\n@focus {{ROLE}} | src/x.mjs",
+
+  "rounds": [
+    {
+      "title": "egy broadcast tény és egy címzett kérés",
+      "parallel": [
+        { "seat": "alpha/0", "prompt": "@send FACT Az a.mjs átalakult, senkinek nincs vele dolga." },
+        { "seat": "beta/0", "prompt": "@send REQUEST --to alpha Valaki futtassa újra az evalt." }
+      ]
+    },
+    {
+      "title": "olvasás, majd csend",
+      "parallel": [
+        { "seat": "alpha/1", "prompt": "@inbox" },
+        { "seat": "beta/1", "prompt": "nincs mit tenni" }
+      ]
+    }
+  ]
+}

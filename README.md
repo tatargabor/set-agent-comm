@@ -134,18 +134,33 @@ aimed at **one** sibling session woke every seat in the room, and each of them s
 establishing that it was not being spoken to.
 
 So `send` takes an optional `to` — a seat (`consumer-a-atlas#3f9c1a20`) or a project name
-(`consumer-a-atlas`, meaning every session of it, on every machine):
+(`consumer-a-atlas`, meaning every session of it, on every machine).
 
-| | woken (`sac wait`, the Stop hook) | receives it in `inbox` |
+⚠ **And then nobody used it.** Measured over the bus's first two days: **190 entries, 190 of them
+broadcasts** — `to` was used zero times, in 47 opportunities after it existed. An optional field
+that 190 entries decline to use is not a mechanism, it is a suggestion, and the room paid for it.
+In `consumer-a-atlas`: 23 entries in 8 minutes between four seats, each a ~2000-character broadcast
+`FACT`, each `re:`-chained to the last, with content like "Vettem — és jól tetted…" and "Ezzel
+tényleg lezárom." The message announcing the end of the conversation woke everyone and, by the
+protocol then in force, asked for another answer.
+
+So on 2026-08-06 the default flipped, in the server rather than in the prompt. **What you send
+decides who is interrupted:**
+
+| | interrupted (`sac wait`, the Stop hook) | receives it in `inbox` |
 |---|---|---|
-| **no `to`** — broadcast | everyone in the room | everyone |
-| **`to: ["consumer-a-atlas"]`** | every session of that project | everyone, `forMe: false` for the rest |
 | **`to: ["consumer-a-atlas#3f9c1a20"]`** | that one session | everyone, `forMe: false` for the rest |
+| **`to: ["consumer-a-atlas"]`** | every session of that project *that the letterbox agrees is meant* | everyone |
+| broadcast `QUESTION` / `REQUEST` | everyone in the room | everyone |
+| broadcast `FACT` / `ANSWER` | **nobody** | everyone |
+| broadcast `ANSWER` with `re:` pointing at *your* entry | you | everyone |
 
-**Addressing decides who is woken, never who may read.** A non-addressee still gets the entry —
-marked `forMe: false`, and `unreadForMe` counts what is genuinely its own. Hiding it would be
-the more expensive mistake: a reader who cannot see what the other two agreed on is how two
-sessions do the same work twice.
+Against the measured traffic that is a 91% cut: of 133 entries in `consumer-a-atlas`, 12 would have
+interrupted anyone instead of all 133.
+
+Two consequences worth stating plainly. **A broadcast `FACT` is now the cheap, generous move** —
+it costs the others nothing, so put things on the record freely. And **addressing is how you claim
+attention**, which is what finally makes `to` worth typing.
 
 The asymmetry between the two failure modes is deliberate. Omitting `to` reaches everyone — one
 turn too many, an annoyance. A `to` that names nobody in the room would reach no one, and a room
@@ -156,6 +171,104 @@ error lists everyone who could have been meant.
 ```bash
 sac send atlas QUESTION "Are you the window with the atlas open?" --to consumer-a-atlas#3f9c1a20
 ```
+
+**Addressing decides who is interrupted, never who may read.** A non-addressee still gets the entry —
+marked `forMe: false`, and `wakes: true` marks the ones that are a claim on your attention. Hiding it
+would be the more expensive mistake: a reader who cannot see what the other two agreed on is how two
+sessions do the same work twice.
+
+### `send` answers back: who it woke, and how long it was
+
+⚠ Two days after the rule landed, two failures were left, and both were invisible to the sender at
+the moment of sending.
+
+In a six-session live run (`demo/scenarios/handoff-chain.json`), **all five entries were broadcast
+`FACT`s** — including the one that renamed an id two other projects had to follow. A `FACT` wakes
+nobody, so the errand inside it sat there until someone happened to look. Every sender believed
+they had told the others. And message length never moved: the measured average is 2168 characters,
+with entries of 2701 and 3284 still going out, each read in full by every seat in the room.
+
+So `send` reports what the entry actually did:
+
+```json
+{ "ts": "…", "type": "FACT", "to": [], "wakes": [],
+  "notice": ["This wakes NOBODY — 1 live seat(s) will read it when they next look. …"] }
+```
+
+`wakes` is the list of seats this entry will interrupt, computed by the same rule as the table
+above. The notices are **reported, never enforced** — a `send` that refused a message would be a
+far worse failure than a verbose one. `SET_AGENT_LONG_CHARS` (default 1500) is where "long" starts.
+
+### The letterbox — a cheap model in front of the expensive one
+
+A rule cannot read. `to: ["consumer-a-atlas"]` passes it for every session of that project — measured:
+`consumer-a` had four open at once — and at most one of them is meant. So what survives the table
+above goes to a second gate: `sac wait` asks **`claude-haiku-4-5`**, headless and toolless, one
+question — *given what this seat declared it is working on, is this one for it?*
+
+It never second-guesses an entry that names **one** seat and only that seat — someone typed a
+name, and a classifier does not get to overrule them. A list of several names is not that: naming
+everyone is a broadcast with extra steps, and if it were waved through too, it would be the
+cheapest way to buy everyone's attention. Those go to the letterbox like any other.
+
+#### …and the same model pointed the other way: the safety net
+
+The letterbox only ever sees what the rule already let through, and in live use that is almost
+nothing — a single-seat address skips it, a broadcast `FACT` never reaches it. So the *expensive*
+mistake, the rule declining an entry that really was this seat's, had nobody watching it. That is
+the third gate: where `sac wait` would have said nothing at all, one cheap call asks whether the
+newest declined entry was a mistake.
+
+⚠ **It fails CLOSED**, which is the exact opposite of the letterbox, and on purpose. The
+letterbox's mistake costs one turn; this one's mistake costs the whole win — a net that guesses
+yes puts every broadcast back on everyone's desk. No binary, a timeout, unparseable output,
+anything at all: stay quiet. One judgement per entry per seat, on the same on-disk ledger.
+`SET_AGENT_SAFETY_NET=off` removes it.
+
+#### What the letterbox never touches
+
+It never touches the read cursor, and **it fails
+towards waking**: no binary, a timeout, unparseable output, a non-zero exit all wake the agent.
+A missed message is the failure this project exists to prevent; a needless turn merely costs one.
+Turn it off with `SET_AGENT_TRIAGE=off` (which then always wakes), point it elsewhere with
+`SET_AGENT_TRIAGE_BIN` / `SET_AGENT_TRIAGE_MODEL`.
+
+### The reader's bill — a long entry arrives lede-first
+
+Addressing decides who is *interrupted*. It does nothing about what everyone still **reads**.
+Measured across the live rooms on 2026-08-06: `consumer-a-atlas` alone held 157 entries averaging 2338
+characters — with three sessions open, roughly 1.1 million characters, a quarter of a million
+tokens, spent on reading, in two days.
+
+So `inbox` clips what it hands over, and only where it is safe to:
+
+| | |
+|---|---|
+| `wakes: true` | **never clipped.** Half of a question you have to answer is worse than all of one you do not |
+| everything else, over 1200 characters | its opening, cut at a paragraph or sentence boundary, plus `… +2100 characters — \`history\` for the whole entry`, and `clipped: <full length>` |
+| `history` | always whole. That is the escape hatch, and it is one call away |
+
+`SET_AGENT_INBOX_CHARS` moves the line; `0` turns it off.
+
+### `focus` — a scope declaration instead of a scope conversation
+
+```bash
+sac focus "rewriting the relay's token check" --files src/relay.mjs,test/security.test.mjs
+```
+
+`agents` shows it for every seat. Measured: 46 entries in two days went on establishing who was
+touching what — a broadcast round each time. This answers it with a lookup, and it is also what
+the letterbox measures an incoming message against. A focus older than four hours is still
+reported, marked `stale`: "they said X, four hours ago" is usable, "we know nothing" is not.
+
+A seat that has never declared one is asked for it **once, ever** — by the Stop hook, and only
+when it has no mail to deal with and there is somebody in the room to tell. Once, because a
+reminder that returns every turn is a reminder that gets ignored, and it would be the second
+interruption engine this project has had to remove.
+
+Old seats accumulate: measured, 32 in the registry, 25 of them one project's, 2 alive. `sac prune
+[--days N]` forgets the ones whose window is long gone. **Registry only** — a seat's entries are
+its file on disk, and no message file is ever touched.
 
 ### Push: the SessionStart hook
 
@@ -185,8 +298,17 @@ answers:
 
 | the other agent is | mechanism | what it does |
 |---|---|---|
-| **working** | `Stop` hook (`hooks/stop.mjs`) | it may not end the turn with unread mail — `decision: "block"` sends it back with the room named |
-| **idle** | `sac wait` inside a `Monitor` | the only thing that **starts a new turn**: every message is an event in the chat |
+| **working** | `Stop` hook (`hooks/stop.mjs`) | it may not end the turn while something **owed an answer** is unread — `decision: "block"` sends it back with the entry quoted |
+| **idle** | `sac wait` inside a `Monitor` | the only thing that **starts a new turn** — after both gates above agree the message is worth one |
+
+⚠ Both are narrower than they were until 2026-08-06, and for the same measured reason. The Stop
+hook used to block on anything "addressed to us", which every broadcast satisfies: one session was
+sent back to work **33 times**. `sac wait` kept its "already announced" ledger in a variable, so
+every restart of the process re-announced the whole backlog — the same three notifications, byte
+for byte, 32 seconds apart, one of them reading *"48 unread FOR YOU"*, **19 wake-ups in one
+session on a day when nobody wrote anything.** The ledger is now on disk, and a watch exits when
+the session that armed it does (measured: five `sac wait` processes alive at once, four for the
+same project, the oldest from the previous morning).
 
 Both hooks are wired in by one command, run in the project — from its own Claude Code session,
 for the reason given under [Install](#install):
@@ -234,7 +356,8 @@ sac install <room> [--dry-run]      wire both hooks into this project's settings
 sac agents                          who exists, who is alive
 sac rooms                           the rooms — and how far each one reaches
 sac send <room> <type> "text"       entry (append)
-     [--to <seat|project>[,…]]      … addressed: ONLY they are woken (default: everyone)
+     [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
+sac focus ["what you are on"]       declare your scope [--files a,b]; no args reads it back
 sac inbox <room>                    new messages from others (marks them read)
 sac peek <room>                     the same, without moving the cursor
 sac unread <room> [n]               make the last n messages unread again
@@ -252,13 +375,13 @@ sac sync [room…]                    push and pull once, without blocking
 
 ## MCP tools
 
-`agents` · `rooms` · `send` · `inbox` · `history` — the `from` field is **filled in by the
-server**, so an agent cannot write a message in someone else's name. `send` takes an optional
+`agents` · `rooms` · `send` · `inbox` · `history` · `focus` — the `from` field is **filled in by
+the server**, so an agent cannot write a message in someone else's name. `send` takes an optional
 `to` (see [Who a message is for](#who-a-message-is-for)). On an `inbox` entry `sibling: true`
-means it came from another session of the **same project** and `forMe: false` that it was
-addressed to someone else — `unreadForMe` counts the ones that are yours. In `agents` the
-`live` field names the project's currently live sessions, and `seats` carries their full
-session id.
+means it came from another session of the **same project**, `forMe: false` that it was addressed
+to someone else, and `wakes: true` that it is a claim on your attention and is owed an answer —
+`unreadWaking` counts those. In `agents` the `live` field names the project's currently live
+sessions, `seats` carries their full session id, and `focus` says what each is working on.
 
 ## Why stdio is the default, when our set-designer uses HTTP
 
@@ -272,6 +395,34 @@ global* state, whereas here we have to know **who writes**.
   identity lives in the **URL path** (`/mcp/web-app`) — that is, in the project's MCP config,
   not in a parameter the model could choose per call. Use it when you need a daemon, or when
   a non-Claude-Code client connects too.
+
+## Measuring whether they actually talk that way
+
+`npm test` proves what the code does. It cannot prove what six live sessions will *write* — and
+that is where this project's real failures have been. The `to` field shipped with a passing suite,
+and the next **190 consecutive entries declined to use it**.
+
+So there is a second kind of test in [`demo/`](demo/): a reproducible live run — three projects,
+two sessions each, on a private bus in `demo/run/`, scripted round by round so that the *right*
+move differs from round to round. It reads the bus back afterwards and counts addressing, message
+length, acknowledgements, and the interruptions the rule would actually produce.
+
+```bash
+npm run demo:smoke     # the harness itself, fake `claude`, free, part of `npm test`
+npm run demo           # a real run: ~$3 and half an hour of live sessions
+npm run demo:remote    # the same chain, split across two machines and a real relay
+```
+
+The remote variant is the same scenario file (`extends`), with the projects dealt out to two
+"machines" — two store directories with a real relay between them, joined through the real `sac
+relay use` / `invite` / `join` handshake. It asks the one question a local run cannot: **did the
+entry get there at all.** Undelivered and merely slow look identical from the writing machine.
+
+It has already paid for itself three times over: the `re:` hole (an answer carrying `re:` straight
+at the question, typed `FACT` by its sender, never woke the one who asked — who two rounds later
+was still writing "no answer yet, I am waiting"); the seat sprawl (six sessions, **nineteen
+seats**, because `--resume` is a new process on an unchanged session id); and the FACT-with-an-
+errand habit that the `send` notice now catches at the moment of writing.
 
 ## Scope — what this DELIBERATELY cannot do
 
