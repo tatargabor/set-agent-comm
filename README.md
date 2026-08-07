@@ -544,6 +544,14 @@ The relay enforces the namespace in the token: a device cannot post under anothe
 name. But `@macmini` is a weaker claim than a local name, and the reader is entitled to see
 which one it got.
 
+**And the name you are shown is a name you can address.** `--to web-app@macmini` is written as
+you see it, travels as you wrote it, and is translated into that machine's own names as it
+lands (`web-app@macmini` → `web-app` on macmini itself); an addressee naming a third machine
+passes through untouched. Without that step the correct name reached nobody — a remote seat is
+local to itself, so it has no `@macmini` in its name to match — and neither side could tell,
+because on the sender's machine that name is in the roster and `send` was right to accept it.
+Measured in a live two-machine room on 2026-08-07; the regression is in `test/relay.test.mjs`.
+
 ## Prior art and relatives
 
 The `reuse-before-build` scan (2026-08-03) found these before we wrote a line:

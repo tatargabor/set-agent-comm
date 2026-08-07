@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs"
 import { join } from "node:path"
 import { hostname } from "node:os"
 import { createHash } from "node:crypto"
-import { ROOT, busFiles, busFile, history, ingest, parseRooms } from "./store.mjs"
+import { ROOT, busFiles, busFile, history, ingest, parseRooms, parseTo } from "./store.mjs"
 import { encrypt, decrypt, entryAad } from "./crypto.mjs"
 
 const CONFIG = join(ROOT, "relays.json")
@@ -76,6 +76,32 @@ export const isRemote = writer => writer.includes("@")
 export const remoteName = (writer, ns) => {
   const i = writer.indexOf("#")
   return i === -1 ? `${writer}@${ns}` : `${writer.slice(0, i)}@${ns}${writer.slice(i)}`
+}
+
+/**
+ * The inverse, applied to an ADDRESSEE on the way in: on `macmini`, `web-app@macmini` is
+ * `web-app` and `web-app@macmini#3f9c1a20` is `web-app#3f9c1a20`. Anything naming another
+ * machine is left exactly as written.
+ *
+ * ⚠ Measured on 2026-08-07, in the first cross-machine room with two participants: the name
+ * the room SHOWS you for a remote seat was not an address that reached it. B addressed
+ * `set-agent-comm@tgdesktop` — the only name it had ever seen for A — and on A the entry
+ * arrived `(not for you)`, waking nobody. `addressForms` strips the machine off MY name, but A's
+ * own seat is local (`set-agent-comm#99f6550b`) and carries no `@tgdesktop` to strip. So the
+ * remote form matched nothing, and the sender had no way to know: on B that name is in the
+ * roster, so `send`'s misspelt-addressee check passed. It is exactly the failure the asymmetry
+ * in `parseTo` exists to prevent — a message nobody is woken for — reached by using the
+ * CORRECT name, and it takes two machines to see it.
+ *
+ * The translation belongs here rather than in `addressForms`, for the reason this whole module
+ * exists: the namespace is a property of the room's relay config, and `store.mjs` neither knows
+ * nor should know that a network was involved. What crosses the wire is normalised at the wire.
+ */
+export const localName = (name, ns) => {
+  const i = String(name).indexOf("#")
+  const base = i === -1 ? String(name) : String(name).slice(0, i)
+  const seat = i === -1 ? "" : String(name).slice(i)
+  return base.endsWith(`@${ns}`) ? base.slice(0, -(ns.length + 1)) + seat : name
 }
 
 const entryId = (writer, ts) => createHash("sha256").update(`${writer}|${ts}`).digest("base64url").slice(0, 22)
@@ -156,6 +182,7 @@ export async function push({ room, log = () => {} }) {
 export async function pull({ room, wait = 25, log = () => {} }) {
   const cfg = roomConfig(room)
   if (!cfg) return { skipped: "no relay configured for this room" }
+  const ns = cfg.namespace || deviceName()
   const q = `after=${cfg.cursor || 0}&wait=${wait}` + (cfg.epoch ? `&epoch=${encodeURIComponent(cfg.epoch)}` : "")
   const out = await api(cfg, `/rooms/${room}/entries?${q}`)
 
@@ -188,8 +215,12 @@ export async function pull({ room, wait = 25, log = () => {} }) {
     // A writer name becomes a FILE NAME on this machine. `ingest` refuses one that would leave
     // the room's directory; that refusal must drop the entry, not the whole batch.
     try {
+      // The addressee is translated into THIS machine's names before it is written: from here
+      // on the entry is indistinguishable from a local one, which is the whole job (see
+      // `localName`). Names on other machines pass through untouched — the room stays readable
+      // to everyone, and only who gets WOKEN depends on this.
       if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text,
-                   to: body.to })) written++
+                   to: parseTo(body.to).map(n => localName(n, ns)) })) written++
     } catch (err) {
       log(`⚠ refused an entry from ${e.writer} in "${room}": ${err.message}`)
     }

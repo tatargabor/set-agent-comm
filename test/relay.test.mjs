@@ -5,7 +5,7 @@
 // file system — the same "measure the result, not the call" rule as the rest of the suite.
 import { test, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync, readFileSync } from "node:fs"
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -116,6 +116,41 @@ test("the answer comes back — the leg is symmetric", async () => {
   const inb = await run(A, "desktop", ["inbox", ROOM])
   assert.match(inb.out, /Understood, not touching it\./)
   assert.match(inb.out, /web-app@macmini#/)
+})
+
+test("REGRESSION: the name the room SHOWS for a remote seat is an address that reaches it", async () => {
+  // Measured live on 2026-08-07 and it cost a message: B knows A only as `web-app@desktop` —
+  // that is the one name it has ever seen — so that is what it addresses. Before the fix the
+  // entry landed on A as `(not for you)` and woke nobody, because A's own seat is local and has
+  // no `@desktop` for `addressForms` to strip. Correct name, silent delivery, no way for either
+  // side to notice. The addressee is now translated at the wire (`localName`).
+  await run(B, "macmini", ["send", ROOM, "QUESTION", "Does the addressee survive the wire?",
+    "--to", "web-app@desktop"])
+  await run(A, "desktop", ["sync", ROOM])
+  const inb = await run(A, "desktop", ["inbox", ROOM])
+  assert.match(inb.out, /Does the addressee survive the wire\?/, `it did not arrive: ${inb.out}`)
+  assert.doesNotMatch(inb.out, /survive the wire\?[\s\S]*?\(not for you\)|\(not for you\)[\s\S]*?survive the wire/,
+    `the addressee was not resolved on the receiving machine: ${inb.out}`)
+  // …and on disk, because the file is the source of truth: the header must carry A's LOCAL
+  // name, so every later reader — the Stop hook, `sac wait`, the letterbox — sees a plain
+  // local addressee and needs to know nothing about namespaces.
+  const dir = join(A, "channels", ROOM)
+  const file = readdirSync(dir).find(f => f.startsWith("web-app@macmini#"))
+  const header = readFileSync(join(dir, file), "utf8")
+    .split("\n").find(l => l.startsWith("## ") && l.includes("QUESTION"))
+  assert.match(header, /→ web-app(\s|$)/, `the addressee was written unresolved: ${header}`)
+})
+
+test("an addressee on ANOTHER machine is left exactly as written", async () => {
+  // The translation may only touch this machine's own namespace: rewriting more would hand one
+  // machine's mail to another, which is worse than the bug it fixes.
+  const { localName } = await import("../src/bridge.mjs")
+  assert.equal(localName("web-app@macmini", "macmini"), "web-app")
+  assert.equal(localName("web-app@macmini#3f9c1a20", "macmini"), "web-app#3f9c1a20")
+  assert.equal(localName("web-app@desktop", "macmini"), "web-app@desktop")
+  assert.equal(localName("web-app", "macmini"), "web-app")
+  // A namespace that is a suffix of another one may not be mistaken for it.
+  assert.equal(localName("web-app@macmini-2", "macmini"), "web-app@macmini-2")
 })
 
 test("THE RELAY CANNOT READ THE ROOM", async () => {
