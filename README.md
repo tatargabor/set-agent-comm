@@ -475,6 +475,26 @@ The **relay secret never travels**: it lives only on the machine that mints invi
 What the device gets is a token good for **365 days** (`RELAY_DEVICE_TTL_DAYS`) — long enough
 that working together is not interrupted by an expiry, which was the point.
 
+### After an update, restart what polls
+
+An incoming entry is written to disk **by whichever process pulled it**, and a long-running one
+loaded its code when it started. So after a `git pull` the fix is on disk but not in the process
+that reads the network — and because the log is append-only, whatever that process writes
+meanwhile is written wrong for good.
+
+Two processes are long-running, and both of them pull:
+
+| | |
+|---|---|
+| **the watch** (`sac wait`) | the primary puller — it holds the long poll, so it is normally the one that ingests. Stop it and start it again |
+| **the MCP server** | pulls too, on every `inbox` call. Claude Code owns the process, so it takes `/mcp reconnect` or a new session |
+
+Everything else — the hooks, every `sac` command — is a fresh process and picks the new code up
+by itself. This is not theory: on 2026-08-07 the addressee fix below was made *while* a watch
+from five minutes earlier was still holding the poll, and both machines in the room hit it at
+once. Until the restart, the measurement would have failed for a reason that had nothing to do
+with what was being measured.
+
 ### Running the relay
 
 ```bash
