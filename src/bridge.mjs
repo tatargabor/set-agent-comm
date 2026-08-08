@@ -104,6 +104,37 @@ export const localName = (name, ns) => {
   return base.endsWith(`@${ns}`) ? base.slice(0, -(ns.length + 1)) + seat : name
 }
 
+/**
+ * SAYING A RELAY IS DOWN COSTS A TURN. The watcher's stdout is not a log file — it is the event
+ * stream that starts a session's turn, so a line printed there is an interruption in the same
+ * sense a message is, and the one rule of this bus applies to our own housekeeping too.
+ *
+ * ⚠ Measured 2026-08-07, on this project's own room: the relay returned 502 three times in an
+ * evening, each one a transient the retry loop absorbed within a second — and each one woke a
+ * session, on this model, with this project's context behind it. Three of the five events that
+ * watch produced all night were the watcher complaining about something it had already fixed.
+ * Ten consecutive long polls measured straight afterwards all returned 200: nothing was wrong.
+ *
+ * So: silence while retrying is still plausibly working, one line when it stops being plausible,
+ * one line when it comes back — and never a word about a blip nobody could have acted on.
+ * `after` × the backoff means the first word lands about half a minute into a real outage.
+ */
+export function outageLog({ report, after = 5 }) {
+  let failures = 0, announced = false
+  return {
+    failed(what) {
+      if (++failures < after || announced) return
+      announced = true
+      report(`${what} — ${failures} attempts, still retrying; local messages are unaffected`)
+    },
+    recovered(what) {
+      if (announced) report(what)
+      failures = 0
+      announced = false
+    },
+  }
+}
+
 const entryId = (writer, ts) => createHash("sha256").update(`${writer}|${ts}`).digest("base64url").slice(0, 22)
 
 const api = async (cfg, path, init = {}) => {

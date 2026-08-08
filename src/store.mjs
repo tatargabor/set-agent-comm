@@ -49,6 +49,47 @@ const LEGACY_TYPES = { "KÉRDÉS": "QUESTION", "VÁLASZ": "ANSWER", "TÉNY": "FA
 export const normalizeType = type => LEGACY_TYPES[type] || type
 
 /**
+ * The shape of an entry header — `## <ts> — <TYPE> [→ <to>, <to>] [(re: <ts>)]`.
+ *
+ * ⚠ ONE definition, used BOTH to read an entry back and to decide which body lines have to be
+ * neutralised before they are written. If those two ever drift apart, the gap between them is a
+ * forged entry, so they may not be two regexes.
+ *
+ * The timestamp and the type are matched STRICTLY, and that is the repair as much as the guard:
+ * the old pattern took `(\S+) — (anything)`, so an ordinary markdown heading in a message body
+ * opened a new entry. Measured 2026-08-08 on the live store — 5 of 163 entries in `consumer-a-atlas`
+ * were phantoms born this way (`## Hatókör — megerősítve`), each one having TRUNCATED the real
+ * message at that line and buried its tail under a timestamp of `0`, which sorts to the front of
+ * the room and is never fresh for a reader who already has a cursor. Tightening the pattern gives
+ * those five their missing halves back, because the log is append-only but the way we read it
+ * is not.
+ *
+ * The `→` group stays optional: every entry written before addressing existed parses as the
+ * broadcast it was. An entry may never become unreadable because the protocol grew.
+ */
+const TS_PATTERN = String.raw`\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:\d{2}|Z)?`
+const ENTRY_HEADER = new RegExp(
+  `^## (${TS_PATTERN}) — (${[...TYPES, ...Object.keys(LEGACY_TYPES)].join("|")})` +
+  String.raw`(?:\s*→\s*([^\n(]+?))?(?:\s*\(re: ([^)]*)\))?\s*$`)
+
+/**
+ * A body line that would read back as a header, pushed one space to the right so it cannot.
+ *
+ * ⚠ Strictness alone is not enough, and the remaining hole is the likeliest one in THIS project
+ * of all projects: agents quote channel headers at each other constantly. A body line reading
+ * `## 2099-01-01T00:00:00.000+02:00 — FACT` still matches the strict pattern, and measured on
+ * 2026-08-08 it does something far worse than split a message. The forged entry is real enough to
+ * move the reader's cursor to 2099 — after which every later entry from that writer fails the
+ * `t(e.ts) > t(seen[writer])` test, is never fresh, and is never delivered. `send` meanwhile
+ * reports `wakes: ["beta"]` to the sender. Delivery confirmed, message muted, for 73 years.
+ *
+ * The space is deliberately visible rather than clever: what was written is still legible, and
+ * nothing has to be un-escaped on the way out.
+ */
+const escapeBodyHeaders = text =>
+  text.split("\n").map(l => ENTRY_HEADER.test(l) ? ` ${l}` : l).join("\n")
+
+/**
  * `SET_AGENT_ROOM` may name SEVERAL rooms, comma-separated ("promo,atlas"): one agent can be
  * part of more than one conversation. Note what this deliberately does NOT do: with several
  * rooms configured there is no default room, so `send` without an explicit `room` fails
@@ -329,6 +370,29 @@ const seatState = seat => {
   return Date.now() - (Date.parse(seat.lastSeen) || 0) < SEAT_TTL_MS ? null : false
 }
 
+/**
+ * How many CLOSED windows one project keeps in the roster. Live and unknown seats are never
+ * counted or dropped — this only bounds the tail of sessions that are provably gone.
+ *
+ * ⚠ `pruneSeats` already forgets dead seats, and it was not enough, for a reason worth writing
+ * down: it is calibrated in DAYS while seats are created per session. Measured 2026-08-08 on the
+ * live store — 302 seats, 238 of them one project's, 236 of those a confident `seatState === false`
+ * — and `sac prune --dry` dropped exactly 0 of them, because 193 were written the previous day and
+ * nothing was 7 days old yet. Meanwhile `agents` returned 77,923 characters, over the tool-result
+ * limit, so "who is doing what" — the lookup that exists to save the room a conversation — could
+ * not be answered at all. A time-based rule cannot bound a per-session quantity; a count can.
+ */
+const SEATS_KEPT_PER_AGENT = 10
+
+/** Drop all but the most recently seen closed windows. Never touches a message file or a cursor. */
+function capDeadSeats(seats, keep = SEATS_KEPT_PER_AGENT) {
+  const dead = Object.entries(seats).filter(([, s]) => seatState(s) === false)
+  if (dead.length <= keep) return seats
+  dead.sort((a, b) => (Date.parse(b[1].lastSeen) || 0) - (Date.parse(a[1].lastSeen) || 0))
+  for (const [name] of dead.slice(keep)) delete seats[name]
+  return seats
+}
+
 /** Record this process on the seat, and forget the processes that have exited. */
 function touchSeat(seats, name, { session = null, pid, owner = null }) {
   const held = seats[name]
@@ -451,6 +515,9 @@ export function register({ agent, project, session, room, pid = process.pid, wri
   // `owner` is passed through, not re-derived: without it a check-in whose session id differs
   // from the one that named the seat would read as a stranger and wipe the window's record.
   const mine = touchSeat(seats, seat, { session, pid, owner })
+  // Bounded HERE rather than in a command someone has to remember to run: the registry grows one
+  // seat per session, and a roster nobody can read is the same as no roster at all.
+  capDeadSeats(seats)
 
   reg.agents[agent] = {
     ...prev,
@@ -640,7 +707,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   mkdirSync(dirname(path), { recursive: true })
   const ts = now()
   const head = `## ${ts} — ${type}${addressed.length ? ` → ${addressed.join(", ")}` : ""}${re ? ` (re: ${re})` : ""}`
-  const body = text.trim()
+  const body = escapeBodyHeaders(text.trim())
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
   // `from` is a SEAT, so the registry entry belongs to the project behind it. `writer` keeps
   // the seat as it is: sending a message may not reshuffle who sits where.
@@ -732,7 +799,7 @@ export function liveSeats(room) {
  * owning window is gone, and it has been silent longer than `days`. A session that is merely
  * closed for the evening is inside that window and keeps its name, its cursor and its focus.
  */
-export function pruneSeats({ days = 7, dry = false } = {}) {
+export function pruneSeats({ days = 7, keep = SEATS_KEPT_PER_AGENT, dry = false } = {}) {
   const cutoff = Date.now() - days * 86400_000
   const reg = readJson(REGISTRY, { agents: {} })
   const dropped = []
@@ -744,6 +811,12 @@ export function pruneSeats({ days = 7, dry = false } = {}) {
         dropped.push({ seat: name, lastSeen: s.lastSeen ?? null })
       }
     }
+    // …and then the same count cap `register` applies, so a project that has been checking in all
+    // day is cut back here too. Age alone could not do it: measured 2026-08-08, this loop dropped
+    // 0 of 302 seats because 193 of them were written the day before.
+    const before = new Set(Object.keys(a.seats || {}))
+    capDeadSeats(a.seats || {}, keep)
+    for (const name of before) if (!(name in (a.seats || {}))) dropped.push({ seat: name, lastSeen: null })
   }
   if (dropped.length && !dry) writeJson(REGISTRY, reg)
   return { dropped, dry,
@@ -794,7 +867,10 @@ export function ingest({ room, writer, ts, type = "FACT", re, text, to }) {
   const addressed = parseTo(to)
   const head = `## ${ts} — ${normalizeType(type)}${addressed.length ? ` → ${addressed.join(", ")}` : ""}` +
     `${re ? ` (re: ${re})` : ""}`
-  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${text.trim()}\n`)
+  // Escaped on the RECEIVING side too, not merely trusted from the sender: the other machine may
+  // be running an older build, or may not be a friend at all. What crosses the wire is normalised
+  // where it lands (see `assertSafeTs`, which exists for the same reason and the same attacker).
+  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${escapeBodyHeaders(text.trim())}\n`)
   noteRemote(writer, room)
   return true
 }
@@ -814,6 +890,7 @@ function noteRemote(writer, room) {
   const seats = { ...(prev.seats || {}) }
   seats[writer] = { ...(seats[writer] || {}), session: null, writers: {}, remote: true,
     firstSeen: seats[writer]?.firstSeen || now(), lastSeen: now() }
+  capDeadSeats(seats)
   reg.agents[agent] = {
     ...prev, agent, remote: true, host: agent.split("@")[1] || null,
     rooms: [...new Set([...(prev.rooms || []), room])],
@@ -827,13 +904,9 @@ function parse(path, agent) {
   let raw
   try { raw = readFileSync(path, "utf8") } catch { return [] }
   const out = []
-  // `## <ts> — <TYPE> [→ <to>, <to>] [(re: <ts>)]`. The `→` group is OPTIONAL and was added
-  // later: every entry written before addressing existed parses as a broadcast, which is what
-  // it was. An entry may never become unreadable because the protocol grew.
-  const re = /^## (\S+) — ([^\n(→]+?)(?:\s*→\s*([^\n(]+?))?(?:\s*\(re: ([^)]*)\))?\s*$/
   let cur = null
   for (const line of raw.split("\n")) {
-    const m = line.match(re)
+    const m = line.match(ENTRY_HEADER)
     if (m) {
       if (cur) out.push(cur)
       cur = { ts: m[1], type: normalizeType(m[2].trim()), to: parseTo(m[3]),

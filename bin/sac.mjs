@@ -137,7 +137,14 @@ try {
       // Registry hygiene, and nothing else: the message files are the log and are never touched.
       // Measured 2026-08-06 — 32 seats remembered, 2 of them alive, 25 belonging to one project.
       const { value: days, rest: args } = takeFlag(rest, "--days")
-      const dry = args.includes("--dry-run")
+      // ⚠ An unrecognised flag USED TO BE IGNORED, and on the one command where that is worst.
+      // Measured 2026-08-08: `sac prune --dry` — the obvious spelling — silently ran the real
+      // prune on the live registry and forgot 261 seats, then reported them as "would drop".
+      // A rehearsal that performs the act is worse than no rehearsal, so an unknown flag stops
+      // here rather than quietly meaning "yes, do it".
+      const dry = args.includes("--dry-run") || args.includes("--dry")
+      const unknown = args.find(a => a.startsWith("-") && a !== "--dry-run" && a !== "--dry")
+      if (unknown) throw new Error(`prune: unknown flag '${unknown}' — did you mean --dry-run?`)
       const r = store.pruneSeats({ days: Number(days) || 7, dry })
       for (const d of r.dropped) console.log(`${dry ? "would drop" : "dropped  "} ${d.seat.padEnd(44)} last seen ${d.lastSeen || "never"}`)
       console.log(`${r.dropped.length} seat(s) ${dry ? "would be forgotten" : "forgotten"}, ${r.kept} kept` +
@@ -515,17 +522,22 @@ try {
       for (const room of watched.filter(r => bridge.roomConfig(r))) {
         void (async () => {
           let backoff = 1000
+          // What we print here WAKES someone (see `outageLog`), so a blip the loop absorbs by
+          // itself is not news. An epoch change still speaks up immediately — that one is a
+          // relay restart, and the pull's own `log` says so.
+          const outage = bridge.outageLog({ report: m => console.log(`[set-agent-comm] ${m}`) })
           for (;;) {
             try {
               await bridge.push({ room })                        // whatever the outbox still owes
               await bridge.pull({ room, wait: 25, log: m => console.log(`[set-agent-comm] ${m}`) })
               check()
               backoff = 1000
+              outage.recovered(`relay "${room}" is reachable again`)
             } catch (e) {
               // A relay outage may not kill the watch: local messages must keep flowing, and
               // the remote ones catch up when it returns. Backing off keeps a dead relay from
               // turning into a hot loop; the ceiling keeps recovery within a minute.
-              console.log(`[set-agent-comm] relay "${room}" unreachable (${e.message}) — retrying`)
+              outage.failed(`relay "${room}" unreachable (${e.message})`)
               await new Promise(r => setTimeout(r, backoff))
               backoff = Math.min(backoff * 2, 60_000)
             }
