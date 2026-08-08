@@ -55,6 +55,23 @@ const silent = store.headless()
 // from the outside is indistinguishable from "nobody wrote anything".
 const rooms = store.parseRooms(process.env.SET_AGENT_ROOM)
 
+const SAC = join(HERE, "..", "bin", "sac.mjs")
+/**
+ * THE ENVIRONMENT EVERY COMMAND THIS HOOK HANDS OUT HAS TO CARRY.
+ *
+ * The hook is given its settings on its own command line, and the shell the AGENT later runs a
+ * command in inherits none of it. `SET_AGENT_NAME` was already passed for that reason;
+ * `SET_AGENT_COMM_DIR` was not, and that is a silent defect.
+ *
+ * ⚠ Measured 2026-08-08, and it took a throwaway project to see it. A run under a non-default
+ * store obeyed the "arm your inbox watch" line, and the watch it armed read the DEFAULT store —
+ * it created an empty room directory there and sat watching it. Nothing failed. A watch pointed
+ * at the wrong store is indistinguishable from a working one until a message does not arrive,
+ * which is the exact failure mode this hook exists to remove.
+ */
+const ENV = (process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : "") +
+  `SET_AGENT_NAME=${agent} `
+
 const out = { hookSpecificOutput: { hookEventName: "SessionStart" } }
 const watchPaths = []
 const notices = []
@@ -128,11 +145,7 @@ for (const room of rooms) {
 // agent that silently does nothing. `send` needs no room argument in one room, and cannot be
 // given a default in several — so the room is only named when there is exactly one.
 if (silent) {
-  // The store root travels with it when it is not the default: this hook was given it on its own
-  // command line, and a `sac` the agent starts inherits nothing from that.
-  const root = process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : ""
-  const cmd = `${root}SET_AGENT_NAME=${agent} ${process.execPath} ` +
-    `${join(HERE, "..", "bin", "sac.mjs")} send` +
+  const cmd = `${ENV}${process.execPath} ${SAC} send` +
     (rooms.length === 1 ? ` ${rooms[0]}` : " <room>") + " FACT '…'"
   if (rooms.length)
     out.hookSpecificOutput.additionalContext =
@@ -170,10 +183,11 @@ const siblings = writer !== agent
  * The command is spelled out in full, with an absolute path: `sac` may not be on the PATH, and
  * an agent guessing at a command is an agent that silently does not watch.
  */
-const SAC = join(HERE, "..", "bin", "sac.mjs")
 // `process.execPath`, not `node`: the Monitor runs this in a shell whose PATH we do not
-// control — measured on macOS, where node sits under the home directory.
-const waitCmd = `SET_AGENT_NAME=${agent} ${process.execPath} ${SAC} wait ${rooms.join(",")}`
+// control — measured on macOS, where node sits under the home directory. And `ENV`, not just
+// the agent name: see the note on it — a watch armed against the wrong store looks like a
+// working one from every angle except the one that matters.
+const waitCmd = `${ENV}${process.execPath} ${SAC} wait ${rooms.join(",")}`
 const monitor = rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
     `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +

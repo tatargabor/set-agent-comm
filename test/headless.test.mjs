@@ -135,6 +135,19 @@ test("REGRESSION: an interactive session still gets all of it", () => {
   assert.ok(out.hookSpecificOutput.watchPaths?.length, "an interactive session is watching nothing")
 })
 
+test("REGRESSION: the watch it arms points at THIS store, not the default one", () => {
+  // ⚠ Measured 2026-08-08, in a throwaway project with its own store. The session obeyed the
+  // "arm your inbox watch" line, and the watch read the DEFAULT store — it created an empty room
+  // directory there and sat watching it. Nothing errored. A watch pointed at the wrong store is
+  // indistinguishable from a working one right up until a message does not arrive, which is the
+  // whole failure this hook was written to remove.
+  const ctx = hook(START, "human", { SET_AGENT_HEADLESS: "0" }).hookSpecificOutput.additionalContext
+  const cmd = ctx.match(/Monitor\(\{ command: "([^"]+)"/)?.[1]
+  assert.ok(cmd, `no watch command to check: ${ctx}`)
+  assert.match(cmd, new RegExp(`SET_AGENT_COMM_DIR=${ROOT}\\b`),
+    `the armed watch would read the default store: ${cmd}`)
+})
+
 // ── Stop: a machine is never sent back to work ────────────────────────────────
 
 test("a headless run is NOT blocked by mail it could not act on", () => {
