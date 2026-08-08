@@ -37,7 +37,8 @@ src/tools.mjs     the MCP tool definitions + handlers, transport-independent
 src/stdio.mjs     transport 1 (DEFAULT): identity = cwd, unforgeable
 src/http.mjs      transport 2: identity = URL path (/mcp/<agent>), for a daemon
 bin/sac.mjs       the CLI on the same core, so CLI and MCP cannot drift apart
-hooks/*.mjs       session-start (check in + watchPaths) and stop (block on unread mail)
+hooks/*.mjs       session-start (check in + watchPaths) and stop (block on unread mail).
+                  Both go SILENT for a headless `claude -p` — see `store.headless`
 src/bridge.mjs    the remote leg, client half: push/pull, remote↔local name translation
 src/relay.mjs     the remote leg, server half: stateless, in-memory, HMAC tokens
 src/crypto.mjs    AES-256-GCM room encryption + stateless token signing
@@ -108,6 +109,7 @@ back into the target machine's local form as the entry lands.
 `SET_AGENT_ROOM` (comma-separated; with several rooms there is **no default room** and `send`
 without an explicit room fails) · `SET_AGENT_DEVICE` · `SET_AGENT_LONG_CHARS` (1500) ·
 `SET_AGENT_INBOX_CHARS` (1200, `0` = off) · `SET_AGENT_TRIAGE=off` · `SET_AGENT_TRIAGE_BIN` /
-`_MODEL` / `_TIMEOUT_MS` · `SET_AGENT_SAFETY_NET=off` · `SET_AGENT_QUIET_MS`.
+`_MODEL` / `_TIMEOUT_MS` · `SET_AGENT_SAFETY_NET=off` · `SET_AGENT_QUIET_MS` ·
+`SET_AGENT_HEADLESS=1|0` (force/forbid the silent join; otherwise derived — see `store.headless`).
 Relay side: `RELAY_SECRET` (required), `RELAY_HOST`, `PORT`, `RELAY_RETENTION_HOURS`,
 `RELAY_DEVICE_TTL_DAYS`, `RELAY_LIMIT_*`, `RELAY_MAX_ROOM_*`.

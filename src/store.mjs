@@ -308,6 +308,74 @@ export function ownerPid(start = process.pid) {
   return null
 }
 
+/**
+ * The owner's controlling terminal, from `/proc/<pid>/stat` field 7 (`tty_nr`): `0` means the
+ * process has none. The fields after the last `)` are state, ppid, pgrp, session, tty_nr — hence
+ * index 4, and the same `lastIndexOf(")")` trick as `parentOf`, for the same reason.
+ *
+ * Off Linux there is no field number, only `ps -o tty=`, which prints `??` for "no terminal" —
+ * so the answer there is coarse (0 or 1), which is all any caller needs. `null` = could not tell.
+ */
+function ttyNr(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[4])
+  } catch { /* not Linux, or the process is gone */ }
+  try {
+    const tt = execFileSync("ps", ["-o", "tty=", "-p", String(pid)], { encoding: "utf8" }).trim()
+    return tt === "" || tt === "?" || tt === "??" ? 0 : 1
+  } catch { return null }
+}
+
+/**
+ * Is the owner running in PRINT MODE (`claude -p`)? This is the direct evidence — print mode is
+ * the property that matters, the terminal is only a proxy for it — and it catches the case the
+ * terminal test cannot: a person typing `claude -p …` by hand, which has a tty and still has no
+ * prompt to come back to.
+ *
+ * ⚠ Linux only, and deliberately so. `/proc/<pid>/cmdline` is NUL-separated, so the argv
+ * boundaries are exact and `-p` cannot be matched inside a prompt. `ps -o args=` joins them with
+ * spaces and loses that; a prompt containing " -p " would then read as print mode and SILENCE A
+ * REAL SESSION — the expensive direction. Off Linux we keep the terminal test alone.
+ */
+function printMode(pid) {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8")
+      .split("\0").some(a => a === "-p" || a === "--print")
+  } catch { return false }
+}
+
+/**
+ * IS THIS A HEADLESS RUN — a `claude -p` that nobody is sitting in front of.
+ *
+ * WHY IT MATTERS: joining the bus is written as instructions to a model (arm a `Monitor`, declare
+ * a `focus`), and a timer-driven run obeys them at the cost of two to four turns before it starts
+ * its actual work. That ceremony buys it nothing: it has no idle prompt to be woken at, so the
+ * Monitor watches nothing, and it exits after one task, so its `focus` is read by nobody. It needs
+ * exactly ONE thing from the bus — to be checked in, so that it is addressable. The heaviest
+ * participant on the bus had already instructed its machines to skip agent-comm entirely over this
+ * (measured 2026-08-08: 237 of `consumer-b`'s 239 seats are machines).
+ *
+ * ⚠ Measured 2026-08-08, and this is the second measurement of the signal — the first had one data
+ * point per side. Seven live `claude` processes on the box: six interactive owners reported
+ * `tty_nr` 34820/34822/34823/34824/34829/34830, one `claude -p` work-queue run reported `0`, and
+ * the argv test agreed with the terminal test on all seven. One of the six is hosted inside an IDE
+ * (Zed), which was the risk worth checking: an editor that gave its session no pty would be
+ * silenced by this test. It gives it a real one (`pts/4`).
+ *
+ * ⚠ IT FAILS TOWARD THE CEREMONY. Every unknown — no owner, an unreadable `/proc`, a platform
+ * with neither — answers "not headless". Getting it wrong that way costs a few turns; getting it
+ * wrong the other way leaves a real session with no watch armed, which is this project's one
+ * unacceptable failure. `SET_AGENT_HEADLESS=1|0` forces it, for the tests (which cannot conjure a
+ * tty-less `claude` ancestor) and for a wrapper that knows better.
+ */
+export function headless(owner = ownerPid()) {
+  const forced = process.env.SET_AGENT_HEADLESS
+  if (forced) return !/^(0|off|false|no)$/i.test(forced)
+  if (!owner) return false
+  return printMode(owner) || ttyNr(owner) === 0
+}
+
 /** The seat this window already holds, whatever either half thinks its session id is. */
 const seatOfOwner = (seats, owner) => owner
   ? Object.keys(seats).find(n => seats[n].owner === owner && seatState(seats[n]) !== false)

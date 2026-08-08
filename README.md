@@ -288,6 +288,46 @@ that would be a self-wake loop. At startup it also tells the session what its na
 is and which other sessions of the project are live — otherwise the agent would sign its
 messages with the bare project name in the text.
 
+### The silent join — what a machine pays to be on the bus
+
+**A timer-driven `claude -p` gets checked in and nothing else.** No watch to arm, no `focus` to
+declare, no unread count, no file watching, and the Stop hook never blocks it.
+
+This is not a tidiness measure, it is why the heaviest participant left. Measured 2026-08-08:
+237 of `consumer-b`'s 239 seats are machines, and its `CLAUDE.md` instructs every one of them to
+skip agent-comm entirely, because joining cost a reported **31 seconds**. The mechanical floor to
+join is **370 ms** — hook 157, MCP spawn+`initialize`+`tools/list` 144, one tool call 18, Stop hook
+69 — a factor of 84, so the cost was never in this code. It was in the ceremony: joining is written
+as *instructions to a model*, and the model obeys them.
+
+Measured the same day, `claude -p` on haiku, three runs each, interleaved:
+
+| | turns | wall clock, median |
+|---|---|---|
+| no hooks at all | 1, 1, 1 | 2,052 ms |
+| **the hooks as they were** | **2, 4, 2** | **14,616 ms** — 6.6 s · 38.7 s · 14.6 s |
+| the silent join | 1, 1, 1 | 2,229 ms |
+
+The spread is the finding: the same trivial prompt cost 6.6 s once and 38.7 s another time,
+because obeying an imperative is not deterministic. The turn count is the honest number — at n=3
+the silent join sits inside the no-hook noise, but 1 turn against 2–4 is not noise.
+
+⚠ The silent line was measured **twice**, because it was changed between runs: the `sac send`
+fallback in it started out as a bare command and had to be spelled out with an absolute
+interpreter. Six runs across the two versions, all 1 turn, and none of them sent anything — the
+offered command reads as a fallback rather than an instruction. That is the property to re-measure
+if the line is ever edited again; a context that induces a turn is the whole failure.
+
+⚠ **What it does NOT skip is the check-in.** A machine that is not in the registry cannot be
+written to, so "join cheaply" and "do not join" would be the same answer, and the second one is
+what we already had. It is told its seat name, so a run that has something to report can sign it.
+
+A run counts as headless if its owning `claude` has no controlling terminal (`/proc/<pid>/stat`
+field 7) **or** a standalone `-p`/`--print` in its argv — the second catches a person running
+`claude -p` by hand, which has a terminal and still has no prompt to come back to. Every unknown
+answers *not* headless: being wrong that way costs a few turns, being wrong the other way leaves a
+real session with no watch armed. `SET_AGENT_HEADLESS=1|0` forces it.
+
 ### Being told: delivery is not the same as noticing
 
 Measured 2026-08-04 between two `consumer-a` sessions: **delivery worked and nothing happened.**

@@ -40,6 +40,16 @@ const agent = process.env.SET_AGENT_NAME || basename(cwd)
 // the two of them two different seats — and the session would then read its own file back.
 const session = process.env.CLAUDE_CODE_SESSION_ID || payload.session_id || null
 const writer = store.claimSeat({ agent, session })
+/**
+ * SILENT JOIN — see `store.headless`. A `claude -p` run gets checked in and nothing else: no
+ * imperative it would spend turns obeying, and no watching it could not act on.
+ *
+ * ⚠ What it does NOT skip is the check-in itself. That is the 157 ms this hook was measured at,
+ * and it is the entire point: a machine that is not in the registry cannot be written to, so
+ * "join cheaply" and "do not join" are not the same answer. The line it is given names its seat,
+ * because a run that decides to `send` has to sign it with a name that reaches back.
+ */
+const silent = store.headless()
 // `SET_AGENT_ROOM` may name several rooms, comma-separated — ALL of them are set up here.
 // Registering only the first one would leave the second room's messages unwatched, which
 // from the outside is indistinguishable from "nobody wrote anything".
@@ -83,6 +93,12 @@ for (const room of rooms) {
   // of dead sessions go now — a file with even one entry in it is history and stays.
   store.pruneEmptySeats({ room, agent, keep: writer })
 
+  // A headless run stops here: checked in, therefore addressable, and that is all it asked for.
+  // Watching is skipped for the same reason the imperatives are — `FileChanged` cannot start a
+  // turn, so for a process that does one task and exits it is a watch nobody acts on, and this
+  // hook's own rule is that a silent no-op must not be mistaken for working watching.
+  if (silent) continue
+
   // We only watch what belongs to OTHERS — waking on our own writes would be a self-wake loop.
   // "Others" now includes a SIBLING SESSION of this same project: its file is not ours.
   const watch = store.busFiles(room).filter(p => basename(p) !== `${writer}.md` && existsSync(p))
@@ -99,6 +115,33 @@ for (const room of rooms) {
   const { unread, unreadWaking } = store.inbox({ room, agent: writer, advance: false })
   if (unreadWaking) notices.push(`${unreadWaking} in "${room}" needing an answer (\`sac inbox ${room}\`)`)
   else if (unread) backlog.push(`${unread} in "${room}"`)
+}
+
+// ── the headless run's one line ───────────────────────────────────────────────
+// It is told its name and nothing else — no count it cannot act on, and nothing to go and do.
+// Two things it IS told, and both earn their characters: that the silence is deliberate (a run
+// that knows the bus would otherwise wonder whether the hook had failed, and wondering costs the
+// turn we just saved), and the one command it might want, spelled out in full.
+//
+// ⚠ Spelled out for the same reason the Monitor command below is: `sac` is not on the PATH of a
+// non-interactive shell, and this project's rule is that an agent guessing at a command is an
+// agent that silently does nothing. `send` needs no room argument in one room, and cannot be
+// given a default in several — so the room is only named when there is exactly one.
+if (silent) {
+  // The store root travels with it when it is not the default: this hook was given it on its own
+  // command line, and a `sac` the agent starts inherits nothing from that.
+  const root = process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : ""
+  const cmd = `${root}SET_AGENT_NAME=${agent} ${process.execPath} ` +
+    `${join(HERE, "..", "bin", "sac.mjs")} send` +
+    (rooms.length === 1 ? ` ${rooms[0]}` : " <room>") + " FACT '…'"
+  if (rooms.length)
+    out.hookSpecificOutput.additionalContext =
+      `[set-agent-comm] Checked in as \`${writer}\` in ${rooms.map(r => `"${r}"`).join(", ")}, ` +
+      `so other sessions can address you. This is a headless run, so the bus stays quiet: no inbox ` +
+      `watch, no \`focus\` — do not arm either, nothing here is waiting for you. If you have ` +
+      `something worth reporting: ${cmd}`
+  process.stdout.write(JSON.stringify(out))
+  process.exit(0)
 }
 
 if (watchPaths.length) out.hookSpecificOutput.watchPaths = watchPaths

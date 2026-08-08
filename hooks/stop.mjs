@@ -34,6 +34,22 @@ const session = process.env.CLAUDE_CODE_SESSION_ID || payload.session_id || null
 // LOOKUP, never a claim: a hook that merely looks may not create a session in the registry.
 const writer = store.seatOf({ agent, session })
 
+/**
+ * A HEADLESS RUN IS NEVER BLOCKED (see `store.headless`). Blocking is how this hook says "go
+ * back and deal with this", and a `claude -p` doing one task from a queue has no business being
+ * sent back: it cannot triage somebody else's message, and the turn it spends discovering that
+ * is the whole cost the silent join exists to remove. Measured on the copilot's cadence, this is
+ * up to 24 blocked turns an hour for messages the run was never the right reader of.
+ *
+ * ⚠ It returns BEFORE `shouldNudge`, which is what makes this safe: the nudge is spent on disk,
+ * and a headless run that consumed it would silently rob the interactive session of the one
+ * nudge that message will ever get. Skipping is not enough — skipping *early* is the point.
+ */
+if (store.headless()) {
+  process.stdout.write("{}")
+  process.exit(0)
+}
+
 const pending = []
 for (const room of store.parseRooms(process.env.SET_AGENT_ROOM)) {
   // `advance: false` — the hook does not read the message on the agent's behalf. Marking it

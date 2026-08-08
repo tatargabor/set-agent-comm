@@ -215,6 +215,12 @@ What is left, and none of it is free:
   munkasorból…" --agent fejleszto --model opus` — a work-queue run — reported `tty_nr = 0`, while
   the two genuinely interactive owners on the box reported `34830` and `34820`. One data point per
   side, but the right two, and the field number holds.
+
+  ✅ **Re-measured 2026-08-08 across every live `claude` on the box, and the signal held 7/7:** six
+  interactive owners at `34820/34822/34823/34824/34829/34830`, one `claude -p` at `0`, and a
+  standalone `-p` in `/proc/<pid>/cmdline` agreed with the terminal on all seven. The one worth
+  checking was an owner hosted **inside an IDE** (Zed): an editor that gave its session no pty
+  would have been silenced by this test. It allocates a real one (`pts/4`). See `store.headless`.
 - **Declared per project, in the policy** — the receiving side trusting the *asking project's* own
   statement about its automation. Weaker in theory, but the copilot already knows which of its runs
   are timers and has every reason to say so accurately.
@@ -967,13 +973,32 @@ is open now:
   Node's own floor is 47 ms of that per process, and importing `store.mjs` adds 23 ms. **370
   milliseconds against a reported 31 seconds is a factor of 84**, so the cost is not in this code.
 
-  Where it is instead, and this part is **inference, not measurement**: joining is written as
+  Where it is instead, and this part **was inference and is now measured**: joining is written as
   *instructions to a model*, and the model obeys them. The hook emits 745 characters of
   `additionalContext` whose two imperatives are *"ARM YOUR INBOX WATCH ONCE, now: `Monitor({…})`"*
   and *"say so once with the `focus` tool"*; the tool definitions add 6,276 characters (~1,569
   tokens) to every turn's prefix; and the skill a joining session is pointed at is 8,907 characters.
-  A run that does what it is told spends two to four extra turns before it starts its actual work —
-  which is where tens of seconds live, and milliseconds do not.
+  The inference said "two to four extra turns". ✅ **Measured 2026-08-08: two to four extra turns.**
+
+  Three variants of one throwaway project, `claude -p "answer in one word: ok" --model haiku
+  --output-format json`, three runs each, interleaved:
+
+  | | turns | wall clock, median | per run |
+  |---|---|---|---|
+  | no hooks at all | 1, 1, 1 | 2,052 ms | — |
+  | **the hooks as they were** | **2, 4, 2** | **14,616 ms** (6.6 s · 38.7 s · 14.6 s) | $0.017–0.038 |
+  | the silent join | 1, 1, 1 | 2,229 ms | $0.009–0.017 |
+
+  The whole sweep cost $0.14. The silent join was measured twice — the line was edited in between,
+  and six runs across both versions were 1 turn each, none of which sent anything. Two things in it matter more than the medians. **The spread is the
+  finding**: 6.6 to 38.7 seconds for the same trivial prompt, because obeying an imperative is not
+  deterministic — and 38.7 s brackets the reported 31 s on *haiku*, while the copilot's queue runs
+  `--model opus`. And **the turn count, not the clock, is the honest number**: at n=3 the silent
+  join's 3,170 ms is inside the no-hook noise, but 1 turn versus 2–4 is not noise.
+
+  ⚠ **The hooks do fire under `claude -p`** — verified in the same round, and it was worth
+  verifying, because if they had not, none of this would have had a subject. All six hooked runs
+  claimed a seat and left a file; the three unhooked ones left nothing.
 
   ⚠ **For a timer-driven run, all of that ceremony is worthless.** It has no idle prompt to be woken
   at, so a `Monitor` watches nothing; it does one task and exits, so its `focus` is read by nobody.
@@ -983,8 +1008,28 @@ is open now:
   So the fix does not need any of the nine build steps: **the SessionStart hook should recognise a
   headless owner and join silently** — check in, emit no imperatives, and say so in one line. The
   detection is the `tty_nr` test that was measured for `human` in this same round, which means it is
-  the same signal serving two purposes. What would settle the inference is one `claude -p` run timed
-  with and without the hook; it costs pennies and nobody has done it.
+  the same signal serving two purposes.
+
+  ✅ **BUILT 2026-08-08** — `store.headless()`, and both hooks read it. Three things about it that
+  the paragraph above did not anticipate:
+
+  - **The Stop hook was the bigger half.** Silencing the SessionStart imperatives saves the turns
+    at the start; the Stop hook blocking a headless run on somebody else's unread mail spends them
+    for the whole life of the run, and a `claude -p` cannot triage a message it was never the right
+    reader of. It now returns before `shouldNudge` — *before*, because a nudge is spent on disk and
+    fires once per entry, so a headless run that consumed it would silently rob the session that
+    could actually answer. That is a regression test, not a remark.
+  - **The terminal test needed a second signal.** `tty_nr` is a proxy; print mode is the property
+    that matters. A person typing `claude -p …` by hand has a terminal and still has no prompt to
+    come back to, so `/proc/<owner>/cmdline` is checked for a standalone `-p`/`--print` — NUL-split,
+    Linux only, because `ps -o args=` loses the argv boundaries and a prompt *containing* `-p` would
+    then silence a real session.
+  - **It fails toward the ceremony.** Every unknown — no owner, unreadable `/proc`, another
+    platform — answers "not headless". Wrong that way costs a few turns; wrong the other way leaves
+    a real session with no watch armed.
+
+  What was NOT changed, deliberately: the `sac sync` catch-up spawn. It is inside the measured
+  157 ms, so it is not the cost, and skipping it would strand a push to save nothing.
 
 ## What the copilot asked for, and where it now stands
 
