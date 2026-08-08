@@ -394,7 +394,7 @@ function capDeadSeats(seats, keep = SEATS_KEPT_PER_AGENT) {
 }
 
 /** Record this process on the seat, and forget the processes that have exited. */
-function touchSeat(seats, name, { session = null, pid, owner = null }) {
+function touchSeat(seats, name, { session = null, pid, owner = null, room = null }) {
   const held = seats[name]
   // A seat held by ANOTHER session is not ours to inherit — start a fresh record. Without a
   // session id we do not overwrite the holder: the CLI must not evict a live session.
@@ -412,6 +412,13 @@ function touchSeat(seats, name, { session = null, pid, owner = null }) {
     session: prev.session ?? session ?? null,   // the FIRST id claimed for the window stands
     owner: owner ?? prev.owner ?? null,
     writers,
+    // ⚠ PER SEAT, not per agent. One project's sessions are in different rooms — that is the
+    // normal case, not the exception — and the agent-level list cannot express it. Measured
+    // 2026-08-08: with the room recorded only on the agent, `liveSeats("shared-room")` and
+    // `liveSeats("pair-room")` returned byte-identical lists, naming four seats that had never
+    // written into either. `send`'s wake report reads that list, so the sender was told its
+    // entry woke seats that were not in the room.
+    rooms: [...new Set([...(prev.rooms || []), ...(room ? [room] : [])])],
     firstSeen: prev.firstSeen || now(),
     lastSeen: now(),
   }
@@ -514,7 +521,7 @@ export function register({ agent, project, session, room, pid = process.pid, wri
   const seats = { ...(prev.seats || {}) }
   // `owner` is passed through, not re-derived: without it a check-in whose session id differs
   // from the one that named the seat would read as a stranger and wipe the window's record.
-  const mine = touchSeat(seats, seat, { session, pid, owner })
+  const mine = touchSeat(seats, seat, { session, pid, owner, room })
   // Bounded HERE rather than in a command someone has to remember to run: the registry grows one
   // seat per session, and a roster nobody can read is the same as no roster at all.
   capDeadSeats(seats)
@@ -777,12 +784,27 @@ export function send({ room, from, type = "FACT", text, re, to }) {
  * its machines happens to hold the open window.
  */
 /** The seats in a room that are not known to be gone — who an entry can still reach today. */
+/**
+ * The seats that could be woken by an entry in THIS room — per seat, never per project.
+ *
+ * ⚠ The room is read off the seat, not off the agent. The agent-level `rooms` list is a union
+ * across all of that project's sessions, so testing it and then emitting every seat reports a
+ * project's whole roster in every room it has ever joined. See `touchSeat` for the measurement.
+ *
+ * ⚠ A seat recorded before this rule existed carries no `rooms` and is therefore absent until it
+ * next checks in. That is deliberate: the alternative — falling back to the agent's list — keeps
+ * the defect alive for exactly the stale records that caused it. A live session re-registers on
+ * SessionStart and on every `send`, so it reappears within one turn; one that never does was not
+ * going to be woken anyway.
+ */
 export function liveSeats(room) {
   const reg = readJson(REGISTRY, { agents: {} })
   const out = []
   for (const a of Object.values(reg.agents)) {
-    if (!(a.rooms || []).includes(room)) continue
-    for (const [w, s] of Object.entries(a.seats || {})) if (seatState(s) !== false) out.push(w)
+    for (const [w, s] of Object.entries(a.seats || {})) {
+      if (!(s.rooms || []).includes(room)) continue
+      if (seatState(s) !== false) out.push(w)
+    }
   }
   return out
 }
@@ -889,6 +911,7 @@ function noteRemote(writer, room) {
   const prev = reg.agents[agent] || {}
   const seats = { ...(prev.seats || {}) }
   seats[writer] = { ...(seats[writer] || {}), session: null, writers: {}, remote: true,
+    rooms: [...new Set([...(seats[writer]?.rooms || []), room])],
     firstSeen: seats[writer]?.firstSeen || now(), lastSeen: now() }
   capDeadSeats(seats)
   reg.agents[agent] = {

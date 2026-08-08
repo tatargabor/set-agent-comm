@@ -716,3 +716,34 @@ test("REGRESSION: a rehearsal never performs the act — `prune --dry` writes no
   assert.notEqual(bad.status, 0, "a misspelt flag was ignored, and the prune ran for real")
   assert.equal(readFileSync(REG, "utf8"), before, "…and it wrote")
 })
+
+test("REGRESSION: a project's seat in one room is not reported as live in another", () => {
+  // ⚠ Measured 2026-08-08 against the live registry: `liveSeats("shared-room")` and
+  // `liveSeats("pair-room")` returned BYTE-IDENTICAL lists for two different rooms, because the
+  // room is tested on the AGENT (`a.rooms`) and then every seat that agent owns is emitted. Four
+  // of the six seats named had never written into the room; the room held two files.
+  //
+  // It is not cosmetic: `send`'s wake report and the `dormant` notice both read this list, so a
+  // sender is told its entry woke somebody who was never in the room — which is how the REQUEST
+  // that started docs/cross-project-requests.md was reported as delivered AND woken while it
+  // reached nobody.
+  store.register({ agent: "twoseat", writer: "twoseat#in-a", room: "scope-a", session: "sa" })
+  store.register({ agent: "twoseat", writer: "twoseat#in-b", room: "scope-b", session: "sb" })
+
+  assert.deepEqual(store.liveSeats("scope-a"), ["twoseat#in-a"],
+    "a seat that never joined scope-a is reported as live in it")
+  assert.deepEqual(store.liveSeats("scope-b"), ["twoseat#in-b"],
+    "a seat that never joined scope-b is reported as live in it")
+})
+
+test("…but a seat that really is in both rooms stays in both", () => {
+  // The over-strict fix — dropping any seat without a file in the room — would lose a session
+  // that has joined and is listening but has not written yet. It can still be woken, so the
+  // roster must still name it.
+  store.register({ agent: "bothrooms", writer: "bothrooms#s1", room: "scope-c", session: "s1" })
+  store.register({ agent: "bothrooms", writer: "bothrooms#s1", room: "scope-d", session: "s1" })
+
+  assert.deepEqual(store.liveSeats("scope-c"), ["bothrooms#s1"])
+  assert.deepEqual(store.liveSeats("scope-d"), ["bothrooms#s1"],
+    "a seat registered for two rooms lost one of them")
+})

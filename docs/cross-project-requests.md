@@ -90,7 +90,7 @@ design below, and one fix that is independent of it:
   there"*;
 - and it is the cold-start case (below) arriving before the feature that handles it.
 
-⚠ **This is not "a small store change", and it is wrong in both directions.** Measured 2026-08-08:
+⚠ **This is not "a small store change".** Measured 2026-08-08:
 `liveSeats` (`src/store.mjs:780-788`) tests room membership on the **agent** (`:784`) and then emits
 **every seat that agent owns** (`:785`). So:
 
@@ -99,9 +99,11 @@ liveSeats("shared-room") === liveSeats("pair-room")   // byte-identical, two dif
 ```
 
 Four of the six seats it calls live in `shared-room` have never written there — the room holds
-exactly two writer files — while `set-agent-comm#c9de1771`, which *does* have a file there, is
-absent because it is dead. The roster over-reports strangers and under-reports the room's actual
-history, and **three things downstream already believe it**: `send`'s wake report, the `dormant`
+exactly two writer files. (An earlier draft of this paragraph called that "wrong in both
+directions", citing `set-agent-comm#c9de1771` as a seat with a file in the room that the list
+omits. That was an overclaim: it is omitted because it is dead, which is exactly right. There is
+one defect here, and it is over-reporting.) **Three things downstream already believe the list**:
+`send`'s wake report, the `dormant`
 notice that is suppressed whenever any seat of the addressee appears in that list (which is why the
 lost `REQUEST` above was reported to its sender as delivered *and woken*), and — if built on it —
 `sac ask`'s "live but not answering", the one answer that makes an asker wait and retry.
@@ -950,9 +952,39 @@ is open now:
 - **Does the shared daemon run as one process for all rooms, or one per relay?** It changes nothing
   about the policy and everything about the blast radius of a crash — and this project has watched
   its own watcher segfault twice in one day (2026-08-08, `sac wait pair-room`, SIGSEGV ×2).
-- **The 31-second joining cost.** The heaviest participant instructs its machines to skip the bus
-  because of it. Nothing in this design fixes that, and if it stays, the protocol will be used by the
-  rare client and avoided by the common one.
+- **The 31-second joining cost — measured 2026-08-08, and it is not I/O.** The heaviest participant
+  instructs its machines to skip the bus because of it, so this number decides whether any of the
+  above matters. Every component spawned as a real process, seven runs, medians:
+
+  | | |
+  |---|---|
+  | SessionStart hook (check in + `watchPaths`) | **157 ms** |
+  | MCP server: spawn → `initialize` → `tools/list` | **144 ms** |
+  | one tool call after that | 18 ms |
+  | Stop hook | **69 ms** |
+  | **mechanical floor to join** | **370 ms** |
+
+  Node's own floor is 47 ms of that per process, and importing `store.mjs` adds 23 ms. **370
+  milliseconds against a reported 31 seconds is a factor of 84**, so the cost is not in this code.
+
+  Where it is instead, and this part is **inference, not measurement**: joining is written as
+  *instructions to a model*, and the model obeys them. The hook emits 745 characters of
+  `additionalContext` whose two imperatives are *"ARM YOUR INBOX WATCH ONCE, now: `Monitor({…})`"*
+  and *"say so once with the `focus` tool"*; the tool definitions add 6,276 characters (~1,569
+  tokens) to every turn's prefix; and the skill a joining session is pointed at is 8,907 characters.
+  A run that does what it is told spends two to four extra turns before it starts its actual work —
+  which is where tens of seconds live, and milliseconds do not.
+
+  ⚠ **For a timer-driven run, all of that ceremony is worthless.** It has no idle prompt to be woken
+  at, so a `Monitor` watches nothing; it does one task and exits, so its `focus` is read by nobody.
+  It needs exactly one thing from the bus: to be checked in, so that it is addressable — and that is
+  the 157 ms.
+
+  So the fix does not need any of the nine build steps: **the SessionStart hook should recognise a
+  headless owner and join silently** — check in, emit no imperatives, and say so in one line. The
+  detection is the `tty_nr` test that was measured for `human` in this same round, which means it is
+  the same signal serving two purposes. What would settle the inference is one `claude -p` run timed
+  with and without the hook; it costs pennies and nobody has done it.
 
 ## What the copilot asked for, and where it now stands
 
@@ -964,5 +996,5 @@ From `copilot-a-buszon.md` §7, and read here as the acceptance list for the fir
 | the shape of `ask` keys | *The capability catalogue* — declared keys, per-requester filtering |
 | the shape of `deny` | four verdicts + *Grants*: a denial is an entry, addressed back, with the reason, and an expiry is one of the reasons |
 | a switch to forbid being auto-started | `"autostart": false`, honoured before anything else is read |
-| `agents` to distinguish *in the room* from *live in the room* | still open, and **bigger than we told you**: `liveSeats` scopes rooms per agent and then emits all of that agent's seats, so it reports strangers as live in a room and omits seats that actually wrote there. Measured in *Step 0*; now a prerequisite (build order 1), not a footnote |
+| `agents` to distinguish *in the room* from *live in the room* | still open, and **bigger than we told you**: `liveSeats` scopes rooms per agent and then emits all of that agent's seats, so a project with one session in a room is reported as having all of them there. Measured in *Step 0*; now a prerequisite (build order 1), not a footnote |
 | — | ⚠ **one thing you did not ask for and should know:** a room is readable by every member regardless of addressing, so a served answer would have reached projects with no grant — including over the relay. Resolved by moving request/answer into DMs; the room semantics that caused it are written up in [`rooms.md`](rooms.md), and that page changes what `shared-room` and possibly `consumer-a-atlas` are for |
