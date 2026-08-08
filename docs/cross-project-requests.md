@@ -915,11 +915,32 @@ Each step is useful on its own and testable without the next:
 
 1. **The room gap** (step 0) — the config *and* the `liveSeats` room-scoping fix, which the review
    moved from "a small store change" to a prerequisite: steps 5, 6 and 9 all read that roster.
-2. **The request record + policy evaluation**, pure function, no I/O beyond reading the file. Unit
-   tests only; this is where the fail-closed/fail-open split is proven, where an expired grant is
-   proven to produce a reasoned `deny` rather than a fall-through, where the wildcard tail is proven
-   to reject a path-traversal ask, and where a remote `who` is proven not to match a bare project
-   grant.
+2. ✅ **BUILT 2026-08-08** — **the request record + policy evaluation**, pure function, no I/O beyond
+   reading the file (`src/policy.mjs`, `test/policy.test.mjs`, 22 tests). All four named cases are
+   proven: the fail-closed/fail-open split, the expired grant producing a reasoned `deny` rather
+   than a fall-through, the wildcard tail rejecting a path-traversal ask, and a remote `who` not
+   matching a bare project grant.
+
+   Four things the writing of it settled that the plan had left implicit:
+
+   - **`wake` and `gate` need no grant; only `serve` does.** Grants gate *data release*, not
+     *attention*. The other way round, adding a policy file would silently cut a stranger off from
+     the project entirely — the opposite of "strictly additive", and it would make the honest
+     default (`"*": wake`) a lie.
+   - **A path-traversal ask falls to `wake`, it is not denied.** Never served (data fails closed)
+     and a person still sees it (attention fails open). A denial is an answer, and answering a
+     probe confirms the probe.
+   - **An absent `ask` and an unsafe `ask` are different keys.** Free text is the common case and
+     matches `*`; an unsafe key matches nothing at all, `*` included. Collapsing the two was a real
+     bug in the first draft — it made every free-text request unroutable.
+   - **A grant with an unreadable or missing `until` serves nothing.** "Broken" is not "unlimited";
+     it is the broken-policy case, and that may not release data. It is reported separately from
+     expiry, because the two send whoever fixes it to different lines.
+
+   Also settled, and it is a correction to this page: **`granted` is never parsed as a date.** The
+   example here writes it `"2026-08-08, Gábor"` — a provenance line for the human reading the diff.
+   A version of the evaluator mined a rotation origin out of it, which works until somebody writes
+   "last week, over lunch".
 3. **DMs** ([`rooms.md`](rooms.md)) — seat-addressed first, which is a naming convention plus
    `assertSafeRoom` plus killing join-on-write. Project-addressed waits for the daemon. This moved
    ahead of the policy work because it is what the answer travels in, and because building the
@@ -958,7 +979,19 @@ is open now:
 - **Does the shared daemon run as one process for all rooms, or one per relay?** It changes nothing
   about the policy and everything about the blast radius of a crash — and this project has watched
   its own watcher segfault twice in one day (2026-08-08, `sac wait pair-room`, SIGSEGV ×2).
-- **The 31-second joining cost — measured 2026-08-08, and it is not I/O.** The heaviest participant
+- ⚠ **NEW, and it came out of building step 2: what exactly is `until`?** *Grants* says two things
+  that only agree when a grant is written for less than 90 days: *"`until` is required, capped at
+  90 days"* and *"the tracked file says this grant may live **at most** until 2026-11-01 … but never
+  past the ceiling"*. Under the first reading `until` is the whole lifetime and rotation is what
+  extends it; under the second `until` is an outer bound and rotation is what shortens it. They give
+  different answers for a grant written to 2026-12-31 and never used: alive, or lapsed in November.
+
+  The evaluator takes the **minimum** of the two, which is the only behaviour correct under both and
+  the fail-closed direction — but with nothing recorded it runs to `until`, so the "a dead
+  integration dies quietly" property only holds under the second reading. **This needs one sentence
+  from Gábor, not a guess from us**, and the code says so where it computes it.
+- ✅ **The 31-second joining cost — answered: it was the ceremony, and the silent join is built.**
+  Original measurement, 2026-08-08, and it is not I/O: The heaviest participant
   instructs its machines to skip the bus because of it, so this number decides whether any of the
   above matters. Every component spawned as a real process, seven runs, medians:
 

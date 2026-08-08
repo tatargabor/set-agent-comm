@@ -43,6 +43,8 @@ src/bridge.mjs    the remote leg, client half: push/pull, remote↔local name tr
 src/relay.mjs     the remote leg, server half: stateless, in-memory, HMAC tokens
 src/crypto.mjs    AES-256-GCM room encryption + stateless token signing
 src/triage.mjs    the letterbox: a cheap model deciding whether an entry is worth a turn
+src/policy.mjs    the authorization layer's evaluator — PURE, no I/O but reading the policy
+                  file. Four verdicts: serve / gate / wake / deny. Nothing calls it yet
 ```
 
 State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
