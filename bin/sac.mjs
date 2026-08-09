@@ -4,6 +4,7 @@
 //
 //   sac agents                          who exists, who is alive
 //   sac rooms                           rooms
+//   sac admin                           full-screen view: channels, subscribers, live flow
 //   sac send <room> <type> "text"       entry (append); --to <name>[,…] addresses it
 //   sac inbox <room>                    new messages from others
 //   sac peek <room>                     the same, but does not move the cursor
@@ -60,6 +61,18 @@ const takeFlag = (argv, name) => {
 
 try {
   switch (cmd) {
+    case "admin": {
+      // Read-only by construction: it derives everything from the registry, the cursors and
+      // the channel files and writes nothing back, so watching a room can never change what
+      // the seats in it will see.
+      const { runAdminTui } = await import("../src/admin-tui.mjs")
+      if (!process.stdout.isTTY) throw new Error("sac admin needs a terminal — pipe `sac agents`/`sac history` instead")
+      // `break`, not `return`: the switch sits at ESM top level, where a return is a syntax
+      // error that takes the WHOLE cli down — every subcommand, not just this one.
+      runAdminTui()
+      break
+    }
+
     case "agents": {
       const list = store.agents()
       if (!list.length) { console.log("(the registry is empty)"); break }
@@ -296,7 +309,11 @@ try {
       // and hooks do not run in an interactive shell. A bare `node` would have failed there
       // with "command not found", which from the outside is a hook that simply never fires.
       const env = `SET_AGENT_NAME=${AGENT} SET_AGENT_ROOM=${rooms.join(",")}`
-      const scripts = { SessionStart: "session-start.mjs", Stop: "stop.mjs" }
+      // PostToolUse carries the SIGN OF LIFE: the registry's liveness field only ever got
+      // written at session start, so a working seat looked silent (measured: 86 minutes).
+      // It is fed by the machine because an agent-sent heartbeat costs a whole turn, and rate-
+      // limited inside the script because `register` rewrites the shared registry.
+      const scripts = { SessionStart: "session-start.mjs", Stop: "stop.mjs", PostToolUse: "heartbeat.mjs" }
       const wanted = Object.fromEntries(Object.entries(scripts)
         .map(([event, script]) => [event, `${env} ${process.execPath} ${join(HOOKS, script)}`]))
       const changes = []
@@ -565,6 +582,7 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
 
   sac agents                          who exists, who is alive
   sac rooms                           rooms — and how far each one reaches
+  sac admin                           full-screen: channels, WHO IS BEHIND on reading, live flow
   sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
        [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
   sac focus ["what you are on"]       declare your scope [--files a,b] — read it back with no args

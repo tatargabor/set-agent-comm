@@ -26,7 +26,7 @@ writeFileSync(FILE, JSON.stringify({
   env: { FOO: "bar" },
 }, null, 2))
 
-test("it adds both hooks and leaves everything else alone", () => {
+test("it adds all three hooks and leaves everything else alone", () => {
   const r = install("team")
   assert.equal(r.status, 0, r.stderr)
   const s = settings()
@@ -34,10 +34,13 @@ test("it adds both hooks and leaves everything else alone", () => {
   assert.deepEqual(s.env, { FOO: "bar" }, "it touched a part of the file that is none of its business")
   assert.equal(commands(s, "SessionStart").filter(c => c.includes("session-start.mjs")).length, 1)
   assert.equal(commands(s, "Stop").filter(c => c.includes("stop.mjs")).length, 1)
+  // The third one is the sign of life. Without it the registry's liveness field is written
+  // once, at session start, and a seat that works for an hour reads as silent for an hour.
+  assert.equal(commands(s, "PostToolUse").filter(c => c.includes("heartbeat.mjs")).length, 1)
   // The interpreter is an absolute path, not a bare `node`: hooks run in a non-interactive
   // shell, and on macOS node commonly lives under the home directory, reaching PATH only from
   // an interactive profile. A bare `node` there is a hook that silently never fires.
-  for (const c of [...commands(s, "SessionStart"), ...commands(s, "Stop")].filter(c => c.includes(".mjs")))
+  for (const c of [...commands(s, "SessionStart"), ...commands(s, "Stop"), ...commands(s, "PostToolUse")].filter(c => c.includes(".mjs")))
     assert.match(c, /\s\/\S*node\S*\s/, `the hook command relies on PATH: ${c}`)
 })
 

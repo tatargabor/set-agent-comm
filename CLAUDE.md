@@ -79,6 +79,49 @@ session ids for one window. `claimSeat` may create a seat; a hook that only look
 Remote seats carry a device: `web-app@macmini#3f9c1a20`, and `bridge.mjs` translates that name
 back into the target machine's local form as the entry lands.
 
+### Liveness is fed by a hook, and three-state
+
+`seatState` answers `true` / `null` / `false`, and **`null` means "we do not know", not "dead"** —
+never collapse the two, in code or on a screen. From the outside both read as "not true", so the
+distinction only survives if every consumer keeps it.
+
+It used to be written **only at session start**. Measured 2026-08-09: `consumer-a#f93ef295` showed
+`lastSeen: 11:05` at 12:31 — 86 minutes of apparent silence while it worked throughout — and the
+session reading that list addressed its message to a different seat because of it, saying so
+explicitly. The signal was real; nobody fed it.
+
+`hooks/heartbeat.mjs` (PostToolUse, wired by `sac install`) feeds it. Three things about it are
+load-bearing:
+
+- **It records `ownerPid()`, not `process.pid`.** The hook process is gone milliseconds later; a
+  beat that recorded its own pid leaves the seat resolving to `null` — reporting the exact thing
+  it exists to correct. Caught while building it, and pinned by a test.
+- **It rate-limits (60 s, one stamp file per seat), for correctness rather than speed.**
+  `register` rewrites the whole shared registry, and this fires on *every* tool call; several
+  sessions doing that at once is a lost-update race on the one file every seat reads.
+- **It never blocks, never throws, never prints.** Anything printed lands in the transcript on
+  every tool use, and a liveness ping able to fail a turn is worse than the silence it fixes.
+
+A heartbeat sent by the *agent* was rejected: that costs a whole turn — tokens and an interrupted
+context — to say nothing. This costs a process.
+
+### `sac admin`
+
+The operator's view: channels, who is subscribed, **who is behind on reading** (from `cursors.json`
+— the question no JSON tool answered), and the live flow with who wakes whom. It is
+`src/admin-tui.mjs`, zero dependencies, and **read-only by construction**: it derives everything
+and writes nothing, so watching a room can never change what the seats in it will see — no cursor
+moves, nothing is marked read.
+
+Two judgements in it, both tested, both about not misleading the operator:
+
+- **A closed session is not "behind", it is gone.** Counting its backlog put *5959* unread on a
+  room where nobody reachable was behind at all, and a number like that is one you learn to
+  ignore — which costs you the real ones. Room totals count reachable seats only (`live !== false`,
+  so unknown counts).
+- **Unknown liveness is drawn as `?`**, never as an empty circle, for the reason in the section
+  above.
+
 ## Working in this repo
 
 - **This repo is itself on the bus.** `.claude/settings.json` wires its own hooks into room
