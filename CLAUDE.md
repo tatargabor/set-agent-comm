@@ -65,6 +65,12 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
 - **The letterbox fails OPEN, the safety net fails CLOSED** (`triage.mjs`). Missing a message is
   the failure this project exists to prevent; a needless turn merely costs one. The net is the
   opposite: a net that guesses yes rebuilds the storm it was added to catch.
+- **Never `mkdirSync(…, { recursive: true })` — `store.ensureDir` instead.** Node's version
+  creates the missing parent and retries the leaf, counting the parent's `EEXIST` as success, so
+  where the leaf's `ENOENT` is permanent while the parent exists (procfs) it retries *forever*,
+  inside node. Measured 2026-08-09: a `heartbeat.mjs` burning a whole core for 6h09m, orphaned by
+  the test run that spawned it. A synchronous loop in a C++ builtin cannot be caught, timed out,
+  or defended against by the hook's own `try`/`catch`.
 - **Interpreters are spelled out** (`process.execPath`), never a bare `node`, in anything written
   into a settings file or a skill — hooks do not run in an interactive shell.
 - **Names from the network become file names.** `assertSafeWriter` / `assertSafeTs` are enforced
@@ -121,6 +127,41 @@ Two judgements in it, both tested, both about not misleading the operator:
   so unknown counts).
 - **Unknown liveness is drawn as `?`**, never as an empty circle, for the reason in the section
   above.
+
+Navigation (2026-08-11): one pane is active (`Tab`), every pane scrolls, `↵` opens an entry's whole
+text or a seat's detail, `/` searches, `f` filters the flow, `?` lists the keys. `render(snap, ui)`
+stays **pure** — that is what keeps a whole screen assertable without a terminal, and every new
+behaviour is tested that way. Selection is anchored to an **identity** (room name, seat, `ts|from`),
+never an index: the view redraws every second and an index would slide onto a different message the
+moment one arrived above the cursor.
+
+### Declared state — the one thing that is not derived
+
+⚠ Added 2026-08-11 from eight days of measured traffic (`docs/internal/field-notes-2026-08-10.md`).
+Everything else here is *derived*; these three are *declared*, because a fact that contradicts the
+derivation had nowhere to live:
+
+- `rooms.json` — a room exists because somebody opened it. `send` into a room that does not exist
+  **fails**; `register`, `install`, `join --create` and redeeming an invite may open one.
+  **A channel directory still counts as a room**, which is the entire migration story.
+- `members.json` — `{ rooms, left }` per seat. **`left` is why `part` sticks**: the SessionStart
+  hook re-registers every configured room on every start, so a membership that only recorded what a
+  seat is *in* would have a person's decision undone by the next hook run. The environment may
+  ADD a room, never restore one that was left.
+- `presence.json` — `quiet`, the fourth state. It lives in `seatPresence()`, **not** as a fourth
+  value of `seatState` (which stays `true`/`null`/`false`): every consumer treats those three
+  distinctly, and a fourth value would silently reclassify a quiet seat inside all of them. Applied
+  in `wakes()` and nowhere else, so delivery is untouched — a quiet seat reads everything.
+
+### The ledger and `sac stats`
+
+`stats/<seat>.jsonl`, append-only, one writer — the same invariant as the channel, and for the same
+reason. It records **decisions where they are made** (the rule at write time, the letterbox and the
+net in `sac wait`) and **wake-ups where they are delivered** (`sac wait`, the Stop hook). The gap
+between the two is the number the project never had: a decision with no delivery is a seat nobody
+could wake. It **never blocks, never throws, never prints** (heartbeat rule), is bounded per seat,
+and a letterbox *failure* is recorded apart from a letterbox *yes* — the letterbox fails open, so
+collapsing them would hide the one number that says whether it earns its cost.
 
 ## Working in this repo
 

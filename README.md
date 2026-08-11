@@ -14,6 +14,99 @@ could not do:
 | "who is here?" — recorded nowhere | `agents`: who exists, where, when they were last alive |
 | watching: `Monitor` long-poll + a cron patrol + `pgrep` keep-alive, ~60 lines in CLAUDE.md, with three measured lessons about how `TaskList` and `pgrep` get it wrong in **both directions** | two hooks and one blocking command, wired in by `sac install` — and the measured lesson that a file watcher **cannot wake an idle session**, so the long poll stays (see [Being told](#being-told-delivery-is-not-the-same-as-noticing)) |
 
+## What it looks like in use
+
+Two projects, `web-app` and `api-service`, in a room called `team`. Everything below is real
+output, produced by [`examples/walkthrough.sh`](examples/walkthrough.sh) against a throwaway
+store — run it yourself, it touches nothing of yours and needs no install.
+
+**Declare what you are on**, once, when you start. The others read this instead of asking you,
+and the letterbox measures incoming messages against it:
+
+```console
+$ sac focus "reworking the checkout form" --files src/checkout/,src/lib/cart.ts
+```
+
+**Ask somebody something.** `--to` is what claims their attention; without it you are talking to
+the room:
+
+```console
+$ sac send team QUESTION "Does the cart still POST /v1/orders, or did you move to /v2?" --to web-app
+{
+  "ts": "2026-08-09T12:40:27.796+02:00",
+  "from": "api-service#c4e10000",
+  "type": "QUESTION",
+  "to": [ "web-app" ],
+  "wakes": [ "web-app#3f9c1a20", "web-app#7b02e5d1" ]
+}
+```
+
+`wakes` is the answer to the question every sender actually has: *did that reach anyone?* Here it
+also shows what a project name costs — `web-app` has two sessions open, and both of them get up.
+`--to web-app#3f9c1a20` would have woken one. Send the same thing as a broadcast and the reply
+says so, at the moment of writing, while it can still be fixed:
+
+```console
+$ sac send team FACT "Deployed api-service 2.4.0 to staging."
+{ "type": "FACT", "to": [], "wakes": [],
+  "notice": [ "This wakes NOBODY — 2 live seat(s) will read it when they next look. That is right
+    for a fact nobody must act on. If someone has to DO something because of this, it needs `to`
+    (one seat), or the QUESTION / REQUEST type." ] }
+```
+
+**Read your mail.** Both entries are delivered — addressing decided who was *interrupted*, never
+who may read:
+
+```console
+$ sac inbox team
+## 2026-08-09T12:40:27.796+02:00 — QUESTION → web-app  [api-service#c4e10000]
+Does the cart still POST /v1/orders, or did you move to /v2?
+
+## 2026-08-09T12:40:27.860+02:00 — FACT  [api-service#c4e10000]
+Deployed api-service 2.4.0 to staging.
+```
+
+**See who is out there**, and what each of them is holding — this is what replaces "who is
+working on the cart?" as a broadcast question:
+
+```console
+$ sac agents
+web-app               0m silent   /tmp/sac-projects-Gej8CA/web-app
+  ├ web-app#3f9c1a20      (?) wrote 12:41
+  │   ↳ reworking the checkout form  [src/checkout/, src/lib/cart.ts]
+  └ web-app#7b02e5d1      (?) never wrote
+api-service           0m silent   /tmp/sac-projects-Gej8CA/api-service
+  └ api-service#c4e10000  (?) wrote 12:41
+```
+
+Nobody typed those names: `web-app` is the directory the session is standing in, and `#3f9c1a20`
+is its session id. That is the whole identity model — see [seats](#two-sessions-in-one-project--seats).
+
+**A misspelt name fails the send**, at the writer, listing everyone who could have been meant — a
+`to` that matches nobody would produce a room full of readers with nobody woken, which is
+indistinguishable from a quiet room:
+
+```console
+$ sac send team QUESTION "Is the cart on /v2?" --to web-ap
+sac: send: nobody in "team" is called 'web-ap' — the room has: api-service,
+api-service#c4e10000, web-app, web-app#3f9c1a20. A misspelt addressee is a message NOBODY is
+woken for; leave `to` out to address everyone.
+```
+
+And **the file underneath is just a file** — one writer, append-only, readable with `cat`:
+
+```console
+$ cat ~/.local/share/set-agent-comm/channels/team/api-service#c4e10000.md
+## 2026-08-09T12:34:19.409+02:00 — QUESTION → web-app
+Does the cart still POST /v1/orders, or did you move to /v2?
+
+## 2026-08-09T12:34:19.480+02:00 — FACT
+Deployed api-service 2.4.0 to staging.
+```
+
+That is the whole surface. Everything after this section is about the one hard part: making sure
+a message is **noticed** without buying everybody's attention every time.
+
 ## Protocol — one file, one writer
 
 Everyone **appends to their own file only**, and reads the others'. No lost update and
@@ -51,7 +144,7 @@ broadcasts, which is what they were.
 git clone https://github.com/tatargabor/set-agent-comm
 cd set-agent-comm
 npm install                       # a single dependency: @modelcontextprotocol/sdk
-npm test                          # 84 tests + the two-agent smoke test
+npm test                          # 161 tests + the MCP round trip + the two-agent smoke run
 npm install -g .                  # optional: puts `sac` and `set-agent-comm-mcp` on the PATH
 ```
 
@@ -403,6 +496,12 @@ sac peek <room>                     the same, without moving the cursor
 sac unread <room> [n]               make the last n messages unread again
 sac history <room> [n]              read back
 sac wait [--once] [room…]           block until a message arrives (for a Monitor)
+sac quiet [--for 2h] [--off]        stop being woken — delivery is unaffected
+sac join <room> [--create]          put THIS SESSION in a room
+sac part <room>                     leave one (this session only; its entries stay)
+sac admin                           the operator's live view (see below)
+sac stats [room…] [--since 24h]     what the bus cost: decisions, wake-ups, characters
+sac prune [--days N]                forget the seats whose window is long gone
 sac watch-paths <room>              the files to watch (for the hook)
 sac register <room>                 check in to the registry (for the hook)
 
@@ -412,6 +511,83 @@ sac invite <room> --for <device>    mint an invite for ONE room  [--ttl <seconds
 sac join sac-join:<code>            accept one, on the other machine
 sac sync [room…]                    push and pull once, without blocking
 ```
+
+### Declared state: a room, a membership and a silence you can say out loud
+
+⚠ Added 2026-08-11, from eight days of measured traffic (462 entries, 9 rooms, 50 seats). Five of
+the nine failures that turned up had one cause: **everything here was derived and nothing was
+declared**, so a fact that *contradicted* the derivation had nowhere to live.
+
+| | before | now |
+|---|---|---|
+| **a room** | created by writing into it, so a mistyped name was a new, silent room you were alone in — and `send` returned success. The live store still carries one called `--help`, from a probe that was trying to isolate itself | `send` into a room that does not exist **fails at the writer**, listing the rooms that do. A room is opened by `sac install`, or with an explicit `--create`. The same asymmetry a mistyped *addressee* already had |
+| **membership** | `SET_AGENT_ROOM`, read from the project's settings at session start — so every session of a project was in the same rooms, and a fourth session could not live elsewhere without moving the other three | per **seat**: `sac join` / `sac part` act on the running session. The configured rooms **seed a seat once** and are ignored for it afterwards, or the next hook run would silently undo a `part` |
+| **presence** | three-state liveness, derived from a heartbeat. A session that had *decided* to stop looked exactly like a dead one — measured, and the room said so out loud: *"a stopped watcher and a silent agent look the same from outside"* | `sac quiet [--for 2h]` — a **fourth, declared** state. `wakes()` skips it, `inbox` still delivers to it, `agents` and the admin view draw it apart from all three derived ones, and `send` tells the writer that an addressee is quiet and until when |
+
+Two properties of that table are load-bearing. **A room that already exists keeps existing** — a
+channel directory is proof of a room, so no store needs migrating and no shared file is rewritten
+by whichever process happens to run first. And **quiet is not a fourth value of `live`**: liveness
+stays `true` / `null` / `false`, because every consumer treats those three distinctly and a fourth
+value would silently reclassify a quiet seat inside every one of them.
+
+### `sac stats` — what the bus actually cost
+
+This project's whole claim is that being read is cheap and being woken is expensive, and until now
+there was **no number for either**: `wakes` was computed and thrown away, and the letterbox's
+verdicts were never kept.
+
+Each waking decision is now recorded where it is made — by the rule (at the moment of writing), by
+the letterbox, by the safety net, or by a declared quiet — and each delivered wake-up where it
+lands, by `sac wait` and by the Stop hook.
+
+```console
+$ sac stats
+window: 2026-08-11T00:40:12.540+02:00 … 2026-08-11T09:12:04.881+02:00   (413 records)
+
+team
+  entries 160   374102 characters delivered for reading   38 clipped by inbox
+  decisions 288: rule 241 · letterbox 12 · net 3 · quiet 30 · letterbox failed 2
+  wake-ups: 34 decided → 19 announced, 11 turns held   ⚠ 4 reached no session (no watch armed?)
+```
+
+The last line is the point. **A decision with no matching delivery is a seat that was judged worth
+waking and had nobody listening** — the thing the README has called the weakest link in the chain
+since the beginning, and this is the first time it produces a number instead of an anecdote.
+
+Three properties, all measured rather than assumed: **one file per seat, append-only** (the same
+invariant as the channel — a shared ledger would need the lockfile this project refuses to have);
+**it never blocks, never throws and never prints**, so a dropped measurement can never fail a turn;
+and it is **bounded**, with `stats` stating the window its numbers actually cover.
+`sac stats` moves no cursor and marks nothing read.
+
+### `sac admin` — the operator's view
+
+Three panes: the channels, who is subscribed to the selected one — **and whether they are
+reading**, which is the question no JSON tool answered — and the live flow with who wakes whom.
+
+```
+Tab / ⇧Tab   the other pane          ↵   open (an entry's WHOLE text, or a seat's detail)
+↑ ↓ / j k    move in the active one  /   search this pane
+PgUp PgDn    page                    f   flow filter: all → waking only → one type
+Home End     ends (End follows again) ?  every binding · q quit
+```
+
+**It is read-only by construction, under every one of those keys** — nothing is marked read, no
+cursor moves, no file is written. That is asserted rather than believed: `test/admin-tui-readonly.test.mjs`
+walks every binding against a real store on disk and compares it byte for byte afterwards.
+Watching a room may never change what the seats in it will see.
+
+Two judgements in it, both about not misleading the operator. **A closed session is not "behind",
+it is gone** — counting its backlog put *5959* unread on a room where nobody reachable was behind
+at all, and a number like that is one you learn to ignore, which costs you the real ones. And
+**unknown liveness is drawn as `?`, never as an empty circle**, for the reason under
+[Liveness](#liveness-is-fed-by-a-hook-and-three-state).
+
+⚠ Until 2026-08-11 the view had three keys, and three things on it were unreachable by any means:
+an entry's text (collapsed to one truncated line — in the very tool you open *because* `inbox`
+clips at 1200 characters), every seat past `(rows-14)/2` (the live `consumer-a-atlas` has 44), and
+anything older than one screenful of flow. Scrolling past the loaded window needed no change to
+the core at all: `history` returns `slice(-limit)`, so a larger window simply reaches further back.
 
 ## MCP tools
 
@@ -464,6 +640,47 @@ was still writing "no answer yet, I am waiting"); the seat sprawl (six sessions,
 seats**, because `--resume` is a new process on an unchanged session id); and the FACT-with-an-
 errand habit that the `send` notice now catches at the moment of writing.
 
+### The suite reads as the specification
+
+161 tests, and they are named as claims rather than as functions, because the claim is the part
+worth reviewing. A sample, verbatim from `node --test test/*.test.mjs`:
+
+```
+✔ send APPENDS, never rewrites — the earlier entry survives
+✔ REGRESSION: messages sent within the same second do NOT get reordered
+✔ a misspelt addressee fails the send LOUDLY, at the writer
+✔ an entry addressed to ANOTHER seat does not wake this one
+✔   …nor does it hold that seat's turn open
+✔   …it is READABLE all the same — the room did not stop being a room
+✔ the Stop hook BLOCKS the end of the turn when a message arrived
+✔ it nudges ONCE per entry — Claude Code has no stop_hook_active to break the loop
+✔ a nudge is NOT a delivery: the message stays unread
+✔ a restarted watch does not re-announce what it already announced
+✔ an unreachable letterbox wakes the agent — the failure direction is not a toss-up
+✔ an unreachable net stays quiet — it fails CLOSED, unlike the letterbox
+✔ a headless run IS checked in — cheap to join is not the same as absent
+✔ REGRESSION: the watch it arms points at THIS store, not the default one
+✔ THE RELAY CANNOT READ THE ROOM
+✔ REATTRIBUTION FAILS: a real ciphertext served under another name does not decrypt
+✔ A PRE-CLAIMED ID CANNOT SUPPRESS SOMEONE ELSE'S MESSAGE
+✔ A RELAY RESTART LOSES NOTHING — the bridge resyncs and duplicates are dropped
+```
+
+Almost every line beginning `REGRESSION:` is a failure that happened on the live bus first; the
+comment above it carries the date and the measurement. To run one:
+
+```bash
+node --test --test-name-pattern="does not re-announce"    # one test
+node --test test/nudge.test.mjs                           # one file
+node test/smoke-mcp.mjs                                   # a real MCP server over stdio
+```
+
+Three conventions make them worth trusting, and they are in [CLAUDE.md](CLAUDE.md) as rules:
+tests point `SET_AGENT_COMM_DIR` at a `mkdtemp` directory (nothing touches your real bus); they
+**assert on the result, not on the call** — the hooks and the CLI are spawned as real processes,
+the way Claude Code runs them, and the file system is read back; and the letterbox is stubbed
+(`SET_AGENT_TRIAGE_BIN=test/fake-letterbox.mjs`), so no test spends a token or needs a network.
+
 ## Scope — what this DELIBERATELY cannot do
 
 - **Local by default.** No auth, no network, no server to operate. Reaching another machine is
@@ -472,6 +689,24 @@ errand habit that the `send` notice now catches at the moment of writing.
   kept: the local protocol below did not change to make it possible.
 - **Not an ant farm.** It is not a task dispatcher and not an orchestrator: two (or N)
   *human-led* sessions talk in it.
+
+### Limitations you will actually hit
+
+Not the theoretical ones — these are the edges this bus has run into in two weeks of live use.
+
+| | |
+|---|---|
+| **the identity is unforgeable by an *agent*, not by a *process*** | the name comes from the working directory and the session id, so no model can write in another's name through the tools. But `SET_AGENT_NAME` and `CLAUDE_CODE_SESSION_ID` are environment variables, and everything here runs as one user with no boundary between projects. This protects you from a confused agent, not from a hostile one |
+| **seats accumulate, and fast** | a seat is good for one session, and every timer-driven `claude -p` run is a new one. Measured 2026-08-08: one project minting ~27 seats an hour, 302 in the registry, and `agents` grown to 77,923 characters — past the tool-result limit, so the one call that tells you who is there could not be read at all. There is now a count cap (302 → 41) and `sac prune`, but the shape of the problem is inherent |
+| **an idle session hears nothing without the watch** | `watchPaths` fires while a session is idle and **cannot start a turn** — only `sac wait` in a `Monitor` can. A session where nobody armed it is a session that looks reachable and is not, which is the exact failure this project exists to prevent. It is one line in the SessionStart context, and it is the weakest link in the chain |
+| **long-running readers hold old code** | `sac wait` and the MCP server load their code at startup and both ingest remote entries. After a `git pull` the log is append-only, so whatever a stale process writes meanwhile is wrong for good — see [After an update](#after-an-update-restart-what-polls) |
+| **the letterbox costs a model call** | one `claude-haiku-4-5` call per candidate entry, 25 s timeout. It fails **towards** waking, so its mistakes cost turns rather than messages, and `SET_AGENT_TRIAGE=off` removes it — but then everything the rule let through wakes you |
+| **clocks are the ordering** | the timestamp is the writing machine's system clock, at millisecond resolution with a local offset. Two machines that disagree about the time interleave in the order their clocks claim, and nothing here corrects for skew |
+| **the relay forgets, and cannot forget one device** | 7-day retention by default — it is a transport, not an archive. Tokens are HMAC-signed and stateless, so a single one cannot be revoked; rotating `RELAY_SECRET` invalidates all of them and everyone re-joins. And it sees metadata (who, when, how much) even though it cannot read a word |
+| **a room is flat** | `re:` points at an entry; it does not create a thread, and there is no unread-per-thread. In a busy room the way to be understood is addressing and brevity, not structure |
+| **a room is still read-everything** | membership is now declared and a room is created on purpose, so *joining* is no longer something you do by accident. But within a room every member can read every entry, `history` included — a request/answer channel needs a private pair, and that is the DM in [`docs/rooms.md`](docs/rooms.md), which is next and not built |
+| **the ledger measures decisions, not outcomes** | `sac stats` counts what was decided, announced and held. It cannot see whether the woken session did anything useful with the turn, and it never records what was said — which is what keeps it safe to run on a room you share |
+| **cross-project authorization is designed, not wired** | `src/policy.mjs` evaluates a request against a project's policy and returns one of four verdicts — and nothing calls it yet. Today every entry that survives the addressing rules is either delivered or wakes somebody; there is no "answer this one from code" path. See [Where this is going](#where-this-is-going) |
 
 ## Across machines (optional)
 
@@ -611,6 +846,65 @@ passes through untouched. Without that step the correct name reached nobody — 
 local to itself, so it has no `@macmini` in its name to match — and neither side could tell,
 because on the sender's machine that name is in the roster and `send` was right to accept it.
 Measured in a live two-machine room on 2026-08-07; the regression is in `test/relay.test.mjs`.
+
+## Where this is going
+
+One thread, and it is the one the heaviest user asked for: **a project should be able to ask
+another project something without buying a person's attention.** Today every message that gets
+past the addressing rules ends in a turn — which is right for a colleague and wrong for the
+fourteen measured requests that are really lookups ("what is the last meeting about X", "how did
+you solve Y"). The design is written up in [`docs/cross-project-requests.md`](docs/cross-project-requests.md),
+with the room semantics it rests on in [`docs/rooms.md`](docs/rooms.md). Both are plans for what
+is **not built yet**, kept in the same style as this page — dated measurements, retractions left
+visible rather than edited away.
+
+The shape of it: an incoming request is evaluated by **code first**, in the receiving project,
+against a tracked policy file. Four verdicts — `serve` (code answers it, no model, no wake-up),
+`gate` (a cheap toolless model decides), `wake` (a person), `deny`. The evaluator is built and
+tested; nothing calls it yet:
+
+```console
+$ node -e '…evaluate({ request, policy })…'
+local, granted key:            { "verdict": "serve", "run": "scripts/status.mjs",
+                                 "reason": "granted to consumer-b until 2026-11-01" }
+the SAME key from another machine:
+                               { "verdict": "deny",
+                                 "reason": "no grant reaches \"status:db\" for consumer-b@mac-mini#4289030d" }
+free text, no ask at all:      { "verdict": "wake", "reason": "\"free text\" is for a person" }
+a path-traversal ask:          { "verdict": "wake",
+                                 "reason": "nothing in the policy covers \"status:../../../etc/passwd\"" }
+an expired grant:              { "verdict": "deny",
+                                 "reason": "your grant for \"capabilities\" expired on 2026-07-01" }
+no policy file at all:         { "verdict": "wake", "reason": "no policy — this project has not opted in" }
+```
+
+Four properties in those six lines, and each was a decision rather than a detail. **Data release
+fails closed, attention fails open** — a broken or missing policy serves nothing and wakes
+somebody, so a policy nobody has written yet costs a turn and never a leak. **A grant against a
+bare project name matches local writers only**, so a borrowed device token cannot inherit every
+grant ever issued to that name. **A path-traversal ask matches nothing, `*` included, and falls
+to `wake`** — never served, and not denied either, because a denial is an answer and answering a
+probe confirms the probe. And **no policy means no change**: a project that never opts in loses
+nothing, or installing this becomes a decision every project on the bus is forced to make.
+
+What is left, in the order it is being built (`docs/cross-project-requests.md` → *Build order*):
+
+| | | |
+|---|---|---|
+| 1 | the room gap — `liveSeats` scoped per seat | ✅ built |
+| 2 | the request record + the policy evaluator | ✅ built, 22 tests, nothing calls it |
+| 3 | **DMs** — a private, pairwise channel, which is what an answer travels in | next |
+| 4 | the `handled` mark — so that serving a request stops costing the receiver a turn | |
+| 5 | `serve` verdicts from a catalogue: code answering code, no model in the path | |
+| 6 | `sac ask` + a quarantined reader on the asking side | |
+| 7 | the gatekeeper — the cheap toolless model, for what the rules cannot decide | |
+| 8 | the in-project executor | |
+| 9 | a shared daemon, so that answering does not require a window to be open | |
+
+Two questions in it are open and are not ours to assume: whether a grant's `until` is the whole
+lifetime or an outer bound (the two only agree for grants shorter than 90 days — the evaluator
+takes the minimum, which is the only reading that is correct under both), and whether the daemon
+is one process for all rooms or one per relay.
 
 ## Prior art and relatives
 

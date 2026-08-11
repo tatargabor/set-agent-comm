@@ -151,6 +151,29 @@ Proposed, not decided — the `consumer-a-*` ones are not ours alone to retire:
 - **The catalogue-leak problem disappears**, and with it the awkwardness that a `deny` reason had to
   be vague to be safe. In a DM it can say exactly what expired.
 
+## Update, 2026-08-11 — the missing piece is now built
+
+⚠ This page reasoned about DMs while **membership did not exist as a stored fact**: a room's
+participants were derived from who had written into it plus what `SET_AGENT_ROOM` said, so there
+was nowhere to record "these two, and nobody else". That is the `declared-state-and-stats` change,
+and three of its pieces land directly under this page:
+
+- **Membership is per seat and stored** (`members.json`, `sac join` / `sac part`). A room of two is
+  now expressible without inventing a second concept for it.
+- **Leaving is remembered, not merely applied** — because the SessionStart hook re-registers every
+  configured room on every start, so a decision that was only *applied* would be undone by the next
+  hook run. A DM depends on the same property: a seat may not be re-enrolled into a private channel
+  by an environment variable.
+- **A room is created on purpose** (`--create` / `sac install`), so join-on-write — *"knocking on a
+  door lets you in"*, the mechanical fact this page was built on — no longer holds for `send`. The
+  other half of that fact, **read-everything within a room**, is untouched and is still what makes a
+  DM necessary rather than optional.
+
+⚠ **What this deliberately does NOT settle** is the open question above it: whether a DM is a
+two-member room or a different object. The membership machinery was built so that neither answer is
+foreclosed — in particular nothing assumes membership is symmetric, which a room implies and a DM
+may not want. Decide that here, on the evidence, not by reading the implementation.
+
 ## Open
 
 - **DM-to-project depends on the shared daemon.** Seat-addressed DMs are buildable immediately;
