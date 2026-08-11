@@ -253,14 +253,19 @@ function liveMark(sub) {
   // ⚠ A FOURTH MARK for the fourth state. `quiet` is the only one of the four that somebody
   // DECLARED, and it is drawn apart from all three of the derived ones: a seat that asked not to
   // be interrupted is not dead, not unknown, and not simply live-and-ignoring-you.
-  if (sub.quiet) return `${C.cyan}◐${C.reset}`
+  // An open-ended quiet is drawn LOUDER than one with an expiry: a declaration with no limit is
+  // the one that turns into a lie without anybody noticing, and this view is where a person
+  // notices it. Raised 2026-08-11 by set-agent-comm#f7195843; read-only, so it is free.
+  if (sub.quiet) return sub.quietUntil ? `${C.cyan}◐${C.reset}` : `${C.red}◑${C.reset}`
   if (sub.live === true) return `${C.green}●${C.reset}`
   if (sub.live === false) return `${C.grey}○${C.reset}`
   return `${C.yellow}?${C.reset}`
 }
 
 const liveWord = sub =>
-  sub.quiet ? `quiet${sub.quietUntil ? ` — until ${sub.quietUntil}` : ""} (still receives everything, just is not woken)`
+  sub.quiet ? (sub.quietUntil
+      ? `quiet — until ${sub.quietUntil} (still receives everything, just is not woken)`
+      : `quiet — NO EXPIRY, until someone clears it (still receives everything, just is not woken)`)
     : sub.live === true ? "live"
     : sub.live === false ? "closed session"
     : `unknown (NOT "dead")`

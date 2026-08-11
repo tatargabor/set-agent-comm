@@ -148,9 +148,19 @@ try {
         // (`set-agent-comm@workstation`) and a fixed width ran the columns together.
         const w = Math.max(20, ...live.map(x => x.writer.length))
         live.forEach((x, i) => {
+          // ⚠ AN OPEN-ENDED `quiet` IS SHOWN LOUDLY, and that is the cheap half of the fix for
+          // it. Raised 2026-08-11 by `set-agent-comm#f7195843`: quiet is a declaration like
+          // `focus`, and this repo already decided how long a declaration stays true before it
+          // becomes a lie (`FOCUS_STALE_MS`, four hours). A quiet with no expiry has no such
+          // limit — so the answer is not to forbid it ("not now, I will say when" is legitimate)
+          // but to make it VISIBLE, here, where a person notices it rather than a debugging
+          // session. This is read-only, so it costs nothing.
+          const quiet = x.quiet
+            ? (x.quietUntil ? `  quiet until ${x.quietUntil.slice(11, 16)}` : `  ⚠ QUIET, no expiry`)
+            : ""
           console.log(
             `  ${i === live.length - 1 ? "└" : "├"} ${x.writer.padEnd(w)}  ${x.live === null ? "(?) " : "    "}` +
-            (x.lastWrote ? `wrote ${x.lastWrote.slice(11, 16)}` : "never wrote"))
+            (x.lastWrote ? `wrote ${x.lastWrote.slice(11, 16)}` : "never wrote") + quiet)
           // What that session says it is doing — the answer to "who is in these files", without
           // anyone having to ask it in the room. `(stale)` because a four-hour-old claim is worth
           // reporting and worth doubting, and silently dropping it would leave nothing at all.

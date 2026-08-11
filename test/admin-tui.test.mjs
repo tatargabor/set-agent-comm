@@ -418,3 +418,18 @@ test("`quiet` is a FOURTH state — not dead, not unknown, not simply live", () 
   assert.match(detail, /still receives everything/, "the overlay says delivery is unaffected")
   assert.match(detail, /12:00/, "…and until when")
 })
+
+test("an open-ended quiet is drawn LOUDER than one with an expiry", () => {
+  // A declaration with no limit is the one that turns into a lie without anybody noticing, and
+  // this view is where a person notices it. Raised 2026-08-11 by set-agent-comm#f7195843: the
+  // answer is not to forbid it ("not now, I will say when" is legitimate) but to make it visible.
+  const withExpiry = seat({ seat: "a#1", quiet: true, quietUntil: "2026-08-11T12:00:00.000+02:00" })
+  const openEnded = seat({ seat: "b#2", quiet: true, quietUntil: null })
+  const rows = plain(render({ rooms: [room({ subs: [withExpiry, openEnded] })], at: new Date() }, { pane: "subs" }))
+    .split("\n")
+  assert.match(rows.find(l => l.includes("a#1")), /◐/, "a bounded quiet keeps the calm mark")
+  assert.match(rows.find(l => l.includes("b#2")), /◑/, "an open-ended one is drawn apart")
+
+  const ui = handleKey(snapOf(room({ subs: [openEnded] })), normalizeUi({ pane: "subs" }), ENTER)
+  assert.match(drawUi([room({ subs: [openEnded] })], ui, 120, 30), /NO EXPIRY/)
+})
