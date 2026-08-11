@@ -9,11 +9,11 @@
 // The local log stays the source of truth. `send` writes locally first and uploads after, so a
 // dead relay is a delay, never a lost message: the outbox cursor picks it up on the next push.
 
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs"
+import { readFileSync, writeFileSync, chmodSync } from "node:fs"
 import { join } from "node:path"
 import { hostname } from "node:os"
 import { createHash } from "node:crypto"
-import { ROOT, busFiles, busFile, history, ingest, parseRooms, parseTo } from "./store.mjs"
+import { ROOT, busFiles, busFile, history, ingest, parseRooms, parseTo, ensureDir } from "./store.mjs"
 import { encrypt, decrypt, entryAad } from "./crypto.mjs"
 
 const CONFIG = join(ROOT, "relays.json")
@@ -23,7 +23,7 @@ export const readConfig = () => {
 }
 
 export function writeConfig(cfg) {
-  mkdirSync(ROOT, { recursive: true })
+  ensureDir(ROOT)
   writeFileSync(CONFIG, JSON.stringify(cfg, null, 2) + "\n")
   // It holds device tokens and room keys. Anyone who can read this file can post as us and
   // decrypt the room, so it is not world-readable — the store's other files are harmless.

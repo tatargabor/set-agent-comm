@@ -31,7 +31,7 @@
  * session's transcript on every single tool use.
  */
 import { basename, join } from "node:path"
-import { mkdirSync, statSync, utimesSync, closeSync, openSync } from "node:fs"
+import { statSync, utimesSync, closeSync, openSync } from "node:fs"
 
 const BEAT_INTERVAL_MS = 60_000
 
@@ -53,7 +53,9 @@ try {
     try { due = Date.now() - statSync(stamp).mtimeMs >= BEAT_INTERVAL_MS } catch { /* first beat */ }
 
     if (due) {
-      mkdirSync(join(store.ROOT, "beats"), { recursive: true })
+      // `store.ensureDir`, never `mkdirSync(…, { recursive: true })` — see the comment on it.
+      // This hook is the process that was measured spinning forever on node's version.
+      store.ensureDir(join(store.ROOT, "beats"))
       touch(stamp)
       // `register`, not `heartbeat`: `heartbeat` only refreshes the AGENT-level `lastSeen`,
       // while the seat's liveness (`seatState`) asks whether any pid recorded under that seat

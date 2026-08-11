@@ -25,8 +25,15 @@ const HOOK = join(HERE, "..", "hooks", "heartbeat.mjs")
 const SESSION = "11111111-2222-3333-4444-555555555555"
 
 let store
+// ⚠ THE TIMEOUT IS PART OF THE TEST, not tidiness. Measured 2026-08-09: a run of the case below
+// left a hook spinning at 100% of one core, and it was still spinning SIX HOURS LATER, adopted by
+// systemd — because `spawnSync` without a timeout waits forever, and the child of a test runner
+// that is then interrupted is simply orphaned. A test for a process that must never hang may not
+// itself hang, and may not leave the hang behind when it goes.
 const beat = (env = {}) => spawnSync(process.execPath, [HOOK], {
   encoding: "utf8",
+  timeout: 15_000,
+  killSignal: "SIGKILL",
   env: {
     ...process.env,
     SET_AGENT_COMM_DIR: store,
@@ -119,6 +126,33 @@ test("a broken store cannot fail the tool call it rides on", t => {
   store = dir
   const started = Date.now()
   const r = beat({ SET_AGENT_COMM_DIR: join(notADir, "store") })
+  assert.equal(r.status, 0, "the hook failed the turn")
+  assert.ok(Date.now() - started < 5000, "the hook blocked the tool call instead of giving up")
+})
+
+/**
+ * ⚠ MEASURED 2026-08-09, in `htop`: one of these hooks had been burning a whole core for 6 hours
+ * 9 minutes, orphaned by the test run that spawned it. The store root it was given was
+ * `/proc/nonexistent-and-unwritable` — an earlier spelling of the "broken store" fixture above.
+ *
+ * Not the hook's logic: node's `mkdirSync(…, { recursive: true })` creates the missing parent and
+ * retries the leaf, taking the parent's EEXIST for success. On procfs the leaf answers ENOENT
+ * for good while `/proc` exists, so it retries forever, inside node, never returning. The
+ * `catch` that makes this hook unable to break a turn never ran and never could have — which is
+ * why the fix is `store.ensureDir` (one mkdir per segment) and not another guard here.
+ *
+ * The case above (ENOTDIR, under a regular file) does NOT catch this: it fails on the first
+ * syscall. It takes a directory that cannot be created while its parent exists.
+ */
+test("a store root that can never be created gives up — it does not spin forever", {
+  skip: process.platform !== "linux" && "procfs is a Linux thing",
+}, () => {
+  store = "/proc/set-agent-comm-does-not-exist"
+  const started = Date.now()
+  const r = beat()
+  // `timeout` in the runner turns a hang into `signal: 'SIGKILL'` and a null status, so this is
+  // the assertion that fails on a regression rather than the whole suite hanging with it.
+  assert.equal(r.signal, null, "the hook had to be killed — it never came back")
   assert.equal(r.status, 0, "the hook failed the turn")
   assert.ok(Date.now() - started < 5000, "the hook blocked the tool call instead of giving up")
 })

@@ -21,7 +21,7 @@
  */
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { existsSync, mkdirSync, appendFileSync } from "node:fs"
+import { existsSync, appendFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import * as store from "../src/store.mjs"
 
@@ -103,7 +103,7 @@ for (const room of rooms) {
   // here, this is where I write" announcement — and (b) we watch the DIRECTORY itself, so
   // that a new file appearing is an event too.
   const dir = store.channelDir(room)
-  mkdirSync(dir, { recursive: true })
+  store.ensureDir(dir)
   const mine = store.busFile(room, writer)
   if (!existsSync(mine)) appendFileSync(mine, "")
   // A seat name is good for ONE session, so every start leaves a file behind. The empty ones
