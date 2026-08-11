@@ -12,9 +12,10 @@
     "sac": "./bin/sac.mjs",
     "set-agent-comm-mcp": "./src/stdio.mjs"
   },
-  "files": ["bin", "src", "hooks", "skills", "README.md", "LICENSE"],
+  "files": ["bin", "src", "hooks", "skills", "examples", "README.md", "LICENSE"],
   "engines": { "node": ">=20" },
   "scripts": {
+    "example": "bash examples/walkthrough.sh",
     "http": "node src/http.mjs",
     "relay": "node src/relay.mjs",
     "start": "node src/relay.mjs",
