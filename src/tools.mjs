@@ -150,10 +150,27 @@ export function createMcpServer(identify) {
         if (room) return room
         // Several rooms configured → no default, on purpose: see `parseRooms`. Name them, so
         // the caller does not have to guess which ones it may write to.
-        if (configured?.length > 1)
+        if (configured?.length > 1) {
+          // ⚠ WHERE THE ANSWER IS COMPUTABLE, IT IS OFFERED. Measured 2026-08-10: 11 of the 18
+          // failed tool calls in eight days were this one error, repeated — the message listed
+          // the rooms and the callers still walked into it again. If the entry names an
+          // addressee, and that addressee is in exactly ONE of these rooms, then the room is not
+          // ambiguous at all and saying so costs nothing.
+          const to = store.parseTo(a.to)
+          const reaching = to.length
+            ? configured.filter(r => store.participants(r).some(p => to.includes(p)))
+            : []
+          if (reaching.length === 1) {
+            throw new Error(
+              `You are in several rooms (${configured.join(", ")}), so \`room\` is required. ` +
+              `\`${to.join(", ")}\` is only in "${reaching[0]}" — did you mean that one?`)
+          }
           throw new Error(
             `You are in several rooms (${configured.join(", ")}), so \`room\` is required — ` +
-            `pick the one this message belongs to.`)
+            (reaching.length > 1
+              ? `\`${to.join(", ")}\` is in ${reaching.join(" and ")}, so this one cannot be guessed for you.`
+              : `pick the one this message belongs to.`))
+        }
         throw new Error(
           `No room given and no default. Existing rooms: ${store.rooms().join(", ") || "(none)"}`)
       }
@@ -186,6 +203,16 @@ export function createMcpServer(identify) {
         }
         case "send": {
           const r = needRoom()
+          // ⚠ THE SAME REFUSAL AS THE CLI, from the same core. The two faces sit on one core so
+          // they cannot drift; this is the one place the check has to be repeated, because the
+          // CLI does it while parsing argv and there is no argv here. A mistyped room over MCP
+          // would otherwise be the silent room the CLI now refuses to create.
+          if (!store.roomExists(r)) {
+            const known = store.knownRooms()
+            throw new Error(`There is no room called '${r}'` +
+              (known.length ? ` — this machine has: ${known.join(", ")}` : " and this machine has none") +
+              `. A room is opened on purpose (\`sac install ${r}\`), never by writing into it.`)
+          }
           out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to })
           out = { ...out, ...(await (await bridge()).pushReport(r)) }
           break

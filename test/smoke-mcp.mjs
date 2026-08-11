@@ -164,6 +164,17 @@ try {
   assert.ok(wrong.isError, "an addressee nobody answers to went through — nothing would wake")
   assert.match(wrong.content[0].text, /nobody in "mono" is called 'mono-rep'/)
   ok("a misspelt addressee fails at the writer, naming who could have been meant")
+
+  // ⚠ THE TWO FACES MAY NOT DRIFT. A mistyped ROOM is refused by the CLI while it parses argv —
+  // and there is no argv here, so this is the one check that has to exist twice. Without it, an
+  // agent (which only ever works through MCP) could still open the silent room the CLI now
+  // refuses to create. Measured origin: a room called `--help` in the live store, 2026-08-10.
+  const noRoom = await raw(s1, "send", { room: "nincs-ilyen-szoba", type: "FACT", text: "x" })
+  assert.ok(noRoom.isError, "MCP created a room that the CLI would have refused")
+  assert.match(noRoom.content[0].text, /There is no room called 'nincs-ilyen-szoba'/)
+  assert.match(noRoom.content[0].text, /opened on purpose/, "the error must say how to open one")
+  ok("over MCP too, a room that does not exist fails the send — the two faces agree")
+
   await s3.close().catch(() => {})
   await s1.close().catch(() => {})
   await s2.close().catch(() => {})
