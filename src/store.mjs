@@ -8,7 +8,7 @@
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, unlinkSync,
          existsSync, renameSync, openSync, fsyncSync, closeSync, statSync } from "node:fs"
-import { join, dirname } from "node:path"
+import { join, dirname, resolve } from "node:path"
 import { homedir, hostname } from "node:os"
 // Only for the non-Linux branch of `parentOf` — everything else here stays dependency-free and
 // synchronous, because hooks and cron call it where there is no node_modules and no event loop.
@@ -22,6 +22,11 @@ const CHANNELS = join(ROOT, "channels")
 const CURSORS = join(ROOT, "cursors.json")
 const NUDGES = join(ROOT, "nudges.json")
 const FOCUS = join(ROOT, "focus.json")
+// ⚠ DECLARED state, added 2026-08-11 — see the block above `roomExists` for why these are three
+// small files rather than three more keys in `registry.json`.
+const ROOMS_FILE = join(ROOT, "rooms.json")
+const MEMBERS = join(ROOT, "members.json")
+const PRESENCE = join(ROOT, "presence.json")
 
 export const TYPES = ["QUESTION", "ANSWER", "FACT", "REQUEST"]
 
@@ -179,8 +184,13 @@ export function isForMe(entry, me) {
  * @param mine  the timestamps THIS seat has written in the room (see `ownTimestamps`) — without
  *              it the `re:` rule is off, and a reply reaches nobody by that route.
  */
-export function wakes(entry, me, mine) {
+export function wakes(entry, me, mine, quiet = undefined) {
   if (!isForMe(entry, me)) return false
+  // ⚠ A DECLARED quiet is applied HERE and nowhere else, because this function is the single
+  // rule the Stop hook, `sac wait` and `inbox` all read. Delivery is untouched: a quiet seat
+  // still receives every entry — only the expensive half is suppressed. `quiet` is passed in by
+  // callers that loop (one read instead of one per entry) and read from disk otherwise.
+  if (quiet === undefined ? seatPresence(me).quiet : quiet) return false
   if (entry.to?.length) return true
   if (entry.re && mine?.has(entry.re)) return true
   return entry.type === "QUESTION" || entry.type === "REQUEST"
@@ -223,11 +233,49 @@ export function now(d = new Date()) {
 const t = ts => Date.parse(ts) || 0
 const byTime = (a, b) => t(a.ts) - t(b.ts)
 
+// ── mkdir -p, by hand ─────────────────────────────────────────────────────────
+/**
+ * `mkdirSync(dir, { recursive: true })` is called nowhere on any path a hook, the CLI or the
+ * bridge can reach (only in tests, against a `mkdtemp` dir), and this is why.
+ *
+ * ⚠ Measured 2026-08-09, spotted in `htop`: one `hooks/heartbeat.mjs` had been burning a whole
+ * core for 6 hours 9 minutes. Node's recursive mkdir (v22.22.0) creates the missing parent and
+ * then RETRIES the leaf, counting the parent's EEXIST as success — so wherever the leaf keeps
+ * answering ENOENT while its parent exists, it retries forever, in a loop inside node that
+ * never returns. procfs is exactly that shape: `mkdir /proc/x` gives ENOENT, `/proc` exists.
+ * The store root was `/proc/nonexistent-and-unwritable`, a throwaway "unwritable store" test
+ * fixture, and the process outlived the test run that spawned it by six hours.
+ *
+ * The `catch` around every caller never ran, and could not have: a hook that exits 0 whatever
+ * happens still cannot defend itself against an API that never comes back, and neither can a
+ * timeout — the loop is synchronous, so no timer in this process would ever get a turn. The
+ * only defence is not to call it.
+ *
+ * So: one `mkdir` per path segment, from the root down, bounded by the number of segments.
+ * A segment that is already a directory is success whatever the errno (an existing ancestor we
+ * have no right to create answers EACCES or EROFS, not EEXIST); anything else throws to the
+ * caller, who already treats a broken store as a lost write. Same result on the paths that
+ * work, an error on the paths that do not, and no path that never returns.
+ */
+export function ensureDir(dir) {
+  const parts = []
+  for (let p = resolve(dir); ; p = dirname(p)) {
+    parts.push(p)
+    if (dirname(p) === p) break
+  }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    try { mkdirSync(parts[i]) } catch (e) {
+      try { if (statSync(parts[i]).isDirectory()) continue } catch { /* not there at all */ }
+      throw e
+    }
+  }
+}
+
 // ── atomic JSON write ─────────────────────────────────────────────────────────
 // tmp → fsync → rename. On a crash `writeFileSync` leaves truncated JSON in the target file,
 // and from then on the registry is unreadable — a pattern borrowed from AMQ.
 function writeJson(path, value) {
-  mkdirSync(dirname(path), { recursive: true })
+  ensureDir(dirname(path))
   const tmp = `${path}.tmp.${process.pid}`
   const fd = openSync(tmp, "w")
   try {
@@ -606,6 +654,14 @@ export function register({ agent, project, session, room, pid = process.pid, wri
     lastSeen: now(),
   }
   writeJson(REGISTRY, reg)
+  // ⚠ CHECKING IN IS AN EXPLICIT ACT, so it may open the room; `send` may not. The room name a
+  // `register` carries comes from the project's settings — written by `sac install`, read by the
+  // SessionStart hook — which is a decision somebody made. The name a `send` carries was typed
+  // in the moment, and that is where the measured failure was: a mistyped room becoming a new
+  // silent room the writer is alone in, with `send` returning success.
+  if (room && !roomExists(room)) createRoom(room, seat)
+  // Membership is per seat from here on; the configured rooms seed it once and never again.
+  if (room) seedMembers(seat, [room])
   seedCursor(room, seat)
   // Co-writers are counted PER SEAT — that is, per file. Another session of the same project
   // sits in its own seat and does not collide, so it must not raise a warning.
@@ -661,11 +717,20 @@ export function agents() {
     // seat's files, no parsing.
     // `focus` rides along with the seat: "who is in which files" is the question agents were
     // burning whole broadcast rounds on, and it is answerable from here.
-    const seats = Object.entries(a.seats || {}).map(([writer, s]) => ({
-      writer, session: s.session ?? null, live: seatState(s), lastSeen: s.lastSeen ?? null,
-      lastWrote: lastWrote(writer, a.rooms || []),
-      focus: getFocus(writer),
-    }))
+    const seats = Object.entries(a.seats || {}).map(([writer, s]) => {
+      // ⚠ `quiet` RIDES ALONGSIDE `live`, never inside it. Liveness stays three-state — `true` /
+      // `null` / `false`, where `null` is "we do not know" — and quiet is a fourth, DECLARED
+      // state, the only one somebody chose. Folding it into `live` would make a seat that asked
+      // not to be interrupted indistinguishable from one that died, which is the exact
+      // conflation the three-state rule exists to prevent.
+      const p = seatPresence(writer)
+      return {
+        writer, session: s.session ?? null, live: seatState(s), lastSeen: s.lastSeen ?? null,
+        lastWrote: lastWrote(writer, a.rooms || []),
+        focus: getFocus(writer),
+        ...(p.quiet && { quiet: true, quietUntil: p.until }),
+      }
+    })
     return {
       ...a,
       seats,
@@ -779,7 +844,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       `A misspelt addressee is a message NOBODY is woken for; leave \`to\` out to address everyone.`)
   }
   const path = busFile(room, from)
-  mkdirSync(dirname(path), { recursive: true })
+  ensureDir(dirname(path))
   const ts = now()
   const head = `## ${ts} — ${type}${addressed.length ? ` → ${addressed.join(", ")}` : ""}${re ? ` (re: ${re})` : ""}`
   const body = escapeBodyHeaders(text.trim())
@@ -818,8 +883,18 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   // intentions. So the server answers both here: who this woke, and how long it was. Reported,
   // never enforced — `send` refusing a message would be a far worse failure than a verbose one.
   const live = liveSeats(room)
-  const woke = live.filter(s => s !== from &&
-    wakes({ ts, from, type, to: addressed, re }, s, ownTimestamps(room, s)))
+  const entry = { ts, from, type, to: addressed, re }
+  // ⚠ THE RULE'S DECISION IS RECORDED HERE, once per entry per live seat, because this is the
+  // one place it is computed for everybody at once. Doing it in `inbox` instead would re-record
+  // the same entries on every read; doing it in the watcher would miss every seat that has no
+  // watcher armed — which is precisely the number worth having.
+  const woke = live.filter(s => {
+    if (s === from) return false
+    const quiet = seatPresence(s).quiet
+    const w = wakes(entry, s, ownTimestamps(room, s), quiet)
+    recordDecision({ room, seat: s, entry: ts, by: quiet && isForMe(entry, s) ? "quiet" : "rule", woke: w })
+    return w
+  })
   const others = live.filter(s => s !== from).length
   const notice = []
   // A name is valid for as long as the registry remembers it, and the registry remembers a seat
@@ -830,6 +905,17 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   if (dormant.length)
     notice.push(`No session of ${dormant.map(n => `'${n}'`).join(", ")} is running. The entry ` +
       `waits in the room and is read if that session comes back — \`agents\` lists who is live now.`)
+  // ⚠ A QUIET ADDRESSEE BOUGHT NO ATTENTION, and that has to be visible at the moment of
+  // writing, where it can still be redirected — the same argument as the two notices around it.
+  // A seat that declared itself quiet is not gone (it reads the entry) and is not asleep by
+  // accident (somebody chose it), so neither of those two notices covers it.
+  const quieted = live.filter(s => s !== from && isForMe({ to: addressed }, s) && seatPresence(s).quiet)
+  if (addressed.length && quieted.length) {
+    notice.push(`Quiet: ${quieted.map(s => {
+      const p = seatPresence(s)
+      return `'${s}'${p.until ? ` until ${p.until}` : ""}`
+    }).join(", ")} — the entry is delivered and read, but interrupts nobody there.`)
+  }
   if (!woke.length && others)
     notice.push(`This wakes NOBODY — ${others} live seat(s) will read it when they next look. ` +
       `That is right for a fact nobody must act on. If someone has to DO something because of ` +
@@ -950,7 +1036,7 @@ export function ingest({ room, writer, ts, type = "FACT", re, text, to }) {
   if (!TYPES.includes(type)) throw new Error(`ingest: unknown type '${String(type).slice(0, 40)}'`)
   const path = busFile(room, writer)
   if (parse(path, writer).some(e => e.ts === ts)) return false
-  mkdirSync(dirname(path), { recursive: true })
+  ensureDir(dirname(path))
   // The addressee crosses the wire as written and is NOT validated here: the sender's room
   // membership is the sender's machine's business, and dropping an entry we cannot resolve
   // would turn an unknown name into a lost message.
@@ -1099,13 +1185,30 @@ function clip(e) {
            text: `${head}\n\n… +${e.text.length - head.length} characters — \`history\` for the whole entry` }
 }
 
-export function inbox({ room, agent, advance = true, limit = 20 }) {
+/**
+ * `respectQuiet` — ⚠ THE TWO WAKE-UP PATHS DO NOT COST THE SAME, and `quiet` belongs to only one
+ * of them. Caught 2026-08-11 by `set-agent-comm#f7195843` reading this code, hours after it was
+ * written:
+ *
+ *   · `sac wait` starts a turn WHILE THE AGENT IS WORKING. That is the interruption a person
+ *     asks to stop, and it is what `quiet` is for.
+ *   · the Stop hook runs only where the turn was ending anyway. It cannot interrupt anything —
+ *     and it is the last safety net before a session goes away.
+ *
+ * Applying quiet to both meant a silent seat could stop with an unread REQUEST addressed to it,
+ * and if that session never came back, "not right now" quietly became "never" — permanently, for
+ * a `quiet` with no expiry. So the Stop hook passes `respectQuiet: false`: it is the one reader
+ * that still sees what the seat owes an answer to.
+ */
+export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = true }) {
   const cursors = readJson(CURSORS, {})
   const key = `${room}::${agent}`
   const base = seatBase(agent)
   // Read ONCE for the whole call: `wakes` needs to know what this seat asked, and re-reading
-  // its own file per entry would turn a linear pass into a quadratic one on a busy room.
+  // its own file per entry would turn a linear pass into a quadratic one on a busy room. The
+  // same argument applies to the seat's declared presence, so it is read here and passed down.
   const mine = ownTimestamps(room, agent)
+  const quiet = respectQuiet && seatPresence(agent).quiet
   // A seat with no cursor of its own (nobody registered it) falls back to the base seat's —
   // erring towards "unread" rather than swallowing the first message.
   const seen = cursors[key] || (agent === base ? {} : { ...(cursors[`${room}::${base}`] || {}) })
@@ -1116,7 +1219,7 @@ export function inbox({ room, agent, advance = true, limit = 20 }) {
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine),
+        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine, quiet),
                      ...(seatBase(writer) === base && { sibling: true }) })
     }
   }
@@ -1291,4 +1394,263 @@ export function getFocus(agent) {
 /** Existing rooms. */
 export function rooms() {
   try { return readdirSync(CHANNELS).filter(d => !d.startsWith(".")).sort() } catch { return [] }
+}
+
+// ── declared state: rooms, membership, presence ───────────────────────────────
+//
+// ⚠ EVERYTHING ELSE ON THIS BUS IS DERIVED, and 2026-08-10 found the edge of that. A room was
+// derived from somebody writing into it, membership from `SET_AGENT_ROOM` read at session start,
+// presence from a heartbeat. Derivation is why this core has no dependencies — but there is
+// nowhere to put a fact that CONTRADICTS the derivation, and three of those turned up in eight
+// days of live use: a session that wants to leave the conversation (indistinguishable from a
+// dead one), a fourth session that belongs in a different room from its three siblings, and a
+// mistyped room name that becomes a new silent room instead of an error.
+//
+// ⚠ THREE SMALL FILES, NOT THREE MORE KEYS IN `registry.json`. The registry is rewritten whole
+// on every `register()`, and the heartbeat work already measured that as a lost-update race
+// between concurrent sessions — which is why the heartbeat rate-limits to 60 s. Membership and
+// presence change at moments a PERSON chose, and must not be lost to somebody else's check-in.
+
+/**
+ * Does this room exist?
+ *
+ * ⚠ THE CHANNEL DIRECTORY IS THE FALLBACK, and that is the whole migration: every room in every
+ * existing store keeps existing, with no migration step and no dated file to write. A migration
+ * that rewrote a shared file from a directory listing, triggered by whichever process happened
+ * to run first, would have to be right the first time on a store we cannot see.
+ */
+export function roomExists(room) {
+  if (!room) return false
+  if (readJson(ROOMS_FILE, {})[room]) return true
+  try { return statSync(join(CHANNELS, room)).isDirectory() } catch { return false }
+}
+
+/** Create a room on purpose. Idempotent: an existing room keeps its original creator. */
+export function createRoom(room, by) {
+  const all = readJson(ROOMS_FILE, {})
+  if (all[room]) return { room, created: false, ...all[room] }
+  const rec = { by: by || null, at: now() }
+  all[room] = rec
+  writeJson(ROOMS_FILE, all)
+  ensureDir(join(CHANNELS, room))
+  return { room, created: true, ...rec }
+}
+
+/** Every room this store knows about — declared or merely written into. */
+export function knownRooms() {
+  return [...new Set([...Object.keys(readJson(ROOMS_FILE, {})), ...rooms()])].sort()
+}
+
+/**
+ * The rooms this SEAT is in. `null` means "this seat has never been seeded", which is different
+ * from "this seat is in no rooms" (`[]`) — the first takes the configured default, the second is
+ * a person's decision to leave, and collapsing them would silently undo `part` on the next hook.
+ */
+export function members(seat) {
+  const rec = readJson(MEMBERS, {})[seat]
+  if (Array.isArray(rec)) return rec                       // the first shape this file had
+  return Array.isArray(rec?.rooms) ? rec.rooms : null
+}
+
+/**
+ * ⚠ LEAVING IS REMEMBERED, not merely applied. The SessionStart hook calls `register` once per
+ * configured room on EVERY start, so a membership that only recorded what a seat is in would
+ * have `part` undone by the next hook run — with nothing to show for it. Recording the rooms a
+ * seat has explicitly left is what makes the decision stick, and it is the smallest thing that
+ * can: two lists instead of one.
+ */
+const leftRooms = seat => {
+  const rec = readJson(MEMBERS, {})[seat]
+  return Array.isArray(rec?.left) ? rec.left : []
+}
+
+export function setMembers(seat, list, left = null) {
+  const all = readJson(MEMBERS, {})
+  const prev = all[seat]
+  all[seat] = {
+    rooms: [...new Set(list.filter(Boolean))].sort(),
+    left: [...new Set((left ?? (Array.isArray(prev?.left) ? prev.left : [])).filter(Boolean))].sort(),
+  }
+  writeJson(MEMBERS, all)
+  return all[seat].rooms
+}
+
+/**
+ * Seed a seat's membership from a configured room — on first check-in, and for a room it has
+ * not deliberately left.
+ *
+ * ⚠ The environment may ADD, but it may never restore what somebody removed. That asymmetry is
+ * the whole point: changing a project's configured rooms no longer moves the seats that already
+ * exist against their will, which is what lets a fourth session live somewhere else.
+ */
+export function seedMembers(seat, configured) {
+  const have = members(seat)
+  const left = leftRooms(seat)
+  const add = (configured || []).filter(r => !left.includes(r))
+  if (have === null) return setMembers(seat, add)
+  const missing = add.filter(r => !have.includes(r))
+  return missing.length ? setMembers(seat, [...have, ...missing]) : have
+}
+
+export function joinRoom(seat, room) {
+  return setMembers(seat, [...(members(seat) || []), room], leftRooms(seat).filter(r => r !== room))
+}
+
+export function partRoom(seat, room) {
+  return setMembers(seat, (members(seat) || []).filter(r => r !== room), [...leftRooms(seat), room])
+}
+
+/**
+ * A seat's DECLARED presence — the fourth state, and the only one of the four that somebody
+ * chose rather than something derived.
+ *
+ * ⚠ THIS IS NOT A FOURTH VALUE OF `seatState`. That function keeps answering `true` / `null` /
+ * `false`, where `null` means "we do not know"; every consumer treats those three distinctly and
+ * correctly, and a fourth value would silently reclassify a quiet seat inside every one of them.
+ *
+ * ⚠ An expiry in the past is simply absent. Quiet is a timestamp on disk, not a timer: nothing
+ * may depend on a process being alive to end it, because the session that set it is often not
+ * the one that outlives it.
+ */
+export function seatPresence(seat) {
+  const rec = readJson(PRESENCE, {})[seat]
+  if (!rec?.quiet) return { quiet: false, until: null }
+  if (rec.until && Date.parse(rec.until) <= Date.now()) return { quiet: false, until: null, expired: true }
+  return { quiet: true, until: rec.until || null, since: rec.since || null }
+}
+
+/** Declare (or clear) quiet for a seat. `until` is an ISO stamp, or null for open-ended. */
+export function setQuiet(seat, { quiet = true, until = null } = {}) {
+  const all = readJson(PRESENCE, {})
+  if (!quiet) delete all[seat]
+  else all[seat] = { quiet: true, since: now(), ...(until ? { until } : {}) }
+  writeJson(PRESENCE, all)
+  return seatPresence(seat)
+}
+
+// ── the ledger: what an entry actually cost ───────────────────────────────────
+//
+// ⚠ THIS PROJECT'S THESIS IS THAT BEING READ IS CHEAP AND BEING WOKEN IS EXPENSIVE, and until
+// now there was no number for either: `wakes` was computed and thrown away, the letterbox's
+// verdicts were never kept, and every figure in the field notes is therefore a proxy. A tool
+// whose whole argument is a cost cannot demonstrate that cost.
+//
+// ⚠ ONE FILE PER SEAT, APPEND-ONLY — the same invariant as the channel, for the same reason. A
+// shared ledger would be the lost update the channel design exists to avoid, and would need the
+// lockfile this project refuses to have. It is also the only shape a hook can append to on the
+// hot path without reading anything first.
+//
+// ⚠ IT NEVER BLOCKS, NEVER THROWS, NEVER PRINTS. Same rule as the heartbeat: this sits on the
+// PostToolUse path and inside the long poll, and a measurement that can break the thing it
+// measures is worse than no measurement. Every failure here is a dropped line.
+const STATS = join(ROOT, "stats")
+const STATS_MAX_BYTES = 512 * 1024
+
+const statsFile = seat => join(STATS, `${String(seat).replace(/[/\\]/g, "_")}.jsonl`)
+
+/** Append one record. Silent on every failure, including a store that is not writable at all. */
+function ledgerAppend(seat, rec) {
+  try {
+    ensureDir(STATS)
+    const path = statsFile(seat)
+    // Bounded here rather than by a command someone has to remember to run. Checked before the
+    // append because a `statSync` is cheap and a runaway ledger is not: the measured shape of
+    // this store is one project minting ~27 seats an hour, which no time window bounds.
+    try {
+      if (statSync(path).size > STATS_MAX_BYTES) {
+        const lines = readFileSync(path, "utf8").split("\n").filter(Boolean)
+        writeFileSync(path, lines.slice(Math.floor(lines.length / 2)).join("\n") + "\n")
+      }
+    } catch { /* not there yet, or unreadable — the append below decides */ }
+    appendFileSync(path, JSON.stringify({ at: now(), ...rec }) + "\n")
+  } catch { /* a dropped measurement is not a reason to fail a turn */ }
+}
+
+/**
+ * One waking DECISION, recorded where it was made.
+ *
+ * `by` is what decided: `rule` · `letterbox` · `net` · `quiet` · `letterbox-failed`. The last is
+ * deliberately distinct from a letterbox that answered yes — an entry that woke somebody because
+ * the classifier timed out is not the same fact as one it judged, and collapsing them would hide
+ * exactly the number that says whether the letterbox is worth its cost.
+ */
+export function recordDecision({ room, seat, entry, by, woke }) {
+  ledgerAppend(seat, { k: "decision", room, entry, by, woke: !!woke })
+}
+
+/**
+ * A wake-up that actually reached a session — recorded where it was DELIVERED, which is a
+ * different fact from the decision above. A decision with no matching delivery is a seat that was
+ * judged worth waking and had no watcher armed: the README calls that the weakest link in the
+ * chain, and this is the first time it produces a number.
+ */
+export function recordWake({ room, seat, entry, how }) {
+  ledgerAppend(seat, { k: "wake", room, entry, how })       // how: "announced" | "blocked"
+}
+
+/** Everything the ledger holds, oldest first. Unparseable lines are skipped, never fatal. */
+export function readLedger({ since = null } = {}) {
+  const out = []
+  let files = []
+  try { files = readdirSync(STATS).filter(f => f.endsWith(".jsonl")) } catch { return out }
+  for (const f of files) {
+    const seat = f.slice(0, -6)
+    let text = ""
+    try { text = readFileSync(join(STATS, f), "utf8") } catch { continue }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue
+      try {
+        const rec = JSON.parse(line)
+        if (since && t(rec.at) < t(since)) continue
+        out.push({ seat, ...rec })
+      } catch { /* a corrupt line is skipped, and the rest of the file still counts */ }
+    }
+  }
+  return out.sort((a, b) => t(a.at) - t(b.at))
+}
+
+/**
+ * What the bus cost, per room. READ-ONLY: it moves no cursor and marks nothing read, like the
+ * admin view — and it reports the window it actually covers, because the ledger is bounded and a
+ * number whose window is unstated is a number that will be misread.
+ */
+export function stats({ rooms: only = null, since = null } = {}) {
+  const recs = readLedger({ since })
+  const perRoom = {}
+  const bump = (room) => (perRoom[room] ??= {
+    room, entries: 0, chars: 0, clipped: 0,
+    decisions: { rule: 0, letterbox: 0, net: 0, quiet: 0, "letterbox-failed": 0 },
+    woke: 0, announced: 0, blocked: 0, seats: {},
+  })
+  for (const r of recs) {
+    if (only?.length && !only.includes(r.room)) continue
+    const room = bump(r.room || "(unknown)")
+    room.seats[r.seat] ??= { decisions: 0, woke: 0, announced: 0, blocked: 0 }
+    if (r.k === "decision") {
+      room.decisions[r.by] = (room.decisions[r.by] || 0) + 1
+      room.seats[r.seat].decisions++
+      if (r.woke) { room.woke++; room.seats[r.seat].woke++ }
+    } else if (r.k === "wake") {
+      if (r.how === "blocked") { room.blocked++; room.seats[r.seat].blocked++ }
+      else { room.announced++; room.seats[r.seat].announced++ }
+    }
+  }
+  // Entries and characters come from the channel itself — the ledger records decisions, never
+  // what was said. Keeping the two apart is what lets `stats` stay something you can run on
+  // somebody else's room without reading their traffic.
+  for (const room of (only?.length ? only : knownRooms())) {
+    const h = history({ room, limit: 100000 })
+    const r = bump(room)
+    for (const m of h.messages) {
+      if (since && t(m.ts) < t(since)) continue
+      r.entries++
+      r.chars += (m.text || "").length
+      if ((m.text || "").length > INBOX_CHARS && INBOX_CHARS) r.clipped++
+    }
+  }
+  return {
+    window: recs.length ? { from: recs[0].at, to: recs[recs.length - 1].at } : null,
+    records: recs.length,
+    rooms: Object.values(perRoom).sort((a, b) => a.room.localeCompare(b.room)),
+  }
 }

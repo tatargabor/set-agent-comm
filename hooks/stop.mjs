@@ -54,7 +54,14 @@ const pending = []
 for (const room of store.parseRooms(process.env.SET_AGENT_ROOM)) {
   // `advance: false` — the hook does not read the message on the agent's behalf. Marking it
   // read here would be the worst outcome: the agent would never see what it was nudged about.
-  const { unread, unreadWaking, messages } = store.inbox({ room, agent: writer, advance: false })
+  // ⚠ `respectQuiet: false` — a declared quiet silences the WATCHER, not this. `sac wait` starts
+  // a turn while the agent is working, which is the interruption somebody asked to stop; this
+  // hook only ever runs where the turn was ending anyway, so it interrupts nothing and is the
+  // last net before the session goes away. Applying quiet here let a silent seat stop with an
+  // unread REQUEST addressed to it — and if that session never came back, "not now" became
+  // "never". Caught by a sibling session reading the code, hours after it was written.
+  const { unread, unreadWaking, messages } =
+    store.inbox({ room, agent: writer, advance: false, respectQuiet: false })
   // ⚠ Blocking is spent on what is ENTITLED TO INTERRUPT (see `store.wakes`) — an entry
   // addressed to us, or a question or request to the room. Until 2026-08-06 this said "addressed
   // to us", which a broadcast satisfies, and since every entry in the first two days of live
@@ -64,6 +71,12 @@ for (const room of store.parseRooms(process.env.SET_AGENT_ROOM)) {
   const last = waking.at(-1)
   if (!unreadWaking || !last) continue
   if (!store.shouldNudge({ room, agent: writer, ts: last.ts })) continue
+  // ⚠ A HELD TURN IS THE EXPENSIVE HALF, and this is where it actually happens — the decision
+  // was recorded when the entry was written, but a decision only becomes a cost when it reaches
+  // a session. A decision with no matching delivery is a seat nobody could wake, which is the
+  // number the README calls the weakest link in the chain. Recording never throws: see
+  // `recordWake`, which drops the line rather than risk failing a turn.
+  store.recordWake({ room, seat: writer, entry: last.ts, how: "blocked" })
   const who = [...new Set(waking.map(m => m.from))].join(", ")
   const preview = last.text.replace(/\s+/g, " ").slice(0, 200)
   const others = unread - unreadWaking
