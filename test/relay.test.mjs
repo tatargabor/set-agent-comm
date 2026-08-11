@@ -65,6 +65,16 @@ test("HANDSHAKE: an invite carries the room key, and joining yields a device tok
   const use = await run(A, "desktop", ["relay", "use", `http://127.0.0.1:${port}`, "--secret", SECRET])
   assert.equal(use.code, 0, use.err)
 
+  // ⚠ The room has to exist on the inviting machine before anyone is invited into it. Since
+  // 2026-08-11 a room is created on purpose rather than by being written into, and an INVITE is
+  // the strictest of the checks: it is the one act that leaves this machine, so a mistyped name
+  // would land a colleague alone in a room nobody else is in, with both sides believing they
+  // were talking. Checking in is the explicit act that opens it.
+  assert.equal((await run(A, "desktop", ["register", ROOM])).code, 0)
+  const noRoom = await run(A, "desktop", ["invite", "nincs-ilyen-szoba", "--for", "x"])
+  assert.notEqual(noRoom.code, 0, "an invite into a non-existent room must fail at the sender")
+  assert.match(noRoom.err, /there is no room called/)
+
   const inv = await run(A, "desktop", ["invite", ROOM, "--for", "macmini"])
   assert.equal(inv.code, 0, inv.err)
   const code = inv.out.split(/\s+/).find(w => w.startsWith("sac-join:"))

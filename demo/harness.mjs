@@ -104,6 +104,11 @@ if (REMOTE) {
   // The handshake, run through the REAL CLI — `sac relay use`, `sac invite`, `sac join`. If the
   // handshake breaks, this breaks, which is the entire reason not to write the config files here.
   sac(OPERATOR, ["relay", "use", RELAY_URL, "--secret", RELAY_SECRET])
+  // ⚠ The room has to exist on the operator's machine before anyone is invited into it. Since
+  // 2026-08-11 a room is opened on purpose rather than by being written into, and `invite` is the
+  // strictest of the checks — it is the one act that leaves the machine, and a mistyped name
+  // would land the invitee alone in a room nobody else is in.
+  sac(OPERATOR, ["register", ROOM])
   for (const m of Object.keys(MACHINES)) {
     if (m === OPERATOR) continue
     const out = sac(OPERATOR, ["invite", ROOM, "--for", m]).stdout || ""
