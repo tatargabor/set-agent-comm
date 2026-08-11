@@ -1,5 +1,7 @@
 # set-agent-comm
 
+[![test](https://github.com/tatargabor/set-agent-comm/actions/workflows/test.yml/badge.svg)](https://github.com/tatargabor/set-agent-comm/actions/workflows/test.yml)
+
 Messaging between agents **on one machine**: a file-based channel plus a registry, over MCP
 and a CLI. Tailored to Claude Code.
 

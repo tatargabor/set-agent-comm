@@ -1,0 +1,31 @@
+# The whole suite, on the Node versions the package claims to support.
+#
+# It needs nothing: no secrets, no network, no model call. Tests point
+# SET_AGENT_COMM_DIR at a mkdtemp directory, the letterbox is stubbed by a fake
+# binary, and the two smoke runs use a fake `claude` and a relay on localhost.
+# That is deliberate — a suite that needs a key is a suite nobody runs.
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+    name: node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      # `npm test` is: node --test test/*.test.mjs, an MCP round trip over a real
+      # stdio server, and the local + remote demo smoke runs.
+      - run: npm test
