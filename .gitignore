@@ -3,3 +3,8 @@ node_modules/
 .set/
 demo/run/
 docs/internal/
+
+# This repo is itself on the bus: .claude/ holds hooks and a skill with ABSOLUTE paths
+# baked in by `sac install` for THIS machine. Committing them would wire a cloner into
+# our store and our rooms. See CLAUDE.md, "Working in this repo".
+.claude/
