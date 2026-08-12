@@ -65,7 +65,7 @@ const USAGE = {
   peek: "sac peek <room>                     the same, without moving the cursor",
   unread: "sac unread <room> [n]               make the last n messages unread again",
   history: "sac history <room> [n]              read back",
-  install: "sac install <room>[,<room>…] [--dry-run]",
+  install: "sac install <room>[,<room>…] [--dry-run] [--replace]   · adds to the project's rooms; --replace cuts it down to what you name",
   wait: "sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)",
   prune: "sac prune [--days N] [--dry-run]    forget seats whose window is long gone",
   "watch-paths": "sac watch-paths <room>              the files to watch (for the hook)",
@@ -190,15 +190,45 @@ try {
         console.log((remote[room]
           ? `${room.padEnd(18)} relay   as ${AGENT}@${remote[room].namespace}   ${remote[room].url}`
           : `${room.padEnd(18)} local   (this machine only)`) + here)
-        const others = store.participants(room).filter(p => p !== ME && p.includes("#"))
-        if (!others.length) { console.log(`${" ".repeat(20)}nobody else is in this room`); continue }
-        for (const seat of others) {
+        /**
+         * ⚠ WHO IS IN THE ROOM AND WHO CAN BE ADDRESSED ARE TWO LISTS, and this used to print
+         * them as one. Reported from `consumer-a` 2026-08-12: a project's whole roster — fourteen
+         * seats — appeared under a room `liveSeats` correctly said held exactly one, because
+         * `participants` also walks the AGENT-level `rooms` list, which `sac register` writes.
+         * The error ran in the reassuring direction: the screen said fourteen people were there.
+         *
+         * So the seats are `roomSeats` (per seat, the same rule `wakes` reads), and the rest is
+         * named below for what it is: reachable by writing to the project, in the room by nobody.
+         */
+        const others = store.roomSeats(room).filter(p => p !== ME)
+        // Closed seats are COUNTED, not listed. A room this project has been working in for a
+        // week holds a dozen of them, and a dozen lines of `closed` is where the two or three
+        // names that can still answer you go to hide. They are not dropped: a room whose seats
+        // are all gone must not read as an empty room, which is a different thing.
+        const gone = others.filter(s => liveOf.get(s) === false)
+        for (const seat of others.filter(s => liveOf.get(s) !== false)) {
           const p = store.seatPresence(seat)
           const live = liveOf.get(seat)
           // Three-state liveness stays three-state here too: unknown is "unknown", never "gone".
           const state = p.quiet ? `quiet${p.until ? ` until ${p.until}` : ""}`
-            : live === true ? "live" : live === false ? "closed" : "unknown"
+            : live === true ? "live" : "unknown"
           console.log(`${" ".repeat(20)}${seat.padEnd(38)} ${state}`)
+        }
+        if (gone.length) console.log(`${" ".repeat(20)}+ ${gone.length} closed seat${gone.length > 1 ? "s" : ""}` +
+          ` (their entries stay; nothing here can reach them)`)
+        const inRoom = new Set([...others, ME])
+        const alsoAddressable = []
+        for (const a of store.agents()) {
+          if (!(a.rooms || []).includes(room)) continue
+          const outside = (a.seats || []).filter(s => !inRoom.has(s.writer)).length
+          if (outside) alsoAddressable.push(`${a.agent} (${outside} seat${outside > 1 ? "s" : ""})`)
+        }
+        if (!others.length && !alsoAddressable.length) console.log(`${" ".repeat(20)}nobody else is in this room`)
+        if (alsoAddressable.length) {
+          // Said plainly, and second: writing to the project name reaches these, but none of them
+          // is IN the room, and nothing here will wake them.
+          console.log(`${" ".repeat(20)}also addressable: ${alsoAddressable.join(", ")}` +
+            ` — reachable by project name, not in this room`)
         }
       }
       break
@@ -428,21 +458,16 @@ try {
       // measured on the live `consumer-a` project, where the Stop hook was simply forgotten, and
       // from the outside a forgotten hook looks exactly like a quiet room.
       const dry = rest.includes("--dry-run")
+      const replace = rest.includes("--replace")
       const asked = rest.filter(a => !a.startsWith("--")).flatMap(store.parseRooms)
-      const rooms = asked.length ? asked : store.parseRooms(process.env.SET_AGENT_ROOM)
-      if (!rooms.length) throw new Error("usage: sac install <room>[,<room>…] [--dry-run]")
+      const want = asked.length ? asked : store.parseRooms(process.env.SET_AGENT_ROOM)
+      if (!want.length) throw new Error("usage: sac install <room>[,<room>…] [--dry-run] [--replace]")
 
       // ⚠ THE PROJECT GETS AN ADDRESS ROOM, whether or not anyone asked. Measured 2026-08-04: an
       // agent INFERRED a room name from a naming convention and then spent a whole entry asking
       // whether it had guessed right — *"I did not get an explicit instruction; better one spare
       // empty room than two agents talking past each other."* A room whose name nobody has to
       // guess is one line of setup, and this is where the setup already happens.
-      const opened = []
-      if (!dry) {
-        for (const r of [...rooms, AGENT]) {
-          if (!store.roomExists(r)) { store.createRoom(r, ME); opened.push(r) }
-        }
-      }
 
       const file = join(process.cwd(), ".claude", "settings.json")
       let settings = {}
@@ -452,6 +477,35 @@ try {
         // people's hooks. Half-understanding it is not a licence to rewrite it.
         try { settings = JSON.parse(raw) } catch (e) {
           throw new Error(`${file} is not valid JSON (${e.message}) — not touching it`)
+        }
+      }
+
+      /**
+       * ⚠ THE ROOM LIST GROWS; IT IS NOT SWAPPED. Reported from `consumer-a` 2026-08-12: a project
+       * already wired into two rooms ran `sac install consumer-a-bugfix --dry-run`, and the preview
+       * showed `SET_AGENT_ROOM` cut down to the one room asked for. Nobody had asked for the
+       * other two to go and nothing said they would — a silent narrowing of what EVERY session
+       * of the project starts in. The reporter avoided it by hand-editing `settings.json`
+       * instead, and within a minute two live sibling sessions had joined the new room through
+       * their own hooks, because that file is the project's, not a session's.
+       *
+       * So adding is the default direction, and taking a room away has to be asked for
+       * (`--replace`) and is then said out loud. The rooms already there are read back out of
+       * the hook commands in the file — that is where this command wrote them.
+       */
+      const already = Object.values(settings.hooks || {}).filter(Array.isArray).flat()
+        .flatMap(g => g?.hooks || [])
+        .map(h => String(h?.command || ""))
+        .filter(c => c.includes("set-agent-comm"))
+        .flatMap(c => store.parseRooms(c.match(/SET_AGENT_ROOM=(\S+)/)?.[1]))
+      const kept = [...new Set(already)].filter(r => !want.includes(r))
+      const rooms = replace ? want : [...kept, ...want]
+      const dropped = replace ? kept : []
+
+      const opened = []
+      if (!dry) {
+        for (const r of [...rooms, AGENT]) {
+          if (!store.roomExists(r)) { store.createRoom(r, ME); opened.push(r) }
         }
       }
 
@@ -500,6 +554,12 @@ try {
       changes.push(`skill: ${skillState}`)
 
       console.log(`${dry ? "[dry run] " : ""}${file}`)
+      console.log(`  rooms: ${rooms.join(", ")}` +
+        (kept.length && !replace ? `   (${kept.join(", ")} was already there and stays)` : ""))
+      // Loud, and it names them: this is the one thing the command can take away.
+      if (dropped.length) console.log(`  ⚠ REMOVED: ${dropped.join(", ")} — every session of this ` +
+        `project will start without ${dropped.length > 1 ? "them" : "it"}. This is per PROJECT; ` +
+        `to leave a room as this one session, \`sac part <room>\`.`)
       if (opened.length) console.log(`  rooms opened: ${opened.join(", ")}` +
         (opened.includes(AGENT) ? `   (${AGENT} is this project's own address — anyone can write to it)` : ""))
       for (const c of changes) console.log(`  ${c}`)
@@ -838,6 +898,8 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
 
   sac agents                          who exists, who is alive
   sac rooms                           rooms — and how far each one reaches
+  sac join <room> [--create]          THIS SESSION enters a room — membership is per seat
+  sac part <room>                     …and leaves it; it sticks, the hook will not put you back
   sac admin                           full-screen: channels, WHO IS BEHIND on reading, live flow
   sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
        [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
@@ -846,10 +908,13 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac peek <room>                     the same, without moving the cursor
   sac unread <room> [n]               make the last n messages unread again
   sac history <room> [n]              read back
-  sac install <room> [--dry-run]      wire both hooks into this project's settings.json
+  sac install <room>[,…] [--dry-run]  hooks + skill into THIS PROJECT — the default rooms every
+                                      session of it starts in (adds; --replace to cut it down)
+  sac quiet [--for 2h] [--off]        stop being woken; delivery is unaffected
   sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)
   sac watch-paths <room>              the files to watch (for the hook)
-  sac register <room>                 check in to the registry
+  sac register <room>                 check in to the registry (the hook's job — join is yours)
+  sac stats [room…] [--since 24h]     what the bus cost: decisions, wake-ups, characters
   sac prune [--days N] [--dry-run]    forget seats whose window is long gone (registry only)
 
 across machines (optional — see the README):

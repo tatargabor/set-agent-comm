@@ -999,6 +999,31 @@ export function pruneSeats({ days = 7, keep = SEATS_KEPT_PER_AGENT, dry = false 
            kept: Object.values(reg.agents).reduce((n, a) => n + Object.keys(a.seats || {}).length, 0) }
 }
 
+/**
+ * Every seat that is IN this room, whatever state it is in — membership read off the SEAT, never
+ * off the agent, exactly as in `liveSeats`.
+ *
+ * This is `liveSeats` for a SCREEN: it keeps the ones known to be gone, because "closed" is
+ * information an operator needs, while `liveSeats` answers "who could an entry reach today" and
+ * must not offer them. A seat that has written into the room counts as in it — its file is the
+ * proof, and it predates the per-seat room list.
+ *
+ * ⚠ It is deliberately NOT `participants`, which answers a different question — who may be
+ * ADDRESSED — and includes project names and every seat of every project registered in the room.
+ * Reported from `consumer-a` 2026-08-12: `sac rooms` listed all 14 seats of a project under a room
+ * `liveSeats` correctly said held one, and it erred towards the reassuring answer: the screen
+ * showed fourteen people in a room where there was one.
+ */
+export function roomSeats(room) {
+  const names = new Set()
+  for (const p of busFiles(room)) names.add(writerOf(p))
+  const reg = readJson(REGISTRY, { agents: {} })
+  for (const a of Object.values(reg.agents)) {
+    for (const [w, s] of Object.entries(a.seats || {})) if ((s.rooms || []).includes(room)) names.add(w)
+  }
+  return [...names].sort()
+}
+
 export function participants(room) {
   const names = new Set()
   for (const p of busFiles(room)) { const w = writerOf(p); names.add(w); names.add(seatBase(w)) }

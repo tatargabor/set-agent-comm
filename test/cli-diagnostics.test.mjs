@@ -47,12 +47,51 @@ test("REGRESSION: `sac send --help` prints usage and writes NOTHING — the `--h
     "a help flag must not create a room — this is exactly how `--help` got into the live store")
 })
 
+test("REGRESSION: the help names the commands that put THIS SEAT in a room", () => {
+  // Reported from `consumer-a` 2026-08-12. A session wanted to join one room BY ITSELF. `sac join
+  // <room>` does exactly that and has had a usage line all along — but the help's local section
+  // did not list it, so the only two visible paths were `sac install` and hand-editing
+  // `settings.json`, and both are project-wide. The second one was taken, and two live sibling
+  // sessions joined the room through their own hooks within a minute.
+  const r = sac([])
+  assert.equal(r.code, 0)
+  assert.match(r.stdout, /sac join <room>/, "the per-seat way into a room is not in the help")
+  assert.match(r.stdout, /sac part <room>/, "…nor the way out")
+  // …and the project-wide one must say that it is project-wide, next to it.
+  assert.match(r.stdout, /sac install[\s\S]{0,120}PROJECT/,
+    "`install` does not say that it sets the default for every session of the project")
+})
+
 test("`--help` works on every subcommand that has a usage line", () => {
-  for (const cmd of ["send", "inbox", "peek", "history", "install", "wait", "agents", "rooms", "focus"]) {
+  for (const cmd of ["send", "inbox", "peek", "history", "install", "wait", "agents", "rooms", "focus", "join", "part"]) {
     const r = sac([cmd, "--help"])
     assert.match(r.stdout, new RegExp(`usage: sac ${cmd}`), `sac ${cmd} --help`)
     assert.equal(r.code, 0, `sac ${cmd} --help must exit 0`)
   }
+})
+
+test("REGRESSION: `sac rooms` does not show a project's whole roster as being in a room", () => {
+  // Reported from `consumer-a` 2026-08-12: fourteen seats listed under a room that held exactly one
+  // — `sac rooms` printed `participants`, which walks the AGENT-level room list `sac register`
+  // writes. "Addressable" and "in the room, wakes" are two concepts, and printing them as one
+  // list erred towards the reassuring answer: a room with one person in it looked crowded.
+  const root = mkdtempSync(join(tmpdir(), "sac-cli-"))
+  const reg = (session, room, owner) => sac(["register", room], {
+    SET_AGENT_COMM_DIR: root, SET_AGENT_NAME: "proj",
+    CLAUDE_CODE_SESSION_ID: session, SET_AGENT_OWNER_PID: String(owner),
+  })
+  // Two sessions of ONE project, in two DIFFERENT rooms. The first window is alive (this test
+  // process stands in for it), the second is long gone.
+  reg("aaaa1111-0000-0000-0000-000000000000", "egyik", process.pid)
+  reg("bbbb2222-0000-0000-0000-000000000000", "masik", 999999)
+
+  const out = sac(["rooms"], { SET_AGENT_COMM_DIR: root, SET_AGENT_NAME: "nezo" }).stdout
+  const egyik = out.slice(out.indexOf("egyik "), out.indexOf("masik "))
+  assert.match(egyik, /proj#aaaa1111/, "the seat that IS in the room is missing")
+  assert.doesNotMatch(egyik, /proj#bbbb2222/,
+    "a sibling seat that is in another room is reported as being in this one")
+  assert.match(egyik, /also addressable: proj/,
+    "…and the project, which can still be written to, is not named at all")
 })
 
 test("a flag in the room position is a usage error, never a room name", () => {

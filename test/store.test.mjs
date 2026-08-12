@@ -736,6 +736,20 @@ test("REGRESSION: a project's seat in one room is not reported as live in anothe
     "a seat that never joined scope-b is reported as live in it")
 })
 
+test("`roomSeats` is per seat too — `participants` answers a different question", () => {
+  // Reported from `consumer-a` 2026-08-12: `sac rooms` printed all 14 seats of a project under a
+  // room `liveSeats` correctly said held one, because it listed `participants` — which walks the
+  // AGENT-level room list on purpose (it answers "who may be ADDRESSED", and a project name is a
+  // legitimate addressee). Two concepts, one list, and it erred towards the reassuring answer.
+  assert.deepEqual(store.roomSeats("scope-a"), ["twoseat#in-a"],
+    "the sibling seat, which is in scope-b, is reported as being in scope-a")
+  assert.ok(store.participants("scope-a").includes("twoseat"),
+    "the project name must stay addressable — that is what `participants` is for")
+  // …and `roomSeats` keeps what `liveSeats` must not: a seat known to be gone. `sac rooms` says
+  // "closed" about it, and a room whose seats all closed is not an empty room.
+  assert.ok(store.roomSeats("scope-a").length >= store.liveSeats("scope-a").length)
+})
+
 test("…but a seat that really is in both rooms stays in both", () => {
   // The over-strict fix — dropping any seat without a file in the room — would lose a session
   // that has joined and is listening but has not written yet. It can still be woken, so the

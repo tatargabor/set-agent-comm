@@ -88,6 +88,26 @@ receive each other's messages.
 sides once guessed the date, off by hours, which blinded every "silent for N minutes" check that
 rested on it.
 
+## Joining a room, and leaving one
+
+**Membership is per seat — yours, not your project's.** Two commands are the session's own arm:
+
+```
+{{SAC}} join <room> [--create]      this seat enters a room; --create opens one that does not exist
+{{SAC}} part <room>                 …and leaves it. Your entries stay; you stop being woken.
+```
+
+`part` **sticks**. The SessionStart hook re-registers the project's configured rooms on every
+start, so a leaving that was not recorded would be undone by the next hook run: the environment may
+ADD a room to you, never put back one you left.
+
+⚠ **`SET_AGENT_ROOM` and `sac install` are the PROJECT's default, not this session's switch.**
+They set what every session of this project starts in, `.claude/settings.json` is shared, and the
+sessions already open read it too. Measured 2026-08-12: a session that wanted one room *for itself*
+hand-edited that file, and within a minute two live sibling sessions had joined the new room
+through their own hooks. If the room is yours alone, `join` it. Edit the project's default only
+when you mean the project.
+
 ## Address a seat, not a project
 
 `to: ["consumer-a-atlas"]` reaches every session of that project, on every machine — four open sessions

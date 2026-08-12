@@ -12,11 +12,19 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SAC = join(HERE, "..", "bin", "sac.mjs")
 const PROJ = mkdtempSync(join(tmpdir(), "sac-install-"))
 const FILE = join(PROJ, ".claude", "settings.json")
-process.on("exit", () => rmSync(PROJ, { recursive: true, force: true }))
+// ⚠ A TEMP STORE, not the live one. `install` OPENS the rooms it wires in, and without this the
+// suite left `team`, `design` and `proj` sitting in the developer's own bus — found there
+// 2026-08-12, next to the rooms real sessions use.
+const STORE = mkdtempSync(join(tmpdir(), "sac-install-store-"))
+process.on("exit", () => {
+  rmSync(PROJ, { recursive: true, force: true })
+  rmSync(STORE, { recursive: true, force: true })
+})
 
 mkdirSync(join(PROJ, ".claude"), { recursive: true })
 const install = (...args) => spawnSync(process.execPath, [SAC, "install", ...args], {
-  cwd: PROJ, encoding: "utf8", env: { ...process.env, SET_AGENT_NAME: "proj" },
+  cwd: PROJ, encoding: "utf8",
+  env: { ...process.env, SET_AGENT_NAME: "proj", SET_AGENT_COMM_DIR: STORE },
 })
 const settings = () => JSON.parse(readFileSync(FILE, "utf8"))
 const commands = (s, event) => (s.hooks?.[event] || []).flatMap(g => g.hooks || []).map(h => h.command)
@@ -85,6 +93,42 @@ test("REGRESSION: it recognises an entry written with $HOME, not just an absolut
   install("team")
   assert.equal(commands(settings(), "SessionStart").filter(c => c.includes("session-start.mjs")).length, 1,
     "the same hook ended up in the file twice")
+})
+
+test("a new room is ADDED to the project's rooms — it does not replace them", () => {
+  // Reported from `consumer-a` 2026-08-12: on a project already in two rooms,
+  // `sac install consumer-a-bugfix --dry-run` previewed `SET_AGENT_ROOM` cut down to the one room asked
+  // for. This list is what EVERY session of the project starts in, and nothing said it would be
+  // taken away. The reporter hand-edited settings.json to avoid it — which is project-wide too,
+  // and pulled two live sibling sessions into the room within a minute.
+  writeFileSync(FILE, JSON.stringify({
+    hooks: { SessionStart: [{ hooks: [{
+      type: "command",
+      command: "SET_AGENT_ROOM=team,design node $HOME/code2/set-agent-comm/hooks/session-start.mjs",
+    }] }] },
+  }, null, 2))
+  const r = install("bugfix")
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /rooms: team, design, bugfix/, "the resulting list is not stated")
+  for (const event of ["SessionStart", "Stop", "PostToolUse"]) {
+    const c = commands(settings(), event).find(c => c.includes("set-agent-comm") || c.includes(".mjs"))
+    assert.match(c, /SET_AGENT_ROOM=team,design,bugfix /, `${event} lost a room`)
+  }
+})
+
+test("--replace does cut it down, and says out loud which rooms it took", () => {
+  const r = install("bugfix", "--replace")
+  assert.match(r.stdout, /REMOVED: team, design/, "it took two rooms away without naming them")
+  assert.match(r.stdout, /sac part/, "…and without pointing at the per-session way to leave one")
+  const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
+  assert.match(c, /SET_AGENT_ROOM=bugfix /)
+})
+
+test("--dry-run previews the merged list and writes nothing", () => {
+  const before = readFileSync(FILE, "utf8")
+  const r = install("team", "--dry-run")
+  assert.match(r.stdout, /rooms: bugfix, team/)
+  assert.equal(readFileSync(FILE, "utf8"), before)
 })
 
 test("it refuses to touch a settings.json it cannot parse", () => {

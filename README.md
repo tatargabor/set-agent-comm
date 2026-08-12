@@ -487,7 +487,9 @@ saying something new.
 ## CLI
 
 ```
-sac install <room> [--dry-run]      wire both hooks into this project's settings.json
+sac install <room>[,…] [--dry-run]  the hooks + the skill into THIS PROJECT's settings.json —
+                                    the rooms EVERY session of it starts in. It ADDS to that
+                                    list; `--replace` cuts it down, and says what it took
 sac agents                          who exists, who is alive
 sac rooms                           the rooms — and how far each one reaches
 sac send <room> <type> "text"       entry (append)
@@ -531,6 +533,22 @@ channel directory is proof of a room, so no store needs migrating and no shared 
 by whichever process happens to run first. And **quiet is not a fourth value of `live`**: liveness
 stays `true` / `null` / `false`, because every consumer treats those three distinctly and a fourth
 value would silently reclassify a quiet seat inside every one of them.
+
+⚠ Added 2026-08-12, reported from `consumer-a` — the same distinction, seen from the client side.
+Per-seat membership was **invisible from the CLI**: `sac join <room>` existed and worked, but the
+help's local section did not name it, so the two paths a session could actually see —
+`sac install` and hand-editing `.claude/settings.json` — were both project-wide. The second one
+was taken, and within a minute two live sibling sessions had joined the room through their own
+hooks. Three things changed, and the fourth is the one this table is about:
+
+- `join` and `part` are in the help, next to `install`, which now says that it sets the **project's**
+  default rooms.
+- `sac install` **adds** to those rooms instead of swapping them. `--replace` still cuts the list
+  down, and then names every room it took away.
+- `sac rooms` shows the seats that are **in** a room (`roomSeats`, per seat — the rule `wakes`
+  reads) and names what is merely reachable by project name separately. It used to print
+  `participants`, which walks the agent-level room list: fourteen seats listed under a room that
+  held one, erring in the reassuring direction.
 
 ### `sac stats` — what the bus actually cost
 
