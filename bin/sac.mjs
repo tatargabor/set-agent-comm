@@ -421,7 +421,20 @@ try {
           }
           store.createRoom(code, ME)
         }
-        json({ agent: ME, rooms: store.joinRoom(ME, code) })
+        const joined = store.joinRoom(ME, code)
+        /**
+         * ⚠ A JOIN ONLY THE JOINER CAN SEE IS NOT A JOIN. `joinRoom` writes `members.json` —
+         * this seat's own record — while the ROSTER everyone else reads is the registry, which
+         * only `register` writes. Measured 2026-08-12 while answering the `consumer-a` report:
+         * after `sac join uj --create`, `liveSeats("uj")` was EMPTY. The seat was in the room by
+         * its own book and in nobody else's, so `send` told the next writer the room held no
+         * one, and `sac rooms` did not list it either.
+         *
+         * That is also why a project's committed worksheet had settled on `sac register <room>`
+         * as the way to join: of the two, the wrong command was the one that showed up.
+         */
+        store.register({ agent: AGENT, project: process.cwd(), room: code, writer: ME, session: SESSION })
+        json({ agent: ME, rooms: joined })
         break
       }
       const bridge = await import("../src/bridge.mjs")

@@ -148,6 +148,14 @@ derivation had nowhere to live:
   hook re-registers every configured room on every start, so a membership that only recorded what a
   seat is *in* would have a person's decision undone by the next hook run. The environment may
   ADD a room, never restore one that was left.
+  ⚠ **Membership lives in TWO files and only one of them is read by the others** (2026-08-12, from
+  the `consumer-a` report). `members.json` is the seat's own book; the ROSTER — `liveSeats`,
+  `roomSeats`, and so `send`'s wake report and `sac rooms` — is the registry's per-seat `rooms`.
+  Measured: after `joinRoom` the roster was empty (a join nobody else could see, which is why a
+  project's worksheet had settled on `sac register` to join with), and after `partRoom` the seat
+  was still on it, so the next hook run undid the leaving. `joinRoom` / `partRoom` now write both
+  halves (`registerRoom` / `unregisterRoom`), and `register` **skips a room the seat has left** —
+  the same asymmetry `seedMembers` already had, applied where it is visible.
 - `presence.json` — `quiet`, the fourth state. It lives in `seatPresence()`, **not** as a fourth
   value of `seatState` (which stays `true`/`null`/`false`): every consumer treats those three
   distinctly, and a fourth value would silently reclassify a quiet seat inside all of them. Applied

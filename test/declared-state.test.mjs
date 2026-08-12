@@ -86,6 +86,35 @@ test("leaving a room never touches what was written", () => {
   store.joinRoom(seatA, "team")
 })
 
+test("REGRESSION: joining and leaving are visible to EVERYBODY, not just to the seat", () => {
+  // ⚠ Measured 2026-08-12, while answering the `consumer-a` report that per-seat membership is
+  // invisible from the outside. It was invisible in the code too: membership lives in two files
+  // and the others only read one of them. `members.json` is the seat's own book; the ROSTER —
+  // `liveSeats`, `roomSeats`, and therefore `send`'s wake report and `sac rooms` — is the
+  // registry. `join` wrote the first and not the second, `part` likewise, so:
+  //
+  //   · after `join`, `liveSeats(room)` was EMPTY and the next writer was told the room held
+  //     nobody. That is also why a project's worksheet had settled on `sac register` to join
+  //     with: of the two commands, the wrong one was the one that showed up.
+  //   · after `part`, the seat was still on the roster, and the next SessionStart hook run put
+  //     the room back onto it — a leaving that "stuck" in one file and was undone in the other.
+  store.register({ agent: "alfa", session: "aaaa1111", room: "team", writer: seatA })
+  store.joinRoom(seatA, "korte")
+  assert.ok(store.liveSeats("korte").includes(seatA), "a join nobody else can see is not a join")
+  assert.ok(store.roomSeats("korte").includes(seatA))
+
+  store.partRoom(seatA, "korte")
+  assert.ok(!store.liveSeats("korte").includes(seatA), "a leaving nobody else can see is not one")
+
+  // …and the environment may not put it back: the hook re-registers every configured room on
+  // every start, which is exactly the run that used to undo it.
+  store.register({ agent: "alfa", session: "aaaa1111", room: "korte", writer: seatA })
+  assert.ok(!store.liveSeats("korte").includes(seatA),
+    "a hook run re-entered a room the seat had left — on the list everybody else reads")
+  assert.deepEqual(store.members(seatA).filter(r => r === "korte"), [],
+    "…and the seat's own book disagreed with the roster")
+})
+
 // ── quiet: the fourth, declared state ─────────────────────────────────────────
 
 test("quiet suppresses waking and NOT delivery", () => {

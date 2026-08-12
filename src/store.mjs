@@ -632,12 +632,23 @@ export function register({ agent, project, session, room, pid = process.pid, wri
                            owner = ownerPid() }) {
   if (!agent) throw new Error("register: `agent` is required")
   const seat = writer || claimSeat({ agent, session, pid, owner })
+  /**
+   * ⚠ A ROOM THIS SEAT HAS LEFT IS NOT RE-ENTERED — in the REGISTRY as well, not only in
+   * `members.json`. The SessionStart hook calls `register` once per configured room on every
+   * start, and the roster is what every other session reads. Measured 2026-08-12: after
+   * `sac part`, `members` had dropped the room and `liveSeats` still named the seat in it, so
+   * the next hook run put a leaving that had "stuck" back into everybody else's list.
+   *
+   * `seedMembers` has had this asymmetry since 2026-08-11 — the environment may ADD a room,
+   * never restore one somebody removed. This is the same rule, applied where it is visible.
+   */
+  const joining = room && !leftRooms(seat).includes(room) ? room : null
   const reg = readJson(REGISTRY, { agents: {} })
   const prev = reg.agents[agent] || {}
   const seats = { ...(prev.seats || {}) }
   // `owner` is passed through, not re-derived: without it a check-in whose session id differs
   // from the one that named the seat would read as a stranger and wipe the window's record.
-  const mine = touchSeat(seats, seat, { session, pid, owner, room })
+  const mine = touchSeat(seats, seat, { session, pid, owner, room: joining })
   // Bounded HERE rather than in a command someone has to remember to run: the registry grows one
   // seat per session, and a roster nobody can read is the same as no roster at all.
   capDeadSeats(seats)
@@ -648,7 +659,7 @@ export function register({ agent, project, session, room, pid = process.pid, wri
     project: project ?? prev.project ?? null,
     session: session ?? prev.session ?? null,
     host: hostname(),
-    rooms: [...new Set([...(prev.rooms || []), ...(room ? [room] : [])])],
+    rooms: [...new Set([...(prev.rooms || []), ...(joining ? [joining] : [])])],
     seats,
     firstSeen: prev.firstSeen || now(),
     lastSeen: now(),
@@ -659,10 +670,10 @@ export function register({ agent, project, session, room, pid = process.pid, wri
   // SessionStart hook — which is a decision somebody made. The name a `send` carries was typed
   // in the moment, and that is where the measured failure was: a mistyped room becoming a new
   // silent room the writer is alone in, with `send` returning success.
-  if (room && !roomExists(room)) createRoom(room, seat)
+  if (joining && !roomExists(joining)) createRoom(joining, seat)
   // Membership is per seat from here on; the configured rooms seed it once and never again.
-  if (room) seedMembers(seat, [room])
-  seedCursor(room, seat)
+  if (joining) seedMembers(seat, [joining])
+  seedCursor(joining, seat)
   // Co-writers are counted PER SEAT — that is, per file. Another session of the same project
   // sits in its own seat and does not collide, so it must not raise a warning.
   return {
@@ -1518,11 +1529,60 @@ export function seedMembers(seat, configured) {
 }
 
 export function joinRoom(seat, room) {
-  return setMembers(seat, [...(members(seat) || []), room], leftRooms(seat).filter(r => r !== room))
+  const rooms = setMembers(seat, [...(members(seat) || []), room], leftRooms(seat).filter(r => r !== room))
+  // Both halves, always — see `unregisterRoom`. A membership only the member can see is not one.
+  registerRoom(seat, room)
+  return rooms
+}
+
+/**
+ * Put a room on this SEAT's registry record — the roster half of `join`, and the exact inverse of
+ * `unregisterRoom`. It only ever EXTENDS a record that already exists: naming a seat is
+ * `claimSeat`'s job, and inventing one here would let a stray join conjure a session that never
+ * ran. A `sac join` from a live session goes through `register` as well, which does create it.
+ */
+export function registerRoom(seat, room) {
+  const reg = readJson(REGISTRY, { agents: {} })
+  let changed = false
+  for (const a of Object.values(reg.agents)) {
+    const s = (a.seats || {})[seat]
+    if (!s || (s.rooms || []).includes(room)) continue
+    s.rooms = [...(s.rooms || []), room]
+    changed = true
+  }
+  if (changed) writeJson(REGISTRY, reg)
+  return changed
 }
 
 export function partRoom(seat, room) {
-  return setMembers(seat, (members(seat) || []).filter(r => r !== room), [...leftRooms(seat), room])
+  const rooms = setMembers(seat, (members(seat) || []).filter(r => r !== room), [...leftRooms(seat), room])
+  unregisterRoom(seat, room)
+  return rooms
+}
+
+/**
+ * Take a room off this SEAT's registry record — the half of `part` everybody else can see.
+ *
+ * ⚠ Membership lives in two files, and only one of them is read by the others. `members.json` is
+ * the seat's own book; the ROSTER (`liveSeats`, `roomSeats`, and so `send`'s wake report) is the
+ * registry. Measured 2026-08-12: after `sac part uj`, `members` no longer had the room and
+ * `liveSeats("uj")` still named the seat — the leaving was invisible to every other session,
+ * which is the same defect as a `join` nobody could see, in the other direction.
+ *
+ * The AGENT-level `rooms` list is deliberately left alone: the project stays addressable in the
+ * room (that is what `participants` answers), and another seat of it may well still be in there.
+ */
+export function unregisterRoom(seat, room) {
+  const reg = readJson(REGISTRY, { agents: {} })
+  let changed = false
+  for (const a of Object.values(reg.agents)) {
+    const s = (a.seats || {})[seat]
+    if (!s || !(s.rooms || []).includes(room)) continue
+    s.rooms = s.rooms.filter(r => r !== room)
+    changed = true
+  }
+  if (changed) writeJson(REGISTRY, reg)
+  return changed
 }
 
 /**

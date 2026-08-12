@@ -550,6 +550,14 @@ hooks. Three things changed, and the fourth is the one this table is about:
   `participants`, which walks the agent-level room list: fourteen seats listed under a room that
   held one, erring in the reassuring direction.
 
+And one the report did not ask for, found while answering it: **membership lived in two files and
+the others only read one of them.** `members.json` is the seat's own book; the roster everybody
+else reads — `liveSeats`, and so `send`'s wake report — is the registry. `join` wrote the first
+and not the second, so after `sac join <room>` the room looked *empty* to the next writer; `part`
+likewise, so the next hook run put the seat back. That is the mechanical reason the wrong command
+had spread: `sac register` was the one that showed up. Both now write both halves, and `register`
+skips a room the seat has left.
+
 ### `sac stats` — what the bus actually cost
 
 This project's whole claim is that being read is cheap and being woken is expensive, and until now
