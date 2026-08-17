@@ -17,7 +17,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, existsSync, readdirSync } from "node:fs"
+import { mkdtempSync, existsSync, readdirSync, chmodSync, watch } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -127,4 +127,80 @@ test("the warning goes to stderr, so stdout stays parseable", () => {
 test("a recognised environment is silent", () => {
   const r = sac(["agents"])
   assert.equal(r.stderr, "", `unexpected warning: ${r.stderr}`)
+})
+
+/**
+ * ⚠ A WATCH THAT COULD NOT BE ARMED IS THE QUIETEST FAILURE THIS CLI HAS. `sac wait` falls back
+ * to a 5-second poll when `fs.watch` throws, and for a long time said nothing at all — the empty
+ * `catch` even carried a comment explaining why it was fine ("the poll below covers it"). It IS
+ * covered; that is exactly why nobody found out that the wake-up had gone from ~100 ms to 5 s.
+ *
+ * Measured 2026-08-17: this machine sat at 126 of 128 `fs.inotify.max_user_instances`, so every
+ * NEWLY armed watch threw EMFILE while the older ones kept working — the session somebody had
+ * just opened was the one that degraded. 50 live `sac wait` processes, 20 holding an instance.
+ *
+ * The test forces a REAL failure rather than a simulated one, by taking read permission off the
+ * channel directory. Which error arrives depends on the machine — EACCES where inotify has room,
+ * EMFILE where it does not — so the assertion is on the sentence, not on the code.
+ */
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0
+
+/**
+ * `sac wait` BLOCKS — that is its whole job, and `--once` only exits when an event arrives. The
+ * warning under test is printed while the watch is being armed, long before any of that, so this
+ * kills the process after a moment and reads what it had already said. (The first version of
+ * this test used the plain helper and hung the suite.)
+ */
+const waitBriefly = (args, env) => {
+  const r = spawnSync(process.execPath, [CLI, ...args], {
+    env: { ...process.env, ...env }, encoding: "utf8", timeout: 2500, killSignal: "SIGKILL",
+  })
+  return { stdout: r.stdout || "", stderr: r.stderr || "" }
+}
+
+test("REGRESSION: a watch that could not be armed says so — on stderr, once", { skip: asRoot && "root ignores the permission bits this test relies on" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "sac-cli-"))
+  const env = { SET_AGENT_COMM_DIR: root, SET_AGENT_NAME: "watcher" }
+  assert.equal(sac(["register", "zart"], env).code, 0)
+  chmodSync(join(root, "channels", "zart"), 0o000)
+  try {
+    const r = waitBriefly(["wait", "zart"], env)
+    assert.match(r.stderr, /could not arm the file watcher/,
+      "the watch fell back to the 5s poll and nothing said so — the failure this test exists for")
+    assert.match(r.stderr, /zart/, "the room whose watch failed is named")
+    assert.match(r.stderr, /5s poll/, "…and what it costs, which is the part a reader can act on")
+    // ⚠ STDOUT IS THE EVENT STREAM. A Claude Code Monitor turns every line of it into a
+    // notification, so a warning printed there would spend a whole turn of the agent's context
+    // reporting something only an operator can do anything about.
+    assert.ok(!/could not arm/.test(r.stdout), "the warning reached the event stream")
+    // Once for all the rooms, not once per room.
+    assert.equal((r.stderr.match(/could not arm the file watcher/g) || []).length, 1)
+  } finally { chmodSync(join(root, "channels", "zart"), 0o755) }
+})
+
+/**
+ * ⚠ THE HEALTHY-PATH TEST NEEDS A HEALTHY MACHINE, and on a saturated one it cannot get it: with
+ * every `fs.inotify.max_user_instances` in use, there is no such thing as a watch that WAS armed.
+ * Probed for real rather than assumed — and the skip REASON names the condition, because a
+ * developer whose machine is in that state wants to be told, not to see a green suite. This is
+ * how the case first appeared: the test failed on the author's machine, correctly.
+ */
+const canWatch = (() => {
+  try {
+    const w = watch(mkdtempSync(join(tmpdir(), "sac-probe-")), () => {})
+    w.close()
+    return true
+  } catch { return false }
+})()
+
+test("…and a watch that WAS armed stays silent about it", {
+  skip: asRoot ? "see above"
+    : !canWatch && "this machine has no free inotify instances — see `max_user_instances`",
+}, () => {
+  // The other half: a warning that also fires on the healthy path is one people learn to ignore.
+  const root = mkdtempSync(join(tmpdir(), "sac-cli-"))
+  const env = { SET_AGENT_COMM_DIR: root, SET_AGENT_NAME: "watcher" }
+  sac(["register", "nyitott"], env)
+  const r = waitBriefly(["wait", "nyitott"], env)
+  assert.ok(!/could not arm/.test(r.stderr), `warned about a healthy watch: ${r.stderr}`)
 })

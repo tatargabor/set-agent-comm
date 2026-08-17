@@ -779,11 +779,47 @@ try {
       const soon = () => { clearTimeout(quiet); quiet = setTimeout(() => void check(), QUIET_MS) }
 
       await check()                              // what is ALREADY waiting counts as an event
+      const unwatched = []
       for (const room of watched) {
         const dir = store.channelDir(room)
         store.ensureDir(dir)
         // A new participant's file appearing is an event too, so we watch the DIRECTORY.
-        try { watch(dir, soon) } catch { /* the poll below covers it */ }
+        try { watch(dir, soon) } catch (e) { unwatched.push({ room, code: e.code || "unknown" }) }
+      }
+      /**
+       * ⚠ A WATCH THAT COULD NOT BE ARMED SAYS SO — ONCE, AND ON STDERR. This `catch` used to be
+       * empty, with the comment "the poll below covers it". It does cover it, which is exactly
+       * why nobody found out: the watch fell back from ~100 ms to the 5 s poll and NOTHING said
+       * so, in a project whose own diagnostics file opens with the line that a defensive measure
+       * which evaporates in silence is worse than not having taken it.
+       *
+       * Measured 2026-08-17 on this machine, and the failure direction is the counter-intuitive
+       * part: `fs.inotify.max_user_instances` is 128 and 126 were in use, so `fs.watch` threw
+       * EMFILE. Old watchers were untouched — it is every NEWLY armed watch that fails, so the
+       * session somebody has just opened is the one that degrades. Of 50 live `sac wait`
+       * processes, 20 held an instance and 30 were blind on the poll.
+       *
+       * ⚠ STDERR, NEVER STDOUT. Every stdout line of this command is an EVENT: a Claude Code
+       * Monitor turns it into a notification, and a notification that says "your watcher is
+       * slower than usual" would spend a whole turn saying nothing anybody can act on from
+       * inside the session. Stderr reaches the operator and the person running it by hand.
+       *
+       * Once for all the rooms, not once per room: a seat in two rooms would otherwise say it
+       * twice for one cause.
+       */
+      if (unwatched.length) {
+        const rooms = unwatched.map(u => u.room).join(", ")
+        const emfile = unwatched.some(u => u.code === "EMFILE" || u.code === "ENOSPC")
+        console.error(
+          `[set-agent-comm] could not arm the file watcher for ${rooms} ` +
+          `(${[...new Set(unwatched.map(u => u.code))].join(", ")}) — this watch is running on the ` +
+          `5s poll instead, so a message takes up to 5 seconds to reach you rather than about 100ms.` +
+          (emfile
+            ? `\n[set-agent-comm] that code means this machine is out of inotify capacity, not that ` +
+              `anything here is broken. Check it with:\n` +
+              `  cat /proc/sys/fs/inotify/max_user_instances\n` +
+              `  for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -c inotify; done | paste -sd+ | bc`
+            : ""))
       }
       // The safety net. `fs.watch` misses events on some file systems, and a watcher that
       // silently stops looks exactly like a quiet room — the most dangerous false negative here.
