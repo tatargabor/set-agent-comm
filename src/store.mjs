@@ -753,6 +753,69 @@ export function agents() {
   }).sort((x, y) => (x.silentMinutes ?? 1e9) - (y.silentMinutes ?? 1e9))
 }
 
+/**
+ * THE MACHINE-READABLE VIEW — `sac agents --json`, and the only shape another program may bind to.
+ *
+ * ⚠ Added 2026-08-17, asked for by `set-core` while building FleetView. Their words, and they are
+ * the whole justification: without it the screen "would have to read the internal files directly
+ * (registry.json, focus.json) — which means your internal format becomes my contract, and your
+ * next format change silently breaks the surface." That is exactly right, and it is why this is a
+ * hand-written projection rather than `JSON.stringify(agents())`: `agents()` spreads the whole
+ * registry record (`...a`), so shipping it would publish every field this store has ever kept,
+ * including the ones added tomorrow. Everything below is named on purpose. `schema` is how a
+ * reader notices the day that stops being true.
+ *
+ * ⚠ LIVENESS IS A WORD HERE, NOT `true`/`null`/`false`. Inside this file the three-state rule
+ * survives because every call site was written knowing about it; across a process boundary it
+ * would not. `if (seat.live)` collapses "we do not know" into "dead" silently, in the reassuring
+ * direction, and this project has already paid for that once (`consumer-a#f93ef295`, 2026-08-09: 86
+ * minutes of apparent silence from a seat that worked throughout, and a session that addressed
+ * somebody else because of it). Three words force three branches; a nullable boolean does not.
+ *
+ * ⚠ AND `silentMinutes` IS NOT ACTIVITY. It is the age of the last hook or `sac` call, which is a
+ * proxy — `set-core` measured this store reporting "21m silent" for a project whose session log
+ * had been written that same minute, because that project has no `sac install` and so nothing
+ * feeds the heartbeat. `lastWrote` is a real event (the seat appended); `lastSeen` is a check-in.
+ * Anything asking "is it moving right now" should ask the runtime, not this.
+ */
+export const AGENTS_SCHEMA = "sac.agents/1"
+
+const liveness = live => (live === true ? "live" : live === false ? "gone" : "unknown")
+
+export function agentsReport() {
+  return {
+    schema: AGENTS_SCHEMA,
+    generatedAt: now(),
+    agents: agents().map(a => ({
+      agent: a.agent,
+      project: a.project ?? null,
+      host: a.host ?? null,
+      rooms: a.rooms || [],
+      lastSeen: a.lastSeen ?? null,
+      silentMinutes: a.silentMinutes,
+      seats: (a.seats || []).map(s => ({
+        seat: s.writer,
+        session: s.session,
+        liveness: liveness(s.live),
+        lastSeen: s.lastSeen,
+        lastWrote: s.lastWrote,
+        quiet: !!s.quiet,
+        quietUntil: s.quietUntil ?? null,
+        // The declaration, whole — `stale` travels WITH it rather than being applied here, so a
+        // reader can show "they said this, four hours ago" instead of losing the only fact there is.
+        focus: s.focus ? {
+          text: s.focus.text,
+          files: s.focus.files || [],
+          phase: s.focus.phase ?? null,
+          ts: s.focus.ts,
+          ageMinutes: s.focus.ageMinutes,
+          stale: s.focus.stale,
+        } : null,
+      })),
+    })),
+  }
+}
+
 // ── channel ───────────────────────────────────────────────────────────────────
 
 export const channelDir = room => join(CHANNELS, room)
@@ -1400,14 +1463,82 @@ export function firstTime(key) {
  */
 const FOCUS_STALE_MS = 4 * 60 * 60_000
 
-export function setFocus({ agent, text, files }) {
+/**
+ * ⚠ THE PHASE IS DECLARED, NEVER INFERRED — added 2026-08-17 on a measurement from `set-core`,
+ * which asked for it while building a screen of every running agent (FleetView).
+ *
+ * They tried to READ the phase out of the session log first, and published the number: in a
+ * session that spent its whole life on OpenSpec work, the obvious signal — an `/opsx:` slash
+ * command in the log — matched **0 times**. Most work does not start from a slash command. A
+ * guessed phase is therefore wrong exactly when the situation is unusual, and the unusual
+ * situation is the only reason anybody looks at such a screen.
+ *
+ * So it lives here, next to `focus`, because it is the same act: a thing the agent says ABOUT
+ * ITSELF. It gets the same writer, the same staleness rule, and the same fate when it ages out.
+ *
+ * A CLOSED, TINY VOCABULARY, and an unknown word is an ERROR rather than a pass-through. Free
+ * text is what `focus.text` already is; the point of this field is that a program can branch on
+ * it, and a field that admits anything is one a program must go back to guessing about.
+ *
+ * ⚠ THE AXIS IS WHAT AN INTERRUPTION COSTS — not what methodology anybody follows. That is what
+ * makes the list reusable by a project that works differently, and it is why the field belongs in
+ * THIS store at all: whether to spend somebody's turn is the question this project exists to answer.
+ *
+ *   explore  cheap to interrupt, and the direction is still open
+ *   plan     cheap — and this is the moment when influencing it is worth anything
+ *   apply    expensive: a turn spent here costs work in progress
+ *   verify   expensive, and nearly done — whatever you say arrives after the fact
+ *   blocked  PLEASE interrupt: it cannot proceed, and `focus.text` says on what
+ *
+ * A project whose stages are named differently maps onto this by asking "what would interrupting
+ * me right now cost", never "which step of my methodology is this".
+ *
+ * ⚠ THE LIST IS CLOSED ON PURPOSE — recorded 2026-08-17 because `set-core` asked whether it was,
+ * which is the right question to ask before building on it. They proposed a closed core plus a
+ * free-text label beside it. Declined, on their own argument: a label only a person reads is
+ * `focus.text` again, and a label that programs group by is a vocabulary that grows without
+ * anybody deciding to grow it — "the bad case is when it grows quietly", in their words. The
+ * escape hatch is the sentence, which every reader already shows.
+ *
+ * They also asked for a sixth word, `review`, for a long gate-and-code-review stretch. Declined
+ * for the same reason: on the axis above it answers exactly what `verify` answers, so no reader
+ * branches differently on it — and a word that changes no decision turns the list into a taxonomy
+ * of how one project works. That stretch is a sentence: "gates running, 19 minutes in".
+ *
+ * ⚠ IT DOES NOT SURVIVE A RE-DECLARATION. Restate the sentence without `phase` and the phase is
+ * GONE, not carried over. A sentence and a phase declared at different moments is precisely the
+ * lie this field exists to avoid — and "we do not know" is this project's honest default
+ * everywhere else (`seatState`, `silentMinutes`). One word is cheap to say again.
+ *
+ * ⚠ AND IT DOES NOT WAKE ANYBODY. `wakes()` reads `quiet` and nothing else; routing a turn on a
+ * phase would be a delivery change with no measurement behind it. This is for readers.
+ */
+export const PHASES = ["explore", "plan", "apply", "verify", "blocked"]
+
+export function setFocus({ agent, text, files, phase }) {
   if (!agent) throw new Error("focus: `agent` is required")
+  if (phase != null && !PHASES.includes(phase)) {
+    throw new Error(`focus: unknown phase '${phase}' — one of: ${PHASES.join(", ")}`)
+  }
   const all = readJson(FOCUS, {})
+  // `text: undefined` is NOT a clear — the MCP face has drawn that line since the field existed
+  // ("no `text` at all is a QUERY"), and the phase inherits it: naming only the phase re-declares
+  // the standing sentence, which is the common case (the phase turns over, the sentence does not).
+  // The timestamp moves with it, because saying "I am verifying now" IS a fresh declaration of
+  // the whole thing. `text: ""` still clears, as before.
+  if (text === undefined && phase != null) {
+    const prev = all[agent]
+    if (!prev) throw new Error("focus: say what you are working on first — a phase on its own declares nothing")
+    all[agent] = { ...prev, phase, ts: now() }
+    writeJson(FOCUS, all)
+    return { agent, ...all[agent] }
+  }
   if (!text?.trim()) { delete all[agent]; writeJson(FOCUS, all); return { agent, cleared: true } }
   all[agent] = {
     text: text.trim(),
     files: [...new Set((Array.isArray(files) ? files : String(files ?? "").split(","))
       .map(s => String(s).trim()).filter(Boolean))],
+    ...(phase != null && { phase }),
     ts: now(),
   }
   writeJson(FOCUS, all)

@@ -356,6 +356,82 @@ touching what — a broadcast round each time. This answers it with a lookup, an
 the letterbox measures an incoming message against. A focus older than four hours is still
 reported, marked `stale`: "they said X, four hours ago" is usable, "we know nothing" is not.
 
+#### `--phase` — the same declaration, in one word a program can branch on
+
+```bash
+sac focus "the checkout rewrite" --files src/checkout/ --phase plan
+sac focus --phase verify          # the sentence stands, the phase moved on
+```
+
+One of `explore · plan · apply · verify · blocked`, and an unknown word is an error — free text
+is what the sentence already is, and a field that admits anything is one a program has to go back
+to guessing about.
+
+⚠ **The axis is what an interruption costs**, not what methodology anybody follows — that is what
+makes the list usable by a project that works differently, and it is why the field lives here at
+all: whether to spend somebody's turn is the question this project exists to answer.
+
+| | |
+|---|---|
+| `explore` | cheap to interrupt, and the direction is still open |
+| `plan` | cheap — and this is the moment when influencing it is worth anything |
+| `apply` | expensive: a turn spent here costs work in progress |
+| `verify` | expensive, and nearly done — whatever you say arrives after the fact |
+| `blocked` | **please** interrupt: it cannot proceed, and the sentence says on what |
+
+Map a differently-named lifecycle onto it by asking *"what would interrupting me right now
+cost"*, never *"which step of my methodology is this"*.
+
+⚠ **The list is closed on purpose**, recorded here because `set-core` asked — the right question
+to ask before building on it. They proposed a closed core plus a free label beside it; declined,
+on their own argument, that a label only a person reads is the sentence again, and a label
+programs group by is a vocabulary that grows without anybody deciding to grow it. A sixth word,
+`review`, was declined too: on the axis above it answers what `verify` answers, so nothing
+branches differently on it, and a word that changes no decision turns the list into a taxonomy of
+how one project works. Both escape hatches are the sentence, which every reader already shows.
+
+⚠ **It is declared, never inferred**, and the reason is a measurement `set-core` brought on
+2026-08-17 while building a screen of every running agent on the machine. They tried to read the
+phase out of the session log first: in a session that spent its whole life on OpenSpec work, the
+obvious signal — an `/opsx:` slash command — matched **0 times**. Most work does not start from a
+slash command. A guessed phase is therefore wrong exactly when the situation is unusual, and the
+unusual situation is the only reason anybody looks at such a screen. Where nothing was declared,
+nothing is shown; there is no "unknown" badge.
+
+⚠ **It does not survive a re-declaration.** Restate the sentence without `--phase` and the phase
+is gone rather than carried over — a sentence from now and a phase from three hours ago is the
+lie the field exists to avoid. `--phase` on its own re-declares the standing sentence, which is
+the cheap way to keep it true. And it wakes nobody: `wakes()` reads `quiet` and nothing else.
+
+#### `sac agents --json` — the contract, so the file layout is not one
+
+```bash
+sac agents --json     # { "schema": "sac.agents/1", "generatedAt": …, "agents": [ … ] }
+```
+
+Asked for on the same day, and the justification is theirs: without it a surface "would have to
+read the internal files directly (`registry.json`, `focus.json`) — which means your internal
+format becomes my contract, and your next format change silently breaks the surface." Until then
+`--json` was **silently swallowed** and the human tree printed, which is the same failure class as
+`sac prune --dry` running the real prune (2026-08-08); an unrecognised flag on `agents` now stops.
+
+Two things about the shape, both deliberate:
+
+- It is a **hand-written projection**, not `JSON.stringify(agents())` — that spreads the whole
+  registry record, so shipping it would publish every field this store has ever kept, including
+  the ones added tomorrow. A test pins the exact key set: a new field reaching the wire is a
+  failure, not a convenience.
+- **Liveness crosses as a word** — `live` · `unknown` · `gone` — never `true`/`null`/`false`.
+  Inside this repo the three-state rule survives because every call site knows about it; across a
+  process boundary it would not, and `if (seat.live)` reads "we do not know" as "dead" silently,
+  in the reassuring direction. That collapse cost this project 86 minutes of false silence once
+  already. Three words force three branches.
+
+`silentMinutes` is in there and is **not** activity: it is the age of the last hook or `sac` call.
+`set-core` measured this store reporting "21m silent" for a project whose session log had been
+written that same minute — it has no `sac install`, so nothing feeds its heartbeat. Ask the
+runtime what is moving right now; ask this what was said, by whom, to whom.
+
 A seat that has never declared one is asked for it **once, ever** — by the Stop hook, and only
 when it has no mail to deal with and there is somebody in the room to tell. Once, because a
 reminder that returns every turn is a reminder that gets ignored, and it would be the second
@@ -490,11 +566,12 @@ saying something new.
 sac install <room>[,…] [--dry-run]  the hooks + the skill into THIS PROJECT's settings.json —
                                     the rooms EVERY session of it starts in. It ADDS to that
                                     list; `--replace` cuts it down, and says what it took
-sac agents                          who exists, who is alive
+sac agents [--json]                 who exists, who is alive; --json is the versioned machine view
 sac rooms                           the rooms — and how far each one reaches
 sac send <room> <type> "text"       entry (append)
      [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
 sac focus ["what you are on"]       declare your scope [--files a,b]; no args reads it back
+     [--phase explore|plan|apply|verify|blocked]   … and where you are in it, machine-readably
 sac inbox <room>                    new messages from others (marks them read)
 sac peek <room>                     the same, without moving the cursor
 sac unread <room> [n]               make the last n messages unread again

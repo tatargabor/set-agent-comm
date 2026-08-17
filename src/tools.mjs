@@ -33,12 +33,22 @@ export const TOOL_DEFS = [
       "the others read it with `agents` instead of asking you, and the watcher that decides " +
       "whether an incoming message should interrupt you measures it against this. " +
       "Set it when you start a piece of work and when you switch; call it with no arguments to " +
-      "read back what you last declared. An empty `text` clears it.",
+      "read back what you last declared. An empty `text` clears it. " +
+      "`phase` is the same declaration in one machine-readable word, for the screens that show " +
+      "every running agent at once — it is NEVER guessed from what you do, so if you do not say " +
+      "it, nothing shows it. It does NOT survive a re-declaration: send `text` again without " +
+      "`phase` and the phase is gone, because a sentence and a phase from two different moments " +
+      "is the lie the field exists to avoid. Sending `phase` ALONE re-declares the standing " +
+      "sentence with the new phase, which is the cheap way to keep it true.",
     inputSchema: S({
       text: { type: "string", description: "One sentence: what you are doing now" },
       files: {
         type: "array", items: { type: "string" },
         description: "The paths you are working in — this is what tells a sibling session to stay out",
+      },
+      phase: {
+        type: "string", enum: store.PHASES,
+        description: "Where you are in it — declared, never inferred. Omit it rather than guess.",
       },
     }),
   },
@@ -186,9 +196,11 @@ export function createMcpServer(identify) {
         case "focus":
           // No `text` at all is a QUERY, not a clear — clearing is `text: ""`. An agent calling
           // `focus` to see what it declared may not thereby erase it.
-          out = a.text === undefined
+          // …and a `phase` on its own is a DECLARATION, not a query: it re-states the standing
+          // sentence with a new phase. Only a call with neither reads.
+          out = a.text === undefined && a.phase === undefined
             ? (store.getFocus(agent) || { agent, focus: null })
-            : store.setFocus({ agent, text: a.text, files: a.files })
+            : store.setFocus({ agent, text: a.text, files: a.files, phase: a.phase })
           break
         case "rooms": {
           // Local AND invited: a room you hold a token for must be listed before its first

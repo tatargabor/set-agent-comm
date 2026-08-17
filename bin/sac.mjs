@@ -56,11 +56,11 @@ for (const name of Object.keys(process.env)) {
  * room in the live store. A help flag that is silently a positional argument is worse than none.
  */
 const USAGE = {
-  agents: "sac agents                          who exists, who is alive",
+  agents: "sac agents [--json]                 who exists, who is alive · --json is the versioned machine view",
   rooms: "sac rooms                           the rooms — and how far each one reaches",
   admin: "sac admin                           the operator's live view (Tab panes · ↵ open · / search · ? keys)",
   send: 'sac send <room> <type> "text" [--to <seat|project>[,…]] [--re <ts>]',
-  focus: 'sac focus ["what you are on"] [--files a,b]   · no args reads it back',
+  focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back',
   inbox: "sac inbox <room>                    new messages from others (marks them read)",
   peek: "sac peek <room>                     the same, without moving the cursor",
   unread: "sac unread <room> [n]               make the last n messages unread again",
@@ -133,6 +133,21 @@ try {
     }
 
     case "agents": {
+      /**
+       * ⚠ AN UNRECOGNISED FLAG STOPS HERE, and `--json` is a real one. Reported by `set-core`
+       * 2026-08-17: `sac agents --json` printed the human tree and swallowed the flag without a
+       * word, so the surface they were building went off and read `registry.json` and `focus.json`
+       * by hand instead — making this store's on-disk layout somebody else's contract by accident.
+       *
+       * Silently ignoring a flag is a failure class this CLI has already paid for once, on the
+       * command where it was worst: `sac prune --dry` ran the real prune on the live registry and
+       * forgot 261 seats (2026-08-08). Same rule, applied here.
+       */
+      const unknown = rest.find(a => a.startsWith("-") && a !== "--json")
+      if (unknown) throw new Error(`agents: unknown flag '${unknown}' — the only one is --json`)
+      // The versioned projection, never the raw registry: see `agentsReport` for why the shape is
+      // hand-written and why liveness is a word rather than a nullable boolean.
+      if (rest.includes("--json")) { json(store.agentsReport()); break }
       const list = store.agents()
       if (!list.length) { console.log("(the registry is empty)"); break }
       for (const a of list) {
@@ -164,7 +179,11 @@ try {
           // What that session says it is doing — the answer to "who is in these files", without
           // anyone having to ask it in the room. `(stale)` because a four-hour-old claim is worth
           // reporting and worth doubting, and silently dropping it would leave nothing at all.
-          if (x.focus) console.log(`  ${i === live.length - 1 ? " " : "│"}   ↳ ${x.focus.text}` +
+          // The phase leads the line when it was declared, and is simply absent when it was not —
+          // there is no "unknown" badge, because a missing declaration is not a state a reader
+          // should have to look at. It ages out with the sentence it was declared alongside.
+          if (x.focus) console.log(`  ${i === live.length - 1 ? " " : "│"}   ↳ ` +
+            (x.focus.phase ? `${x.focus.phase} · ` : "") + x.focus.text +
             (x.focus.files.length ? `  [${x.focus.files.join(", ")}]` : "") +
             (x.focus.stale ? `  (stale — ${x.focus.ageMinutes}m old)` : ""))
         })
@@ -274,9 +293,20 @@ try {
       // `sac focus` alone reports; with text it declares. The declaration is what the letterbox
       // reasons about AND what `agents` shows the others — the scope negotiation that cost 46
       // broadcast entries in two days becomes a field they can read.
-      const { value: files, rest: args } = takeFlag(rest, "--files")
-      if (!args.length) { json(store.getFocus(ME) || { agent: ME, focus: null }); break }
-      json(store.setFocus({ agent: ME, text: args.join(" "), files }))
+      const { value: files, rest: afterFiles } = takeFlag(rest, "--files")
+      const { value: phase, rest: afterPhase } = takeFlag(afterFiles, "--phase")
+      // `--json` is accepted and does nothing: this command has always printed JSON, and a caller
+      // that spells the flag out deserves the same answer rather than an error about a flag that
+      // describes what it already does. Anything else stops — same rule as `agents` above.
+      const args = afterPhase.filter(a => a !== "--json")
+      const unknown = args.find(a => a.startsWith("--"))
+      if (unknown) throw new Error(`focus: unknown flag '${unknown}' — usage: ${USAGE.focus}`)
+      // Nothing at all is a READ. A `--phase` on its own is not: it re-declares the standing
+      // sentence with a new phase, which is the common case — the phase turns over several times
+      // inside one piece of work, and making somebody retype the sentence to say so means the
+      // phase stops being said at all.
+      if (!args.length && phase == null) { json(store.getFocus(ME) || { agent: ME, focus: null }); break }
+      json(store.setFocus({ agent: ME, text: args.length ? args.join(" ") : undefined, files, phase }))
       break
     }
     case "prune": {
@@ -909,7 +939,7 @@ try {
       console.log(`set-agent-comm — messaging between agents on one machine.
 agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   ·   store: ${store.ROOT}
 
-  sac agents                          who exists, who is alive
+  sac agents [--json]                 who exists, who is alive · --json: the versioned machine view
   sac rooms                           rooms — and how far each one reaches
   sac join <room> [--create]          THIS SESSION enters a room — membership is per seat
   sac part <room>                     …and leaves it; it sticks, the hook will not put you back
@@ -917,6 +947,7 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
        [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
   sac focus ["what you are on"]       declare your scope [--files a,b] — read it back with no args
+       [--phase ${store.PHASES.join("|")}]   … and where you are in it, in one machine-readable word
   sac inbox <room>                    new messages from others (marks them read)
   sac peek <room>                     the same, without moving the cursor
   sac unread <room> [n]               make the last n messages unread again
