@@ -1609,6 +1609,92 @@ export function knownRooms() {
 }
 
 /**
+ * ⚠ A ROOM IS RETIRED BY MOVING IT ASIDE, NEVER BY DELETING IT — added 2026-08-17, when a survey
+ * of the live store found 18 rooms of which 12 had nothing reachable in them: four with zero
+ * entries that this project's OWN `install.test.mjs` had created by pointing at the live store,
+ * one left over from relay testing, four finished pieces of work, and three whose projects were
+ * still wired to them while nobody was there.
+ *
+ * A room full of finished work is HISTORY, not rubbish, and this repo's first invariant is that
+ * the message file is the log — `prune` has always been registry-only for exactly this reason.
+ * So retiring one is a rename: `channels/<room>` becomes `channels/.archive/<room>`, and it is
+ * gone from every list because `rooms()` already skips dot-prefixed directories. The decision
+ * stays reversible by one command, which is what makes it safe to make at all.
+ *
+ * ⚠ IT REFUSES WHILE SOMEBODY IS STILL IN THERE. A live seat's room disappearing under it is the
+ * one way this could lose a message rather than shelve one, and "nobody has written for days" is
+ * not the same claim as "nobody is there" — `liveSeats` is the rule the rest of the bus reads,
+ * so it is the rule here. `--force` exists because an operator may know better; the default may not.
+ *
+ * ⚠ AND IT DOES NOT UNWIRE THE PROJECT. `SET_AGENT_ROOM` lives in a project's `.claude/settings.json`,
+ * which this store cannot see and must not edit; the SessionStart hook re-opens whatever it names.
+ * Archiving a room a project still points at therefore buys nothing until the settings change too,
+ * so the caller is told the room may come back rather than left to discover it tomorrow.
+ */
+const ARCHIVE = join(CHANNELS, ".archive")
+
+/** The room name reaches the file system, so it gets the same treatment as a writer name. */
+function assertSafeRoom(room) {
+  const r = String(room ?? "")
+  const bad = !r || r.length > 200 || r.startsWith(".") || /[\\/ -]/.test(r)
+  if (!bad && dirname(join(CHANNELS, r)) === CHANNELS) return
+  throw new Error(`unsafe room name '${r.slice(0, 80)}' — it would not stay inside the store`)
+}
+
+export function archivedRooms() {
+  try { return readdirSync(ARCHIVE).filter(d => !d.startsWith(".")).sort() } catch { return [] }
+}
+
+export function archiveRoom(room, { force = false } = {}) {
+  assertSafeRoom(room)
+  if (!roomExists(room)) throw new Error(`archive: there is no room called '${room}'`)
+  const live = liveSeats(room)
+  if (live.length && !force) {
+    throw new Error(`archive: '${room}' still has ${live.length} reachable seat` +
+      `${live.length > 1 ? "s" : ""} in it (${live.join(", ")}) — they would lose the room under ` +
+      `them. Use --force if that is what you mean.`)
+  }
+  ensureDir(ARCHIVE)
+  const from = channelDir(room)
+  const to = join(ARCHIVE, room)
+  if (existsSync(to)) throw new Error(`archive: '${room}' is already archived — restore it first`)
+  let entries = 0
+  if (existsSync(from)) {
+    for (const path of busFiles(room)) {
+      entries += (readFileSync(path, "utf8").match(/^## /gm) || []).length
+    }
+    renameSync(from, to)
+  }
+  const all = readJson(ROOMS_FILE, {})
+  const declared = !!all[room]
+  delete all[room]
+  writeJson(ROOMS_FILE, all)
+  // The read cursors go with it: they are keyed `<room>::<seat>` and mean nothing once the room
+  // is off the list. They are restored from the files themselves if the room ever comes back.
+  const cursors = readJson(CURSORS, {})
+  let dropped = 0
+  for (const key of Object.keys(cursors)) {
+    if (key === `${room}::` || key.startsWith(`${room}::`)) { delete cursors[key]; dropped++ }
+  }
+  writeJson(CURSORS, cursors)
+  return { room, archived: true, entries, declared, cursorsDropped: dropped, at: to }
+}
+
+export function restoreRoom(room) {
+  assertSafeRoom(room)
+  const from = join(ARCHIVE, room)
+  if (!existsSync(from)) throw new Error(`restore: '${room}' is not in the archive`)
+  if (existsSync(channelDir(room))) throw new Error(`restore: a live room called '${room}' already exists`)
+  renameSync(from, channelDir(room))
+  // Declared again, because it exists again on purpose. The original creator is not recoverable —
+  // saying so beats inventing one.
+  const all = readJson(ROOMS_FILE, {})
+  all[room] = { by: null, at: now(), restored: true }
+  writeJson(ROOMS_FILE, all)
+  return { room, restored: true }
+}
+
+/**
  * The rooms this SEAT is in. `null` means "this seat has never been seeded", which is different
  * from "this seat is in no rooms" (`[]`) — the first takes the configured default, the second is
  * a person's decision to leave, and collapsing them would silently undo `part` on the next hook.

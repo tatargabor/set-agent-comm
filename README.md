@@ -568,6 +568,8 @@ sac install <room>[,…] [--dry-run]  the hooks + the skill into THIS PROJECT's 
                                     list; `--replace` cuts it down, and says what it took
 sac agents [--json]                 who exists, who is alive; --json is the versioned machine view
 sac rooms                           the rooms — and how far each one reaches
+     --archive <room> [--force]     retire one: moved aside, out of every list, reversible
+     --restore <room> | --archived  …put it back, or see what has been retired
 sac send <room> <type> "text"       entry (append)
      [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
 sac focus ["what you are on"]       declare your scope [--files a,b]; no args reads it back
@@ -626,6 +628,38 @@ hooks. Three things changed, and the fourth is the one this table is about:
   reads) and names what is merely reachable by project name separately. It used to print
   `participants`, which walks the agent-level room list: fourteen seats listed under a room that
   held one, erring in the reassuring direction.
+
+### Retiring a room — a rename, never a delete
+
+```bash
+sac rooms --archive dmu-deck        # out of every list, and reversible
+sac rooms --archived                # what has been retired
+sac rooms --restore dmu-deck        # …and back, entries and all
+```
+
+⚠ Measured on the live store 2026-08-17: **18 rooms, 12 of them with nothing reachable in them.**
+Four had zero entries and had been created by this project's own `install.test.mjs` pointing at
+the live store; one was left from relay testing; four were finished pieces of work; and three had
+projects still wired to them while nobody was there.
+
+A room full of finished work is **history, not rubbish**, and the first invariant here is that the
+message file is the log — which is why `prune` has always been registry-only. So retiring one is a
+rename: `channels/<room>` becomes `channels/.archive/<room>`, and it leaves every list for free,
+because `rooms()` already skips dot-prefixed directories. Being reversible by one command is what
+makes the decision safe to take at all. The room's read cursors go with it; nothing else moves.
+
+Two refusals, both about not losing something rather than shelving it:
+
+- **A room with a reachable seat in it says no.** Losing the room under a live session is the one
+  way this could drop a message. "Nobody has written for days" is not the claim "nobody is there",
+  so the rule is `liveSeats` — the same one the rest of the bus reads. `--force` is for the
+  operator who knows better than the default.
+- **A room already in the archive is not overwritten** by a second one of the same name.
+
+⚠ **It cannot unwire the project.** `SET_AGENT_ROOM` lives in a project's `.claude/settings.json`,
+which this store cannot see and must not edit — and the SessionStart hook re-opens whatever it
+names. Archiving a room a project still points at buys nothing until that file changes too, so
+the command says so rather than letting you find out the next morning.
 
 And one the report did not ask for, found while answering it: **membership lived in two files and
 the others only read one of them.** `members.json` is the seat's own book; the roster everybody

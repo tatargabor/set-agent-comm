@@ -269,3 +269,110 @@ test("REGRESSION: quiet silences the WATCHER, not the Stop hook — the two path
   assert.ok(stopHook.unreadWaking >= 1, "…and count it, or the hook never blocks")
   store.setQuiet(seatA, { quiet: false })
 })
+
+// ── retiring a room ───────────────────────────────────────────────────────────
+//
+// ⚠ Added 2026-08-17 from a survey of the live store: 18 rooms, and 12 of them had nothing
+// reachable in them — four with ZERO entries that this project's own `install.test.mjs` created
+// by pointing at the live store, one left from relay testing, four finished pieces of work, and
+// three whose projects were still wired to them while nobody was there.
+//
+// The mechanism is a rename, not a delete, and these tests are mostly about that distinction:
+// a room full of finished work is history, and the first invariant of this store is that the
+// message file is the log. `prune` has been registry-only since the beginning for the same reason.
+
+const zart = "regi-projekt#dddd4444"
+const olvaso = "olvaso-projekt#eeee5555"
+
+/**
+ * Close the window behind a seat. `send` REGISTERS its writer (store.mjs, in `send`), so any seat
+ * that has ever written is in the roster — in this process, with this process's pid, therefore
+ * alive. The rooms worth archiving are the ones whose sessions ended days ago, so the fixture has
+ * to say that: no live pid, and silent past `SEAT_TTL_MS`. Without this the tests would only ever
+ * exercise the refusal path, and the normal one would be untested.
+ */
+function closeWindow(seat) {
+  const file = join(ROOT, "registry.json")
+  const reg = JSON.parse(readFileSync(file, "utf8"))
+  const old = new Date(Date.now() - 3 * 60 * 60_000).toISOString()
+  for (const a of Object.values(reg.agents || {})) {
+    const s = (a.seats || {})[seat]
+    if (s) { s.writers = {}; s.lastSeen = old; s.owner = 999999 }
+  }
+  writeFileSync(file, JSON.stringify(reg, null, 2))
+}
+
+test("archiving MOVES a room aside — every entry survives, and it leaves every list", () => {
+  store.createRoom("regi", zart)
+  store.send({ room: "regi", from: zart, type: "FACT", text: "ez maradjon meg" })
+  closeWindow(zart)
+  const r = store.archiveRoom("regi")
+  assert.equal(r.archived, true)
+  assert.equal(r.entries, 1, "it must report what it shelved, not just that it did something")
+  assert.ok(!store.knownRooms().includes("regi"), "an archived room is still on the list")
+  assert.ok(!store.roomExists("regi"), "…and still counts as existing, so `send` would work")
+  assert.deepEqual(store.archivedRooms(), ["regi"])
+  // THE LOG SURVIVED. This is the whole difference between archiving and deleting.
+  const kept = readFileSync(join(ROOT, "channels", ".archive", "regi", `${zart}.md`), "utf8")
+  assert.match(kept, /ez maradjon meg/)
+})
+
+test("…and restoring puts it back, entries and all", () => {
+  store.restoreRoom("regi")
+  assert.ok(store.roomExists("regi"), "the room did not come back")
+  assert.deepEqual(store.archivedRooms(), [])
+  const h = store.history({ room: "regi" })
+  assert.equal(h.messages.length, 1, "the history did not survive the round trip")
+  assert.match(h.messages[0].text, /ez maradjon meg/)
+  store.archiveRoom("regi")   // leave the store as the tests below expect it
+})
+
+test("a room with a reachable seat in it REFUSES to be archived", () => {
+  // Losing the room under a live session is the one way this could lose a message rather than
+  // shelve one. "Nobody has written for days" is not the same claim as "nobody is there", so the
+  // rule is `liveSeats` — the same one the rest of the bus reads.
+  store.createRoom("lakott", seatA)
+  store.send({ room: "lakott", from: seatA, type: "FACT", text: "itt vagyok" })
+  assert.ok(store.liveSeats("lakott").includes(seatA), "the fixture is wrong, nobody is in the room")
+  assert.throws(() => store.archiveRoom("lakott"), /still has 1 reachable seat/)
+  assert.ok(store.roomExists("lakott"), "it refused and archived it anyway")
+})
+
+test("…unless the operator says --force, who may know better than the default", () => {
+  const r = store.archiveRoom("lakott", { force: true })
+  assert.equal(r.archived, true)
+  assert.ok(!store.roomExists("lakott"))
+})
+
+test("the read cursors go with the room, and only that room's", () => {
+  store.createRoom("kurzoros", zart)
+  store.createRoom("marad", zart)
+  store.send({ room: "kurzoros", from: zart, type: "FACT", text: "egy" })
+  store.send({ room: "marad", from: zart, type: "FACT", text: "ketto" })
+  store.inbox({ room: "kurzoros", agent: olvaso })
+  store.inbox({ room: "marad", agent: olvaso })
+  closeWindow(zart)
+  closeWindow(olvaso)
+  const before = Object.keys(JSON.parse(readFileSync(join(ROOT, "cursors.json"), "utf8")))
+  assert.ok(before.some(k => k.startsWith("kurzoros::")), "the fixture never wrote a cursor")
+  const r = store.archiveRoom("kurzoros")
+  assert.ok(r.cursorsDropped >= 1, "the cursors were left pointing at a room that is gone")
+  const after = Object.keys(JSON.parse(readFileSync(join(ROOT, "cursors.json"), "utf8")))
+  assert.ok(!after.some(k => k.startsWith("kurzoros::")), "a cursor outlived its room")
+  assert.ok(after.some(k => k.startsWith("marad::")),
+    "it took another room's cursors with it — the prefix match is too loose")
+})
+
+test("a room that never existed cannot be archived, and one already archived is not clobbered", () => {
+  assert.throws(() => store.archiveRoom("nincs-ilyen"), /there is no room called/)
+  store.createRoom("kurzoros", zart)          // the same NAME, a new and empty room
+  assert.throws(() => store.archiveRoom("kurzoros"), /already archived/,
+    "the second archive would have overwritten the first one's log")
+})
+
+test("a room name that would escape the store is refused", () => {
+  // The name reaches the file system, so it gets the same treatment as a writer name.
+  for (const bad of ["../elsewhere", "a/b", ".hidden", ""]) {
+    assert.throws(() => store.archiveRoom(bad), /unsafe room name|there is no room/)
+  }
+})

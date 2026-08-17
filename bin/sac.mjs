@@ -57,7 +57,7 @@ for (const name of Object.keys(process.env)) {
  */
 const USAGE = {
   agents: "sac agents [--json]                 who exists, who is alive · --json is the versioned machine view",
-  rooms: "sac rooms                           the rooms — and how far each one reaches",
+  rooms: "sac rooms [--archived] | --archive <room> [--force] | --restore <room>   the rooms, and how far each reaches",
   admin: "sac admin                           the operator's live view (Tab panes · ↵ open · / search · ? keys)",
   send: 'sac send <room> <type> "text" [--to <seat|project>[,…]] [--re <ts>]',
   focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back',
@@ -191,6 +191,32 @@ try {
       break
     }
     case "rooms": {
+      /**
+       * Retiring a room lives HERE rather than in a command of its own, because the question it
+       * answers is the one this listing raises: which of these is still a room and which is just
+       * a directory somebody's test left behind. Measured on the live store 2026-08-17 — 18
+       * rooms, 12 of them with nothing reachable in them.
+       */
+      const { value: toArchive, rest: afterArchive } = takeFlag(rest, "--archive")
+      const { value: toRestore, rest: afterRestore } = takeFlag(afterArchive, "--restore")
+      const force = afterRestore.includes("--force")
+      const listArchived = afterRestore.includes("--archived")
+      const unknownFlag = afterRestore.find(a => a.startsWith("-") && a !== "--force" && a !== "--archived")
+      if (unknownFlag) throw new Error(`rooms: unknown flag '${unknownFlag}' — usage: ${USAGE.rooms}`)
+      if (toArchive) {
+        const r = store.archiveRoom(toArchive, { force })
+        json({ ...r, note: "it is out of every list and reversible with `sac rooms --restore " +
+          `${toArchive}\`. If a project's settings.json still names it, the SessionStart hook ` +
+          "will open it again — the store cannot see that file." })
+        break
+      }
+      if (toRestore) { json(store.restoreRoom(toRestore)); break }
+      if (listArchived) {
+        const arch = store.archivedRooms()
+        if (!arch.length) { console.log("(nothing is archived)"); break }
+        for (const r of arch) console.log(`${r.padEnd(24)} archived   restore: sac rooms --restore ${r}`)
+        break
+      }
       // Where each room REACHES, not just its name — a room you were invited to is listed
       // before its first message, and a local one says plainly that it stops at this machine.
       const { readConfig } = await import("../src/bridge.mjs")
@@ -977,6 +1003,8 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
 
   sac agents [--json]                 who exists, who is alive · --json: the versioned machine view
   sac rooms                           rooms — and how far each one reaches
+       --archive <room> [--force]     retire one: moved aside, out of every list, reversible
+       --restore <room> | --archived  …put it back, or see what has been retired
   sac join <room> [--create]          THIS SESSION enters a room — membership is per seat
   sac part <room>                     …and leaves it; it sticks, the hook will not put you back
   sac admin                           full-screen: channels, WHO IS BEHIND on reading, live flow
