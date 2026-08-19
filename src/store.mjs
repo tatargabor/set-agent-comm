@@ -286,8 +286,16 @@ export function ensureDir(dir) {
 // ── atomic JSON write ─────────────────────────────────────────────────────────
 // tmp → fsync → rename. On a crash `writeFileSync` leaves truncated JSON in the target file,
 // and from then on the registry is unreadable — a pattern borrowed from AMQ.
-/** `writeJson`, then take the file out of everyone else's reach. See `HTTP_TOKENS`. */
-function writeSecret(path, value) {
+/**
+ * `writeJson`, then take the file out of everyone else's reach. See `HTTP_TOKENS`.
+ *
+ * ⚠ EXPORTED so `bridge.mjs` writes `relays.json` through it too. It used to have its own plain
+ * `writeFileSync`, and on 2026-08-19 that file was found CORRUPT: a complete short document
+ * followed by the tail of a longer one, i.e. two processes writing it at the same moment. Every
+ * `sac wait` bridge loop writes the cursor back after each pull, and eight of them were running.
+ * `writeJson` is tmp + fsync + rename, which is why nothing else in this store has ever done that.
+ */
+export function writeSecret(path, value) {
   writeJson(path, value)
   try { chmodSync(path, 0o600) } catch { /* best effort: a filesystem may have no modes */ }
 }

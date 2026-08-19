@@ -9,25 +9,60 @@
 // The local log stays the source of truth. `send` writes locally first and uploads after, so a
 // dead relay is a delay, never a lost message: the outbox cursor picks it up on the next push.
 
-import { readFileSync, writeFileSync, chmodSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { hostname } from "node:os"
 import { createHash } from "node:crypto"
-import { ROOT, busFiles, busFile, history, ingest, parseRooms, parseTo, ensureDir } from "./store.mjs"
+import { ROOT, busFiles, busFile, history, ingest, parseRooms, parseTo, ensureDir,
+         writeSecret } from "./store.mjs"
 import { encrypt, decrypt, entryAad } from "./crypto.mjs"
 
 const CONFIG = join(ROOT, "relays.json")
 
+/**
+ * ⚠ A CORRUPT CONFIG IS NOT AN ABSENT ONE, and until 2026-08-19 this function could not tell them
+ * apart: a parse error returned `{ rooms: {} }`, so `sac relay status` said "(none configured)"
+ * about a 1961-byte file that was right there. The remote leg had been dead and silent for eleven
+ * days on that account.
+ *
+ * ⚠ AND THE FALLBACK WAS THEN WRITTEN BACK. `save()` runs after every pull, in every `sac wait`:
+ * read the config, patch one cursor, write it out. Reading a broken file as "no rooms" therefore
+ * PERSISTED the emptiness — url, device token and room key for three bridged rooms, gone, because
+ * a READ failed. That is the defect worth naming: not the corruption, the cascade.
+ *
+ * So the broken state is now carried in the value (`broken`), never thrown — `pushReport` and the
+ * SessionStart hook must not fail a local `send` because a relay file is unreadable — and
+ * `writeConfig` REFUSES to persist a config that came from a broken read.
+ */
 export const readConfig = () => {
-  try { return JSON.parse(readFileSync(CONFIG, "utf8")) } catch { return { rooms: {} } }
+  let raw
+  try { raw = readFileSync(CONFIG, "utf8") } catch { return { rooms: {} } }   // absent: a fresh one
+  try {
+    const cfg = JSON.parse(raw)
+    return cfg && typeof cfg === "object" ? { rooms: {}, ...cfg } : { rooms: {}, broken: "not an object" }
+  } catch (e) {
+    return { rooms: {}, broken: e.message }
+  }
 }
 
 export function writeConfig(cfg) {
+  // The one guard that turns a read failure back into a read failure. Anything that patches the
+  // config reads it first, so this is where the whole class of "overwrote it with the fallback"
+  // has to be stopped — at the write, not at each caller.
+  if (cfg?.broken) throw new Error(
+    `relays.json is unreadable (${cfg.broken}) and will NOT be overwritten — that is how the ` +
+    `device tokens and room keys were lost once already. Move ${CONFIG} aside to start over, ` +
+    `or repair it by hand; nothing here will touch it meanwhile.`)
   ensureDir(ROOT)
-  writeFileSync(CONFIG, JSON.stringify(cfg, null, 2) + "\n")
-  // It holds device tokens and room keys. Anyone who can read this file can post as us and
-  // decrypt the room, so it is not world-readable — the store's other files are harmless.
-  try { chmodSync(CONFIG, 0o600) } catch { /* best effort, e.g. on a filesystem without modes */ }
+  // tmp + fsync + rename, and mode 600: it holds device tokens and room keys, and it is written
+  // by every bridge loop on the machine. See `store.writeSecret`.
+  writeSecret(CONFIG, cfg)
+}
+
+/** What `sac relay status` needs to tell the truth: absent, broken, or configured. */
+export function configState() {
+  const cfg = readConfig()
+  return cfg.broken ? { state: "broken", why: cfg.broken, path: CONFIG } : { state: "ok", cfg }
 }
 
 /**
@@ -263,6 +298,11 @@ export async function pull({ room, wait = 25, log = () => {} }) {
 
 function save(room, patch) {
   const cfg = readConfig()
+  // ⚠ NEVER throws from here: this runs at the end of every pull, inside `sac wait`, and a relay
+  // file somebody's editor mangled may not take the watch down with it. It simply declines to
+  // write — the cursor is re-derived from the relay on the next pull, so the cost is a repeat,
+  // not a loss.
+  if (cfg.broken) return
   cfg.rooms[room] = { ...cfg.rooms[room], ...patch }
   writeConfig(cfg)
 }

@@ -417,6 +417,19 @@ try {
         break
       }
       if (sub === "status" || !sub) {
+        // ⚠ "(none configured)" was said about a 1961-byte file that was right there, unreadable —
+        // for eleven days, 2026-08-19. A broken config and an absent one are different problems
+        // with different fixes, and this is the screen somebody checks when the remote leg is
+        // quiet. See `bridge.readConfig`.
+        if (cfg.broken) {
+          console.log(`relay:  ⚠ CONFIG UNREADABLE — ${cfg.broken}`)
+          console.log(`        ${join(store.ROOT, "relays.json")}`)
+          console.log(`        Nothing is bridged, and nothing will overwrite it while it is like ` +
+            `this. Move it aside to start over (\`sac relay use\` + \`sac join sac-join:…\` again), ` +
+            `or repair it by hand — the device tokens and room keys are in there.`)
+          console.log(`device: ${bridge.deviceName()}`)
+          break
+        }
         console.log(`relay:  ${cfg.relay?.url || "(none configured)"}`)
         console.log(`device: ${bridge.deviceName()}`)
         for (const [room, r] of Object.entries(cfg.rooms || {}))

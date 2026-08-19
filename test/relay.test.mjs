@@ -5,11 +5,11 @@
 // file system — the same "measure the result, not the call" rule as the rest of the suite.
 import { test, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs"
+import { mkdtempSync, rmSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SAC = join(HERE, "..", "bin", "sac.mjs")
@@ -265,4 +265,36 @@ test("A TOKEN IS BOUND TO ITS ROOM — it cannot reach another one", async () =>
   const read = await fetch(`http://127.0.0.1:${port}/rooms/${other}/entries?after=0&wait=0`,
     { headers: { authorization: `Bearer ${cfg.token}` } })
   assert.equal(read.status, 403, "a token READ a room it was not issued for")
+})
+
+// ── the config file itself: a read failure may not become data loss ──────────
+//
+// ⚠ Measured on the live store, 2026-08-19: `relays.json` held a complete SHORT json document
+// followed by the tail of a longer one — two processes writing it at the same moment, through a
+// plain `writeFileSync` while every other file in this store goes through tmp + fsync + rename.
+// Eight `sac wait` processes were running, and each one writes the cursor back after every pull.
+//
+// The corruption cost eleven days of silence. The CASCADE cost the credentials: `readConfig`
+// answered a parse error with `{ rooms: {} }`, `save()` patched that and wrote it out, and the
+// relay url, the device token and the room keys for three bridged rooms were gone — because a
+// READ failed.
+test("a corrupt relays.json is reported as corrupt, not as 'no relay configured'", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sac-cfgs-"))
+  writeFileSync(join(dir, "relays.json"), '{"rooms":{}}\nleftovers of a longer document')
+  const r = spawnSync(process.execPath, [SAC, "relay", "status"],
+    { env: { ...process.env, SET_AGENT_COMM_DIR: dir }, encoding: "utf8" })
+  assert.match(r.stdout, /CONFIG UNREADABLE/)
+  assert.doesNotMatch(r.stdout, /none configured/, "a broken config was reported as an absent one")
+})
+
+test("…and NOTHING overwrites it while it is broken — that is how the keys were lost", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sac-cfgw-"))
+  const path = join(dir, "relays.json")
+  const wreck = '{"rooms":{}}\nleftovers of a longer document'
+  writeFileSync(path, wreck)
+  process.env.SET_AGENT_COMM_DIR = dir
+  const b = await import(`../src/bridge.mjs?cfgguard=${Date.now()}`)
+  assert.equal(b.configState().state, "broken")
+  assert.throws(() => b.writeConfig(b.readConfig()), /will NOT be overwritten/)
+  assert.equal(readFileSync(path, "utf8"), wreck, "the broken file was rewritten anyway")
 })

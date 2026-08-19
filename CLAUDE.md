@@ -233,6 +233,10 @@ collapsing them would hide the one number that says whether it earns its cost.
      onto the four types. That Hungarian is DATA — it exists to keep reading what older senders
      wrote — and it is the only Hungarian string literal in anything shipped (measured 2026-08-19).
 
+  **Commit messages are English too** — decided by Gábor 2026-08-19, for every `set-*` repo, on the
+  ground that a commit message goes into the repo and the repo is public. History is not rewritten;
+  the rule starts from that day. (This repo was already there: 40 of the last 40 are English.)
+
   ⚠ **Translate a file and its tests in the SAME commit, and say in the message what was left.**
   Measured on set-core the same day: one screen's Hungarian UI strings were translated with no i18n
   layer under them, six unit tests asserted on those literals directly, and 15 tests failed — all
