@@ -91,13 +91,36 @@ try {
   const both = await connect("web-app", `${ROOM},design`, "w2")
   const refused = await raw(both, "send", { type: "FACT", text: "which room?" })
   assert.ok(refused.isError, "send without a room silently picked a room")
-  assert.match(refused.content[0].text, /several rooms \(team, design\)/)
+  assert.match(refused.content[0].text, /several rooms \(design, team\)/,
+    "the refusal no longer names the rooms this seat is in")
   ok("in two rooms an unrouted `send` fails loudly, naming both rooms")
 
   await call(both, "send", { room: "design", type: "FACT", text: "routed by hand" })
   assert.equal((await call(both, "history", { room: "design" })).total, 1)
   assert.equal((await call(web, "history")).total, 2, "the message leaked into the other room")
   ok("with an explicit room it goes through, and the other room stays untouched")
+
+  // …BUT A NAMED SEAT IS AN ADDRESS. `api-service#a1` is in `team` and not in `design`, so there
+  // is exactly one room in which this entry can reach it — and picking the only possibility is
+  // not the guess the refusal above exists to prevent. It must SAY which room it used, because
+  // everyone in that room can read the entry.
+  const routed = await call(both, "send", { type: "REQUEST", text: "who routes this?", to: [API] })
+  assert.equal(routed.room, ROOM, "an addressed send did not find the addressee's only room")
+  assert.match(routed.notice?.join(" ") || "", /only reachable in "team"/)
+  assert.deepEqual(routed.wakes, [API], "the addressee was not woken in the room it landed in")
+  assert.equal((await call(both, "history", { room: "design" })).total, 1, "it leaked into design")
+  ok("addressed to a seat, with no room: it goes where that seat is, and says so")
+
+  // …and when the addressee is in NO room of mine, the refusal ends the hunt rather than
+  // starting it: it names the room the seat IS in. Measured 2026-08-19 — see `roomsReaching`.
+  const attic = await connect("archivist", "attic", "at1")
+  await call(attic, "send", { type: "FACT", text: "alone up here" })
+  const lost = await raw(both, "send", { type: "REQUEST", text: "hello?", to: ["archivist#at1"] })
+  assert.ok(lost.isError, "it wrote into a room the addressee cannot read")
+  assert.match(lost.content[0].text, /is in no room you are in/)
+  assert.match(lost.content[0].text, /attic/)
+  ok("an addressee outside my rooms is refused with the room it is actually in")
+  await attic.close().catch(() => {})
   await both.close().catch(() => {})
 
   // TWO SESSIONS IN ONE PROJECT — same name, same directory, two Claude sessions. This is the

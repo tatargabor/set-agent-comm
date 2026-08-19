@@ -11,6 +11,11 @@ const S = (props, required = []) =>
   ({ type: "object", properties: props, required, additionalProperties: false })
 
 const ROOM = { type: "string", description: "Room name; the default is used when omitted" }
+// `send` alone can derive it: an addressee reachable in exactly one of your rooms names that room.
+const SEND_ROOM = { type: "string", description:
+  "Room name. Omit it when you are addressing a seat: if `to` is reachable in exactly one of " +
+  "your rooms, that room is used and the result says which. Required only when the addressee " +
+  "is in several of them." }
 
 export const TOOL_DEFS = [
   {
@@ -80,7 +85,7 @@ export const TOOL_DEFS = [
       "`notice` appears when that list is empty or the text is long. If it woke nobody and " +
       "somebody did have to act, send it again addressed — do not wait for an answer.",
     inputSchema: S({
-      room: ROOM,
+      room: SEND_ROOM,
       type: { type: "string", enum: store.TYPES, description: "The type of the entry" },
       text: {
         type: "string",
@@ -103,7 +108,8 @@ export const TOOL_DEFS = [
           "as the broadcast it is. Two seats owing you two different things is TWO sends. " +
           "Everyone else still receives the entry, marked `forMe: false` — addressing restricts " +
           "who is interrupted, never who may read. " +
-          "A name that is in no room is an ERROR, never a silent non-delivery — `agents` lists who is there.",
+          "A name that is in no room is an ERROR, never a silent non-delivery — `agents` lists who is there, " +
+          "and the refusal names the rooms that DO reach it, so a seat name never sends you hunting.",
       },
     }, ["text"]),
   },
@@ -156,33 +162,14 @@ export function createMcpServer(identify) {
     try {
       const { agent, room: defaultRoom, rooms: configured } = identify(req)
       const room = a.room || defaultRoom
+      // Set when the room was DERIVED from the addressee rather than given — reported back, so
+      // the sender learns which room its entry is now public in. The rule itself lives in the
+      // core (`store.resolveRoom`), where the CLI reads the same one.
+      let inferred = null
       const needRoom = () => {
-        if (room) return room
-        // Several rooms configured → no default, on purpose: see `parseRooms`. Name them, so
-        // the caller does not have to guess which ones it may write to.
-        if (configured?.length > 1) {
-          // ⚠ WHERE THE ANSWER IS COMPUTABLE, IT IS OFFERED. Measured 2026-08-10: 11 of the 18
-          // failed tool calls in eight days were this one error, repeated — the message listed
-          // the rooms and the callers still walked into it again. If the entry names an
-          // addressee, and that addressee is in exactly ONE of these rooms, then the room is not
-          // ambiguous at all and saying so costs nothing.
-          const to = store.parseTo(a.to)
-          const reaching = to.length
-            ? configured.filter(r => store.participants(r).some(p => to.includes(p)))
-            : []
-          if (reaching.length === 1) {
-            throw new Error(
-              `You are in several rooms (${configured.join(", ")}), so \`room\` is required. ` +
-              `\`${to.join(", ")}\` is only in "${reaching[0]}" — did you mean that one?`)
-          }
-          throw new Error(
-            `You are in several rooms (${configured.join(", ")}), so \`room\` is required — ` +
-            (reaching.length > 1
-              ? `\`${to.join(", ")}\` is in ${reaching.join(" and ")}, so this one cannot be guessed for you.`
-              : `pick the one this message belongs to.`))
-        }
-        throw new Error(
-          `No room given and no default. Existing rooms: ${store.rooms().join(", ") || "(none)"}`)
+        const r = store.resolveRoom({ room, to: a.to, configured })
+        if (r.inferred) inferred = r.room
+        return r.room
       }
       // ⚠ THE REMOTE LEG BELONGS HERE TOO. Measured 2026-08-05 on a Mac mini: the relay push
       // lived only in the CLI, so an agent — which always works through MCP, never the CLI —
@@ -207,7 +194,8 @@ export function createMcpServer(identify) {
           // message too, or an agent cannot tell that it may speak there at all.
           const cfg = (await bridge()).readConfig()
           const remote = cfg.rooms || {}
-          out = [...new Set([...store.rooms(), ...Object.keys(remote)])].sort().map(room =>
+          out = [...new Set([...store.rooms(), ...Object.keys(remote)])]
+            .filter(room => store.inPair(room, agent)).sort().map(room =>
             remote[room]
               ? { room, reach: "relay", writingAs: `${seatBase(agent).split("@")[0]}@${remote[room].namespace}`, relay: remote[room].url }
               : { room, reach: "local" })
@@ -227,6 +215,13 @@ export function createMcpServer(identify) {
           }
           out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to })
           out = { ...out, ...(await (await bridge()).pushReport(r)) }
+          // Say it, rather than let the room appear in the result and hope it is noticed: an
+          // entry is readable by everyone in the room it landed in, so which room that is can
+          // never be a silent decision taken on the sender's behalf.
+          if (inferred) out = { ...out,
+            notice: [...(out.notice || []),
+              `No room was given; \`${store.parseTo(a.to).join(", ")}\` is only reachable in ` +
+              `"${inferred}", so it went there — and everyone in "${inferred}" can read it.`] }
           break
         }
         case "inbox": {
@@ -240,7 +235,7 @@ export function createMcpServer(identify) {
         case "history": {
           const r = needRoom()
           const fetched = await (await bridge()).pullReport(r)
-          out = { ...store.history({ room: r, from: a.from, limit: a.limit }), ...fetched }
+          out = { ...store.history({ room: r, from: a.from, limit: a.limit, agent }), ...fetched }
           break
         }
         default: throw new Error(`unknown tool: ${req.params.name}`)

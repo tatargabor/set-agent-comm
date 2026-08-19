@@ -51,7 +51,9 @@ if (store.headless()) {
 }
 
 const pending = []
-for (const room of store.parseRooms(process.env.SET_AGENT_ROOM)) {
+// The seat's OWN rooms, not the environment's — see `store.wakingRooms`. A room joined mid
+// session used to be invisible here, and one parted was still able to interrupt.
+for (const room of store.wakingRooms(writer)) {
   // `advance: false` — the hook does not read the message on the agent's behalf. Marking it
   // read here would be the worst outcome: the agent would never see what it was nudged about.
   // ⚠ `respectQuiet: false` — a declared quiet silences the WATCHER, not this. `sac wait` starts
@@ -93,7 +95,7 @@ for (const room of store.parseRooms(process.env.SET_AGENT_ROOM)) {
 // ⚠ Once per seat, on disk. A reminder that returns every turn is a reminder that gets ignored,
 // and it would be the second interruption engine this project has had to remove.
 if (!pending.length && !store.getFocus(writer)) {
-  const rooms = store.parseRooms(process.env.SET_AGENT_ROOM)
+  const rooms = store.wakingRooms(writer)
   const others = rooms.some(r => store.liveSeats(r).some(s => s !== writer))
   if (others && store.firstTime(`focus::${writer}`))
     pending.push("__focus__")

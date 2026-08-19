@@ -17,7 +17,7 @@
 import { basename } from "node:path"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createMcpServer } from "./tools.mjs"
-import { parseRooms, claimSeat, register } from "./store.mjs"
+import { parseRooms, claimSeat, register, wakingRooms } from "./store.mjs"
 
 const agent = process.env.SET_AGENT_NAME || basename(process.cwd())
 const rooms = parseRooms(process.env.SET_AGENT_ROOM)
@@ -46,5 +46,14 @@ const writer = claimSeat({ agent, session })
 if (rooms.length) for (const r of rooms) register({ agent, project: process.cwd(), session, room: r, writer })
 else register({ agent, project: process.cwd(), session, writer })
 
-const server = createMcpServer(() => ({ agent: writer, room, rooms }))
+// ⚠ RESOLVED PER CALL, not once at startup — and from the SEAT's book, not the environment.
+// `SET_AGENT_ROOM` is what this project was installed with; a room this session joined afterwards
+// (`sac join`, `sac dm`) exists only in `members.json`, and a server that read the environment
+// once would go on believing the session is somewhere it no longer is — including keeping a
+// DEFAULT room after the seat has two, which is how an entry meant for a room of two would land
+// in front of everybody. See `store.wakingRooms`.
+const server = createMcpServer(() => {
+  const mine = wakingRooms(writer, rooms)
+  return { agent: writer, room: mine.length === 1 ? mine[0] : null, rooms: mine }
+})
 await server.connect(new StdioServerTransport())

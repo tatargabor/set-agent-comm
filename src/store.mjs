@@ -7,12 +7,14 @@
 // lock would stay stuck, and from then on nobody would write.
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, unlinkSync,
-         existsSync, renameSync, openSync, fsyncSync, closeSync, statSync } from "node:fs"
+         existsSync, renameSync, openSync, fsyncSync, closeSync, statSync, chmodSync } from "node:fs"
 import { join, dirname, resolve } from "node:path"
 import { homedir, hostname } from "node:os"
 // Only for the non-Linux branch of `parentOf` — everything else here stays dependency-free and
 // synchronous, because hooks and cron call it where there is no node_modules and no event loop.
 import { execFileSync } from "node:child_process"
+// A builtin, like everything else imported here — the zero-DEPENDENCY rule is about node_modules.
+import { randomBytes, timingSafeEqual } from "node:crypto"
 
 export const ROOT = process.env.SET_AGENT_COMM_DIR
   || join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "set-agent-comm")
@@ -27,6 +29,9 @@ const FOCUS = join(ROOT, "focus.json")
 const ROOMS_FILE = join(ROOT, "rooms.json")
 const MEMBERS = join(ROOT, "members.json")
 const PRESENCE = join(ROOT, "presence.json")
+// Mode 600, like `relays.json`: anyone who can read this can connect to the HTTP daemon AS the
+// agent named in it. The rest of the store is harmless by comparison.
+const HTTP_TOKENS = join(ROOT, "http-tokens.json")
 
 export const TYPES = ["QUESTION", "ANSWER", "FACT", "REQUEST"]
 
@@ -184,13 +189,20 @@ export function isForMe(entry, me) {
  * @param mine  the timestamps THIS seat has written in the room (see `ownTimestamps`) — without
  *              it the `re:` rule is off, and a reply reaches nobody by that route.
  */
-export function wakes(entry, me, mine, quiet = undefined) {
+export function wakes(entry, me, mine, quiet = undefined, pair = false) {
   if (!isForMe(entry, me)) return false
   // ⚠ A DECLARED quiet is applied HERE and nowhere else, because this function is the single
   // rule the Stop hook, `sac wait` and `inbox` all read. Delivery is untouched: a quiet seat
   // still receives every entry — only the expensive half is suppressed. `quiet` is passed in by
   // callers that loop (one read instead of one per entry) and read from disk otherwise.
   if (quiet === undefined ? seatPresence(me).quiet : quiet) return false
+  // ⚠ A CHANNEL OF TWO WAKES BOTH, WHATEVER THE TYPE — and the README always said so ("a room of
+  // two needs no addressing: everything in it is for the other one"), while this rule did not.
+  // Measured 2026-08-19: a plain FACT in a pair room reported `wakes: []`. set-core's requirement
+  // is the sharp form of it — a 1:1 with a subscription rule is not a 1:1 — and it costs nothing
+  // to honour, because there is exactly one other seat that could be interrupted.
+  // `quiet` still wins: somebody chose that, and it is the one thing above this line for a reason.
+  if (pair) return true
   if (entry.to?.length) return true
   if (entry.re && mine?.has(entry.re)) return true
   return entry.type === "QUESTION" || entry.type === "REQUEST"
@@ -274,6 +286,12 @@ export function ensureDir(dir) {
 // ── atomic JSON write ─────────────────────────────────────────────────────────
 // tmp → fsync → rename. On a crash `writeFileSync` leaves truncated JSON in the target file,
 // and from then on the registry is unreadable — a pattern borrowed from AMQ.
+/** `writeJson`, then take the file out of everyone else's reach. See `HTTP_TOKENS`. */
+function writeSecret(path, value) {
+  writeJson(path, value)
+  try { chmodSync(path, 0o600) } catch { /* best effort: a filesystem may have no modes */ }
+}
+
 function writeJson(path, value) {
   ensureDir(dirname(path))
   const tmp = `${path}.tmp.${process.pid}`
@@ -912,10 +930,19 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   if (addressed.length) {
     const known = participants(room)
     const unknown = addressed.filter(n => !known.includes(n))
-    if (unknown.length) throw new Error(
-      `send: nobody in "${room}" is called ${unknown.map(n => `'${n}'`).join(", ")} — ` +
-      `the room has: ${known.join(", ") || "(nobody yet)"}. ` +
-      `A misspelt addressee is a message NOBODY is woken for; leave \`to\` out to address everyone.`)
+    if (unknown.length) {
+      // ⚠ AND WHERE THEY ARE, when they exist somewhere else. A name that is right but in the
+      // wrong room reads exactly like a typo here, and the two need opposite corrections: one
+      // is a re-spelling, the other is `sac join`. See `roomsReaching`.
+      const elsewhere = roomsReaching(unknown)
+      throw new Error(
+        `send: nobody in "${room}" is called ${unknown.map(n => `'${n}'`).join(", ")} — ` +
+        `the room has: ${known.join(", ") || "(nobody yet)"}. ` +
+        (elsewhere.length
+          ? `That name IS in ${elsewhere.join(", ")} — send it there, or \`sac join\` first. `
+          : ``) +
+        `A misspelt addressee is a message NOBODY is woken for; leave \`to\` out to address everyone.`)
+    }
   }
   const path = busFile(room, from)
   ensureDir(dirname(path))
@@ -962,10 +989,11 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   // one place it is computed for everybody at once. Doing it in `inbox` instead would re-record
   // the same entries on every read; doing it in the watcher would miss every seat that has no
   // watcher armed — which is precisely the number worth having.
+  const isPair = !!pairOf(room)
   const woke = live.filter(s => {
     if (s === from) return false
     const quiet = seatPresence(s).quiet
-    const w = wakes(entry, s, ownTimestamps(room, s), quiet)
+    const w = wakes(entry, s, ownTimestamps(room, s), quiet, isPair)
     recordDecision({ room, seat: s, entry: ts, by: quiet && isForMe(entry, s) ? "quiet" : "rule", woke: w })
     return w
   })
@@ -999,7 +1027,9 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       `and what it changes for someone else is the message; the reasoning and the code are in the ` +
       `files, and they can read those.`)
 
-  return { ts, room, from, type, to: addressed, path, wakes: woke,
+  // `re` rides back too: a reply whose reference was silently dropped is a reply that wakes
+  // nobody by the `re:` rule, and the writer could not tell from this result that it had been.
+  return { ts, room, from, type, to: addressed, ...(re ? { re } : {}), path, wakes: woke,
            ...(notice.length && { notice }), ...(warning && { warning }) }
 }
 
@@ -1107,8 +1137,85 @@ export function participants(room) {
     names.add(a.agent)
     for (const s of Object.keys(a.seats || {})) { names.add(s); names.add(seatBase(s)) }
   }
+  // ⚠ AND THE SEAT-LEVEL MEMBERSHIP, which the agent-level list above does not carry — 2026-08-19.
+  // `joinRoom` / `inviteToRoom` write the SEAT's record (that is the whole point: membership is per
+  // session, so a fourth session can live somewhere its siblings do not). A room nobody's PROJECT
+  // is registered in — a room of two, above all — therefore had no participants at all, and `send`
+  // refused every addressee in it: "nobody in this room is called…", about the seat that opened it.
+  for (const a of Object.values(reg.agents)) {
+    for (const [seat, rec] of Object.entries(a.seats || {})) {
+      if (!(rec?.rooms || []).includes(room)) continue
+      names.add(seat); names.add(seatBase(seat)); names.add(a.agent)
+    }
+  }
   for (const n of [...names]) names.add(n.split("@")[0])
   return [...names].sort()
+}
+
+/**
+ * WHERE CAN I REACH THESE NAMES — every known room in which one of them is a participant.
+ *
+ * ⚠ Measured 2026-08-19: `set-core` was given a seat name (`set-agent-comm#dbdc29f3`) and told to
+ * write to it. Nothing on the bus answered "which room is that seat in", so the session went
+ * hunting through rooms — the one question a person had already answered by naming the seat. Every
+ * refusal that mentions an addressee now says where that addressee actually is, because the store
+ * knows and the sender does not.
+ *
+ * Archived rooms are absent by construction: `rooms()` skips dot-prefixed directories, so a
+ * retired room is never offered as a place to write.
+ */
+export function roomsReaching(to) {
+  const want = parseTo(to)
+  if (!want.length) return []
+  return knownRooms().filter(r => participants(r).some(p => want.includes(p)))
+}
+
+/**
+ * WHICH ROOM DOES THIS ENTRY GO INTO — the one rule, so the CLI and the MCP face cannot answer it
+ * differently. (`bin/sac.mjs` and `src/tools.mjs` are two faces on one core precisely so that a
+ * question like this has one answer; resolving it inside either of them would be the drift the
+ * layout exists to prevent.)
+ *
+ * ⚠ A NAMED SEAT IS AN ADDRESS, NOT A RIDDLE — 2026-08-19. An addressee reachable in exactly ONE
+ * of my rooms does not make the room ambiguous: that room is the only place the entry could reach
+ * them at all, so choosing it is the single possibility rather than a guess. This used to refuse
+ * with the answer already computed, in a message ending "did you mean that one?" — a whole turn
+ * spent saying yes. Measured before that: 11 of 18 failed tool calls in eight days were this one
+ * refusal, repeated, by callers who had already been given the room list.
+ *
+ * What is still refused, because the caller genuinely has to decide or to act:
+ *   · the addressee is in SEVERAL of my rooms → the audience differs, so it is theirs to pick;
+ *   · the addressee is in NONE of them → the refusal names the room that seat IS in. `send` may
+ *     not enroll its own writer (that is what makes a room usable as a door), so the answer is a
+ *     `join`, not a retry.
+ *
+ * @returns { room, inferred } — `inferred` is true when it was derived from `to`, which the
+ *   caller must report: everyone in that room can read the entry.
+ */
+export function resolveRoom({ room, to, configured = [] }) {
+  if (room) return { room, inferred: false }
+  const want = parseTo(to)
+  const mine = configured.filter(Boolean)
+  const reaching = want.length ? mine.filter(r => participants(r).some(p => want.includes(p))) : []
+  if (reaching.length === 1) return { room: reaching[0], inferred: true }
+  const named = want.join(", ")
+  if (reaching.length > 1) throw new Error(
+    `You are in several rooms (${mine.join(", ")}), so \`room\` is required — ` +
+    `\`${named}\` is in ${reaching.join(" and ")}, so this one cannot be guessed for you.`)
+  if (want.length) {
+    const elsewhere = roomsReaching(want)
+    throw new Error(
+      `\`${named}\` is in no room you are in` +
+      (elsewhere.length
+        ? ` — that name is in ${elsewhere.join(", ")}. Join one first (\`sac join ${elsewhere[0]}\`), ` +
+          `then send there.`
+        : `, and no room on this machine has it. \`agents\` lists who is reachable.`) +
+      (mine.length ? ` You are in: ${mine.join(", ")}.` : ``))
+  }
+  if (mine.length > 1) throw new Error(
+    `You are in several rooms (${mine.join(", ")}), so \`room\` is required — ` +
+    `pick the one this message belongs to.`)
+  throw new Error(`No room given and no default. Existing rooms: ${rooms().join(", ") || "(none)"}`)
 }
 
 /**
@@ -1300,6 +1407,8 @@ function clip(e) {
  * that still sees what the seat owes an answer to.
  */
 export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = true }) {
+  assertMayRead(room, agent)
+  const isPair = !!pairOf(room)
   const cursors = readJson(CURSORS, {})
   const key = `${room}::${agent}`
   const base = seatBase(agent)
@@ -1318,7 +1427,7 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine, quiet),
+        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine, quiet, isPair),
                      ...(seatBase(writer) === base && { sibling: true }) })
     }
   }
@@ -1383,7 +1492,8 @@ export function unread({ room, agent, count = 1 }) {
  * returns ALL its sessions: "what did consumer-a say" is a question about the project, and
  * answering it with one session's half of the thread would be a silent half-truth.
  */
-export function history({ room, from, limit = 20 }) {
+export function history({ room, from, limit = 20, agent = null }) {
+  if (agent) assertMayRead(room, agent)
   const files = from
     ? busFiles(room).filter(p => writerOf(p) === from || seatBase(writerOf(p)) === from)
     : busFiles(room)
@@ -1592,15 +1702,113 @@ export function roomExists(room) {
   try { return statSync(join(CHANNELS, room)).isDirectory() } catch { return false }
 }
 
-/** Create a room on purpose. Idempotent: an existing room keeps its original creator. */
-export function createRoom(room, by) {
+/**
+ * Create a room on purpose. Idempotent: an existing room keeps its original creator.
+ *
+ * `meta` records what KIND of room this is, and today that means one thing: `pair: [seatA, seatB]`,
+ * written by `sac dm`. It is DECLARED rather than derived — counting the members would answer
+ * "how many are in it right now", which is a different question from "this is a channel between
+ * these two", and the second is the one every rule below needs. A room that happens to hold two
+ * members is still a room.
+ */
+export function createRoom(room, by, meta = {}) {
   const all = readJson(ROOMS_FILE, {})
   if (all[room]) return { room, created: false, ...all[room] }
-  const rec = { by: by || null, at: now() }
+  const rec = { by: by || null, at: now(), ...meta }
   all[room] = rec
   writeJson(ROOMS_FILE, all)
   ensureDir(join(CHANNELS, room))
   return { room, created: true, ...rec }
+}
+
+/**
+ * ── HTTP CLIENT TOKENS ────────────────────────────────────────────────────────
+ *
+ * ⚠ WHY THIS EXISTS, from set-core on 2026-08-19. The HTTP transport takes its identity from the
+ * URL path and asks for NOTHING ELSE, which was measured the same day: a process that was not that
+ * project at all connected to `/mcp/api-service` and wrote as `api-service`. The stdio transport
+ * has no such hole — identity is the cwd, unforgeable — so the daemon was the weaker door and
+ * nobody had said so out loud.
+ *
+ * The case that makes it worth closing rather than merely documenting is theirs, and it is a good
+ * one: a FRAMEWORK that launches agents writes their MCP config itself, so it can put both the
+ * name AND a secret in there at the moment it creates them. The name does not have to survive a
+ * `${VAR}` substitution that (measured) does not happen in a fresh window — the framework simply
+ * knows it. So for framework-launched agents the daemon can be as strict as stdio; for a window a
+ * person opened by hand nothing changes, and stdio stays the only unforgeable route.
+ *
+ * Stored, not stateless — unlike the relay's tokens (`crypto.mjs`), whose whole point is a server
+ * with no disk. Here revoking ONE agent without disturbing the other thirty-nine is the feature.
+ */
+export function httpTokens() { return readJson(HTTP_TOKENS, {}) }
+
+export function mintHttpToken(agent, { rotate = false } = {}) {
+  if (!agent || !/^[A-Za-z0-9._-]+$/.test(agent))
+    throw new Error(`http-token: '${agent}' cannot be an agent name in a URL path — [A-Za-z0-9._-] only`)
+  const all = httpTokens()
+  if (all[agent] && !rotate) return { agent, token: all[agent].token, created: all[agent].created, minted: false }
+  all[agent] = { token: randomBytes(32).toString("hex"), created: now() }
+  writeSecret(HTTP_TOKENS, all)
+  return { agent, ...all[agent], minted: true, rotated: !!rotate }
+}
+
+/**
+ * Does this token belong to this agent? Constant time, and the LENGTH is compared first because
+ * `timingSafeEqual` throws on a mismatch — and an exception is as good a signal as a fast `false`
+ * (the same note as `crypto.equal`, which is not imported here: the core stays standalone).
+ */
+export function httpTokenOk(agent, presented) {
+  const want = httpTokens()[agent]?.token
+  if (!want || !presented) return false
+  const a = Buffer.from(String(want)), b = Buffer.from(String(presented))
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+export function revokeHttpToken(agent) {
+  const all = httpTokens()
+  if (!all[agent]) return { agent, revoked: false }
+  delete all[agent]
+  writeSecret(HTTP_TOKENS, all)
+  return { agent, revoked: true }
+}
+
+/** The two seats a pair room belongs to, or `null` for an ordinary room. */
+export function pairOf(room) {
+  const rec = readJson(ROOMS_FILE, {})[room]
+  return Array.isArray(rec?.pair) && rec.pair.length === 2 ? rec.pair : null
+}
+
+/** Is this seat one of the two? Compared through `addressForms`, so a project name matches too. */
+export function inPair(room, seat) {
+  const pair = pairOf(room)
+  if (!pair) return true                                   // not a pair room: nothing to restrict
+  const forms = addressForms(seat)
+  return pair.some(p => forms.has(p) || addressForms(p).has(seat))
+}
+
+/**
+ * ⚠ THE ONE PLACE READING IS RESTRICTED, and it is a deliberate exception to the rule stated on
+ * `inbox` — "reading is never the thing we restrict, because a reader who cannot see what the
+ * others agreed on is how two sessions end up doing the same work twice". That argument is
+ * correctly scoped to a ROOM and was wrongly used as a default (`docs/rooms.md`, 2026-08-08); in a
+ * channel of two there is no third party whose work could collide, and the whole reason to open one
+ * is that the audience is wrong.
+ *
+ * ⚠ Asked for by set-core on 2026-08-19, with a reason no convenience argument would have carried:
+ * their agents run inside CLIENT projects, where content may not leak anywhere else. Measured the
+ * same day, before this existed: a third seat ran `sac history <pair room>` and read the entry in
+ * full — membership bounded waking and listing, never reading.
+ *
+ * ⚠ AND IT IS A TOOL-LEVEL BOUNDARY, NOT A SECRET. The channel file sits on disk under the same
+ * user; any process of that user can read it, and `sac admin` — the operator's own view — still
+ * shows it. This stops an agent from reading a pair channel THROUGH THE BUS. It is not encryption,
+ * and saying otherwise would be worse than not having it.
+ */
+export function assertMayRead(room, seat) {
+  if (inPair(room, seat)) return
+  throw new Error(
+    `'${room}' is a channel between two seats and '${seat}' is not one of them. ` +
+    `A pair room is the one place this bus restricts reading — open your own with \`sac dm\`.`)
 }
 
 /** Every room this store knows about — declared or merely written into. */
@@ -1636,7 +1844,7 @@ const ARCHIVE = join(CHANNELS, ".archive")
 /** The room name reaches the file system, so it gets the same treatment as a writer name. */
 function assertSafeRoom(room) {
   const r = String(room ?? "")
-  const bad = !r || r.length > 200 || r.startsWith(".") || /[\\/ -]/.test(r)
+  const bad = !r || r.length > 200 || r.startsWith(".") || /[\\/\x00-\x1f]/.test(r)
   if (!bad && dirname(join(CHANNELS, r)) === CHANNELS) return
   throw new Error(`unsafe room name '${r.slice(0, 80)}' — it would not stay inside the store`)
 }
@@ -1736,6 +1944,34 @@ export function setMembers(seat, list, left = null) {
  * the whole point: changing a project's configured rooms no longer moves the seats that already
  * exist against their will, which is what lets a fourth session live somewhere else.
  */
+/**
+ * THE ROOMS THAT MAY WAKE THIS SEAT — its own membership, not the environment's list.
+ *
+ * ⚠ MEASURED 2026-08-19, and it is the gap this whole file exists to keep shut. `sac join pair
+ * --create` is what the skill tells a session to run when a room is its own; membership was
+ * written, `send` reported `wakes: ["beta#bbbb2222"]` — and the Stop hook said nothing, because
+ * it iterated `SET_AGENT_ROOM` and the joined room was not in it. The decision was made, the
+ * delivery never happened: a seat nobody could wake, which is exactly the number `sac stats`
+ * was built to count. `sac wait` had the same hole from the other side, having resolved its
+ * room list once, at arm time.
+ *
+ * So the environment is a SEED, never the answer. The answer is the seat's book:
+ *
+ *   · configured ∪ declared — the environment may still ADD a room, as it always could;
+ *   · minus `left` — because `part` promises you stop being woken, and until now a room named in
+ *     the project's settings went on interrupting a seat that had explicitly left it.
+ *
+ * A seat with no book of its own falls back to the environment, which is every seat that has
+ * never joined or parted anything — so nothing changes for them.
+ */
+export function wakingRooms(seat, configured = parseRooms(process.env.SET_AGENT_ROOM)) {
+  const left = seat ? leftRooms(seat) : []
+  const declared = (seat && members(seat)) || []
+  return [...new Set([...(configured || []), ...declared])]
+    .filter(r => r && !left.includes(r))
+    .sort()
+}
+
 export function seedMembers(seat, configured) {
   const have = members(seat)
   const left = leftRooms(seat)
@@ -1769,6 +2005,49 @@ export function registerRoom(seat, room) {
   }
   if (changed) writeJson(REGISTRY, reg)
   return changed
+}
+
+/**
+ * THE ROOM TWO SEATS SHARE — derived from their names, so both sides compute the SAME one without
+ * agreeing on anything first. That is the whole trick: a DM needs no registry of pairs, no
+ * invitation and no lifecycle, because the name IS the agreement.
+ *
+ * ⚠ Decided 2026-08-19: a DM is a room of two, NOT a new object below the room. `docs/rooms.md`
+ * left that open on purpose; the membership machinery built on 2026-08-11 (`members.json`, `left`,
+ * a room created on purpose) is what makes the cheap answer the right one — a two-member room is
+ * private because nothing can join it by writing into it any more.
+ *
+ * ⚠ THE NAME IS SLUGGED, and that is not cosmetic. A seat name carries `#`, and the relay puts a
+ * room name straight into a URL path (`/rooms/<room>/entries`, bridge.mjs) — a `#` there would cut
+ * the path off at the fragment. So the room name a DM derives may only use characters that survive
+ * both a file name and a URL.
+ */
+const roomSlug = n => String(n).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "")
+export function dmRoom(a, b) {
+  const [x, y] = [a, b].map(n => roomSlug(n)).sort()
+  if (!x || !y || x === y) throw new Error(`dm: two different seats are needed (got '${a}' and '${b}')`)
+  const room = `dm-${x}-${y}`
+  assertSafeRoom(room)
+  return room
+}
+
+/**
+ * Put ANOTHER seat in a room — the half of a DM that the other side did not ask for.
+ *
+ * ⚠ IT WILL NOT UNDO A `part`. `joinRoom` clears the room from `left` because the seat itself is
+ * asking; here somebody else is, and the whole point of `left` is that a person's decision is not
+ * reversed by the next thing that runs. So a seat that left this room stays out, and the caller is
+ * told rather than left believing it enrolled them.
+ *
+ * ⚠ It grants no reach that did not exist: `sac dm` refuses unless the two already share a room,
+ * where the same entry could have been addressed to the same seat. What it changes is the AUDIENCE,
+ * which is the only thing a room decides.
+ */
+export function inviteToRoom(seat, room) {
+  if (leftRooms(seat).includes(room)) return false
+  setMembers(seat, [...(members(seat) || []), room])
+  registerRoom(seat, room)
+  return true
 }
 
 export function partRoom(seat, room) {

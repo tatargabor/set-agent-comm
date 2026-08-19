@@ -5,7 +5,8 @@
 //   sac agents                          who exists, who is alive
 //   sac rooms                           rooms
 //   sac admin                           full-screen view: channels, subscribers, live flow
-//   sac send <room> <type> "text"       entry (append); --to <name>[,…] addresses it
+//   sac send [<room>] <type> "text"     entry (append); --to <name>[,…] addresses it, and then
+//                                       the room may be left out — a seat name implies it
 //   sac inbox <room>                    new messages from others
 //   sac peek <room>                     the same, but does not move the cursor
 //   sac history <room> [n]              read back
@@ -59,7 +60,7 @@ const USAGE = {
   agents: "sac agents [--json]                 who exists, who is alive · --json is the versioned machine view",
   rooms: "sac rooms [--archived] | --archive <room> [--force] | --restore <room>   the rooms, and how far each reaches",
   admin: "sac admin                           the operator's live view (Tab panes · ↵ open · / search · ? keys)",
-  send: 'sac send <room> <type> "text" [--to <seat|project>[,…]] [--re <ts>]',
+  send: 'sac send [<room>] <type> "text" [--to <seat|project>[,…]] [--re <ts>]   (the room may be left out when --to names a seat)',
   focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back',
   inbox: "sac inbox <room>                    new messages from others (marks them read)",
   peek: "sac peek <room>                     the same, without moving the cursor",
@@ -221,7 +222,11 @@ try {
       // before its first message, and a local one says plainly that it stops at this machine.
       const { readConfig } = await import("../src/bridge.mjs")
       const remote = readConfig().rooms || {}
-      const all = [...new Set([...store.knownRooms(), ...Object.keys(remote)])].sort()
+      // ⚠ SOMEBODY ELSE'S PAIR ROOM IS NOT LISTED. Its name says who is talking to whom, which
+      // is the metadata half of the thing `assertMayRead` protects — and a room you may not read
+      // is not a room you can do anything with. Ordinary rooms are listed to everyone, as before.
+      const all = [...new Set([...store.knownRooms(), ...Object.keys(remote)])]
+        .filter(r => store.inPair(r, ME)).sort()
       if (!all.length) { console.log("(no rooms yet)"); break }
       const mine = store.members(ME)
       // ⚠ MEMBERSHIP IS SHOWN FROM BOTH ENDS. Measured on the live bus 2026-08-08, and said in
@@ -281,10 +286,29 @@ try {
 
     case "send": {
       const { value: to, rest: afterTo } = takeFlag(rest, "--to")
-      const create = afterTo.includes("--create")
-      const args = afterTo.filter(a => a !== "--create")
-      const [room, type, ...text] = args
-      if (!room || !text.length) throw new Error('usage: sac send <room> <type> "text" [--to <seat|project>[,…]]')
+      // ⚠ `--re` was in this command's OWN usage line and nothing parsed it — so `sac send room
+      // ANSWER "…" --re <ts>` appended the flag and the timestamp to the MESSAGE TEXT and sent
+      // it, silently, with no reference at all. The MCP face has had `re` from the start; this
+      // is exactly the CLI/MCP drift the one-core layout exists to prevent, hiding in the gap
+      // between a usage string and an argument parser. Found 2026-08-19, while answering an
+      // entry with it.
+      const { value: re, rest: afterRe } = takeFlag(afterTo, "--re")
+      const create = afterRe.includes("--create")
+      const args = afterRe.filter(a => a !== "--create")
+      // ⚠ THE ROOM MAY BE LEFT OUT WHEN THE ENTRY IS ADDRESSED — the same rule the MCP face
+      // uses, read from the same place (`store.resolveRoom`), because a seat name is a complete
+      // address and making the sender look up its room is the hunt that rule exists to end.
+      // Told apart positionally: `send FACT "…"` begins with a TYPE, `send team FACT "…"` does
+      // not. A room actually named `fact` would still be reachable by writing it out with an
+      // explicit type after it, and the ambiguity only arises with `--to` given at all.
+      let [room, type, ...text] = args
+      let inferred = false
+      if (to && room && store.TYPES.includes(store.normalizeType(room))) {
+        const r = store.resolveRoom({ to, configured: store.wakingRooms(ME) })
+        ;[room, type, text] = [r.room, args[0], args.slice(1)]
+        inferred = r.inferred
+      }
+      if (!room || !text.length) throw new Error('usage: sac send [<room>] <type> "text" [--to <seat|project>[,…]]')
       // ⚠ A ROOM MUST EXIST. Measured 2026-08-10: join-on-write means a mistyped room name is not
       // an error but a new, silent room you are alone in — and `send` returns SUCCESS. The store
       // still carries a room called `--help` from exactly that. This is the same asymmetry the
@@ -299,7 +323,10 @@ try {
         const made = store.createRoom(room, ME)
         if (made.created) console.error(`sac: opened a new room '${room}'`)
       }
-      const out = store.send({ room, from: ME, type, text: text.join(" "), to })
+      const out = store.send({ room, from: ME, type, text: text.join(" "), to, re })
+      // Said on stderr, not folded into the JSON: which room an entry landed in decides who can
+      // read it, and that may not be a decision the sender only discovers by reading a field.
+      if (inferred) console.error(`sac: no room given — '${to}' is only reachable in '${room}', so it went there.`)
       // LOCAL FIRST, then the wire. If the relay is down the entry is already safe on disk and
       // the outbox cursor will carry it next time — a dead relay is a delay, not a lost message.
       json({ ...out, ...(await relayPush(room)) })
@@ -362,7 +389,7 @@ try {
     case "history": {
       const [room, n] = rest
       if (!room) throw new Error("usage: sac history <room> [n]")
-      const r = store.history({ room, limit: Number(n) || 20 })
+      const r = store.history({ room, limit: Number(n) || 20, agent: ME })
       console.log(`(${r.total} entries in total)\n`)
       for (const m of r.messages) console.log(fmt(m))
       break
@@ -697,8 +724,20 @@ try {
       // message — the exact failure mode `sac unread` had to be invented for.
       const once = rest.includes("--once")
       const names = rest.filter(a => a !== "--once")
-      const watched = (names.length ? names : [process.env.SET_AGENT_ROOM || ""])
-        .flatMap(store.parseRooms)
+      // ⚠ THE ROOM LIST IS RE-READ ON EVERY CHECK, not resolved once here. Measured 2026-08-19:
+      // this watch is armed at session start with the rooms the project was installed with, so a
+      // room the session joined afterwards (`sac join pair --create` — what the skill tells it to
+      // run when a room is its own) was watched by nothing. `send` reported that it woke the seat;
+      // the seat was never told. See `store.wakingRooms`: argv and the environment are the SEED,
+      // the seat's own membership is the answer, and a room it has PARTED drops out here too.
+      const seed = (names.length ? names : [process.env.SET_AGENT_ROOM || ""]).flatMap(store.parseRooms)
+      // ⚠ NAMED ON THE COMMAND LINE MEANS EXACTLY THOSE ROOMS — an explicit list is an
+      // instruction, not a seed, and a watch that quietly widened it would report from a room
+      // nobody asked about. Everything else (the Monitor the SessionStart hook arms, a bare
+      // `sac wait`) tracks the seat's membership, which is why that note passes the rooms in the
+      // ENVIRONMENT and leaves the argument list empty.
+      const roomsNow = () => names.length ? seed : store.wakingRooms(ME, seed)
+      let watched = roomsNow()
       if (!watched.length) throw new Error("usage: sac wait [--once] <room> […]   (or set SET_AGENT_ROOM)")
 
       // ⚠ TWO GATES BEFORE A LINE IS PRINTED, because a printed line IS a turn of the main agent.
@@ -749,7 +788,9 @@ try {
       }
 
       const check = async () => {
+        watched = roomsNow()
         for (const room of watched) {
+          arm(room)                              // a room joined since the last check is new here
           const r = store.inbox({ room, agent: ME, advance: false })
           const waking = r.messages.filter(m => m.wakes)
           const last = waking.at(-1)
@@ -804,14 +845,21 @@ try {
       let quiet = null
       const soon = () => { clearTimeout(quiet); quiet = setTimeout(() => void check(), QUIET_MS) }
 
-      await check()                              // what is ALREADY waiting counts as an event
+      // Armed per room, at most once, and ALSO for a room that appears later — see `check`.
+      // A room joined mid-session would otherwise run on the 5 s poll for the rest of the
+      // session, which is the quiet degradation the report below exists to refuse.
+      const armed = new Set()
       const unwatched = []
-      for (const room of watched) {
+      const arm = room => {
+        if (armed.has(room)) return
+        armed.add(room)
         const dir = store.channelDir(room)
         store.ensureDir(dir)
         // A new participant's file appearing is an event too, so we watch the DIRECTORY.
         try { watch(dir, soon) } catch (e) { unwatched.push({ room, code: e.code || "unknown" }) }
       }
+      for (const room of watched) arm(room)
+      await check()                              // what is ALREADY waiting counts as an event
       /**
        * ⚠ A WATCH THAT COULD NOT BE ARMED SAYS SO — ONCE, AND ON STDERR. This `catch` used to be
        * empty, with the comment "the poll below covers it". It does cover it, which is exactly
@@ -985,6 +1033,73 @@ try {
         : {}) })
       break
     }
+    case "dm": {
+      /**
+       * A ROOM OF TWO, NAMED SO THAT BOTH SIDES DERIVE IT — see `store.dmRoom`. This is the
+       * ergonomic form of a decision, not a new concept: a DM is a room whose membership is two.
+       *
+       * ⚠ Asked for from the dictated review, 2026-08-19: "when I say settle it with agent X, it
+       * should not write into the shared project room". Before this, the honest answer was three
+       * commands and a name both sides had to agree on out of band — so nobody did it, and the
+       * pair conversation went on happening in front of everybody.
+       *
+       * ⚠ IT REFUSES A PEER YOU DO NOT ALREADY SHARE A ROOM WITH. Enrolling somebody else in a
+       * room is a real power; bounding it to seats you can already address means it changes the
+       * AUDIENCE of a message you could already send, and nothing else.
+       */
+      const [peer] = rest.filter(a => !a.startsWith("--"))
+      if (!peer) throw new Error("usage: sac dm <seat>            (a seat: `consumer-a-atlas#3f9c1a20`, not a project)")
+      if (peer === ME) throw new Error("dm: that is you")
+      if (!peer.includes("#")) {
+        const seats = (store.agents().find(a => a.agent === peer)?.seats || []).map(x => x.writer)
+        throw new Error(`dm: '${peer}' is a PROJECT, and a room of two needs one session — ` +
+          (seats.length ? `it has: ${seats.join(", ")}.` : `\`agents\` lists its sessions.`) +
+          ` A project-wide conversation is a room, not a DM.`)
+      }
+      const shared = store.roomsReaching([peer])
+      if (!shared.length) throw new Error(
+        `dm: '${peer}' is in no room this store knows, so there is nobody to open one with. ` +
+        `\`agents\` lists who is reachable.`)
+      const room = store.dmRoom(ME, peer)
+      // DECLARED, not counted: `pair` is what makes the two rules below true of this room —
+      // only these two may read it, and every entry in it wakes the other one.
+      const made = store.createRoom(room, ME, { pair: [ME, peer].sort() })
+      store.joinRoom(ME, room)
+      const invited = store.inviteToRoom(peer, room)
+      json({ room, with: peer, created: made.created, invited,
+        ...(invited ? {} : { note: `'${peer}' has LEFT this room before, so it was not put back — ` +
+          `that decision is theirs. Reach them in ${shared.join(", ")} instead.` }) })
+      // The point of the room is who is NOT in it, so that is what gets said out loud.
+      console.error(`sac: room '${room}' — just you and ${peer}: nobody else may read it, and ` +
+        `every entry in it wakes the other one, whatever its type. ` +
+        `Write there with: sac send ${room} FACT "…"`)
+      break
+    }
+    case "http-token": {
+      // For whoever WRITES an agent's MCP config — a framework that launches agents, which knows
+      // the name and can carry the secret into the config it writes. See the block in src/http.mjs.
+      const { value: revoke, rest: afterRevoke } = takeFlag(rest, "--revoke")
+      if (afterRevoke.includes("--list")) {
+        const all = store.httpTokens()
+        const names = Object.keys(all).sort()
+        if (!names.length) { console.log("(no client tokens — the HTTP daemon is unauthenticated)"); break }
+        // The secrets are NOT printed here: a listing is something you run to see what exists.
+        for (const a of names) console.log(`${a.padEnd(28)} minted ${all[a].created}`)
+        break
+      }
+      if (revoke) { json(store.revokeHttpToken(revoke)); break }
+      const [agent] = afterRevoke.filter(a => !a.startsWith("--"))
+      if (!agent) throw new Error("usage: sac http-token <agent> [--rotate] | --revoke <agent> | --list")
+      const rotate = afterRevoke.includes("--rotate")
+      const t = store.mintHttpToken(agent, { rotate })
+      json({ ...t, url: `http://${process.env.MCP_HOST || "127.0.0.1"}:${process.env.MCP_PORT || 7510}/mcp/${agent}`,
+        header: `Authorization: Bearer ${t.token}` })
+      console.error(t.minted
+        ? `sac: token minted for '${agent}'${rotate ? " (the previous one no longer works)" : ""} — ` +
+          `put it in that agent's MCP config as an Authorization header.`
+        : `sac: '${agent}' already has one; \`--rotate\` replaces it.`)
+      break
+    }
     case "watch-paths": {
       const [room] = rest
       if (!room) throw new Error("usage: sac watch-paths <room>")
@@ -1007,8 +1122,10 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
        --restore <room> | --archived  …put it back, or see what has been retired
   sac join <room> [--create]          THIS SESSION enters a room — membership is per seat
   sac part <room>                     …and leaves it; it sticks, the hook will not put you back
+  sac dm <seat>                       a room of TWO: opens it, joins you, puts that seat in it
+  sac http-token <agent> [--rotate]   a client token for the HTTP daemon [--revoke <a>] [--list]
   sac admin                           full-screen: channels, WHO IS BEHIND on reading, live flow
-  sac send <room> <type> "text"       entry (${store.TYPES.join(" | ")})
+  sac send [<room>] <type> "text"     entry (${store.TYPES.join(" | ")}) — with --to, the room may be left out
        [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
   sac focus ["what you are on"]       declare your scope [--files a,b] — read it back with no args
        [--phase ${store.PHASES.join("|")}]   … and where you are in it, in one machine-readable word

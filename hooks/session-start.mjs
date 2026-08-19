@@ -187,7 +187,14 @@ const siblings = writer !== agent
 // control — measured on macOS, where node sits under the home directory. And `ENV`, not just
 // the agent name: see the note on it — a watch armed against the wrong store looks like a
 // working one from every angle except the one that matters.
-const waitCmd = `${ENV}${process.execPath} ${SAC} wait ${rooms.join(",")}`
+// ⚠ THE ROOMS GO IN THE ENVIRONMENT, NOT IN THE ARGUMENT LIST — 2026-08-19. Named as arguments
+// they are an instruction to watch exactly those, resolved once when the Monitor is armed; a room
+// the session joined afterwards (`sac join <room> --create`, which is what the skill tells it to
+// do when a room is its own) was then watched by nothing at all, while `send` cheerfully reported
+// that it had woken this seat. As an environment variable the same list is a SEED: `sac wait`
+// re-reads `store.wakingRooms` on every check, so a join is picked up and a `part` drops out,
+// and a seat whose own book is somehow empty still watches what the project configured.
+const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${SAC} wait`
 const monitor = rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
     `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +

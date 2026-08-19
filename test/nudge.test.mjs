@@ -182,7 +182,12 @@ test("an entry addressed to ANOTHER seat does not wake this one", async () => {
   assert.equal(out, "", `a message addressed to web-app#three woke web-app#two: ${out}`)
 })
 
+// ⚠ This block used to isolate itself with `SET_AGENT_ROOM=aim`, and that stopped being
+// isolation on 2026-08-19: the Stop hook reads the SEAT's rooms now (`store.wakingRooms`), so
+// what is unread in `team` reaches it here too — which is the fix, not a leak. The isolation the
+// assertion needs is an empty backlog elsewhere, so `team` is drained for this seat first.
 test("…nor does it hold that seat's turn open", () => {
+  sac("two", "inbox", "team")
   assert.deepEqual(aimStop("two"), {},
     "the Stop hook blocked for a message addressed to another seat")
 })
@@ -314,4 +319,66 @@ test("a misspelt addressee fails the send LOUDLY, at the writer", () => {
   assert.notEqual(r.status, 0, "the send went through — that entry would have woken nobody")
   assert.match(r.stderr, /nobody in "aim" is called/)
   assert.match(r.stderr, /web-app#three/, "the error does not name who could have been meant")
+})
+
+// ── a room this seat JOINED, that the environment has never heard of ─────────
+//
+// ⚠ MEASURED 2026-08-19. The skill tells a session to run `sac join <room> --create` when a room
+// is its own — and until this block existed, nothing that WAKES anybody read the result. The Stop
+// hook iterated `SET_AGENT_ROOM`; `sac wait` resolved its room list once, at arm time, from the
+// argv the SessionStart note handed it. So `send` answered `wakes: ["web-app#three"]` and the seat
+// was never told: a decision with no delivery, which is the one number this project treats as its
+// weakest link. Both halves now read `store.wakingRooms` — the environment seeds it, the seat's
+// own membership answers it.
+const solo = session => ({ ...env(session), SET_AGENT_ROOM: "team" })
+const soloRun = (session, ...args) =>
+  spawnSync(process.execPath, [SAC, ...args], { env: solo(session), encoding: "utf8" })
+const soloStop = session => JSON.parse(spawnSync(process.execPath, [STOP], {
+  env: solo(session), encoding: "utf8", input: JSON.stringify({ cwd: "/x", session_id: session }),
+}).stdout || "{}")
+
+test("a room joined mid-session BLOCKS the turn, though the environment never named it", () => {
+  assert.equal(soloRun("three", "join", "pair", "--create").status, 0)
+  assert.equal(soloRun("one", "join", "pair").status, 0)
+  const sent = JSON.parse(soloRun("one", "send", "pair", "REQUEST", "Only you.", "--to", "web-app#three").stdout)
+  assert.deepEqual(sent.wakes, ["web-app#three"], "the store did not even claim to wake it")
+
+  const r = soloStop("three")
+  assert.equal(r.decision, "block", "the wake-up was reported to the SENDER and never delivered")
+  assert.match(r.reason, /pair/)
+  assert.match(r.reason, /Only you\./)
+})
+
+test("…and `sac wait`, armed with a different room, finds it too", () => {
+  // Drain what this seat is already owed elsewhere: `--once` exits on the FIRST room with
+  // something waking in it, and the point here is which rooms it looks at, not which one wins.
+  for (const r of ["team", "aim"]) soloRun("three", "inbox", r)
+  const sent = JSON.parse(soloRun("one", "send", "pair", "REQUEST", "Second one.", "--to", "web-app#three").stdout)
+  assert.ok(sent.ts)
+  // Armed with `team`, exactly as the SessionStart note arms it — the joined room is not in argv.
+  // Exactly how the SessionStart hook arms it: the configured rooms in the ENVIRONMENT, and no
+  // room named as an argument — an argument list means "watch exactly these", on purpose.
+  const r = spawnSync(process.execPath, [SAC, "wait", "--once"], {
+    env: solo("three"), encoding: "utf8", timeout: 20_000,
+  })
+  assert.match(r.stdout, /in "pair"/, "the watch never looked at the room this seat joined")
+  assert.match(r.stdout, /Second one\./)
+})
+
+test("`part` stops the waking too — the environment may add a room, never keep one you left", () => {
+  assert.equal(soloRun("three", "part", "pair").status, 0)
+  const sent = JSON.parse(soloRun("one", "send", "pair", "REQUEST", "Third one.", "--to", "web-app#three").stdout)
+  assert.ok(sent.ts)
+  const r = soloStop("three")
+  assert.doesNotMatch(JSON.stringify(r), /Third one\./, "a parted room still held the turn open")
+})
+
+test("a room named as an ARGUMENT means exactly that room — an explicit list is not a seed", () => {
+  const sent = JSON.parse(soloRun("one", "send", "pair", "REQUEST", "Fourth one.", "--to", "web-app#three").stdout)
+  assert.ok(sent.ts)
+  assert.equal(soloRun("three", "join", "pair").status, 0)      // back in, after the `part` above
+  const r = spawnSync(process.execPath, [SAC, "wait", "--once", "team"], {
+    env: solo("three"), encoding: "utf8", timeout: 8000,
+  })
+  assert.doesNotMatch(r.stdout, /pair/, "an explicit room list quietly widened itself")
 })

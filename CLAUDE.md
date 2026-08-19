@@ -35,7 +35,8 @@ src/store.mjs     the core: registry + channel. ZERO runtime deps, fully SYNCHRO
                   hooks and cron import it where there is no node_modules and no event loop.
 src/tools.mjs     the MCP tool definitions + handlers, transport-independent
 src/stdio.mjs     transport 1 (DEFAULT): identity = cwd, unforgeable
-src/http.mjs      transport 2: identity = URL path (/mcp/<agent>), for a daemon
+src/http.mjs      transport 2: identity = URL path (/mcp/<agent>) + a per-agent token
+                  (`sac http-token`) — WITHOUT one, any local process may connect as any agent
 bin/sac.mjs       the CLI on the same core, so CLI and MCP cannot drift apart
 hooks/*.mjs       session-start (check in + watchPaths) and stop (block on unread mail).
                   Both go SILENT for a headless `claude -p` — see `store.headless`
@@ -62,6 +63,17 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   re-implement it at a call site.
 - **Nothing but `inbox` advances the cursor.** Hooks and `sac wait` pass `advance: false`. A
   notification is not a delivery.
+- **The rooms that WAKE a seat come from the seat's own book, never from the environment**
+  (`store.wakingRooms`): configured ∪ declared, minus what it has `part`ed, re-read on every check.
+  Measured 2026-08-19: a room joined mid-session was watched by nothing — the Stop hook iterated
+  `SET_AGENT_ROOM` and `sac wait` resolved its list once, at arm time — while `send` reported that
+  it woke the seat. The one exception is an explicit room list argued to `sac wait`, which means
+  exactly those rooms; that is why the SessionStart note passes the rooms in the ENVIRONMENT and
+  leaves the argument list empty.
+- **A seat name is a complete address** (`store.resolveRoom`, one rule, both faces). An addressee
+  reachable in exactly one of your rooms names that room; in several, you are asked; in none, the
+  refusal says which room that seat IS in. A room chosen for you is always reported back, because
+  the room decides who may read the entry.
 - **The letterbox fails OPEN, the safety net fails CLOSED** (`triage.mjs`). Missing a message is
   the failure this project exists to prevent; a needless turn merely costs one. The net is the
   opposite: a net that guesses yes rebuilds the storm it was added to catch.
@@ -156,6 +168,13 @@ derivation had nowhere to live:
   was still on it, so the next hook run undid the leaving. `joinRoom` / `partRoom` now write both
   halves (`registerRoom` / `unregisterRoom`), and `register` **skips a room the seat has left** —
   the same asymmetry `seedMembers` already had, applied where it is visible.
+- **A DM is a room of two** (`store.dmRoom` / `sac dm`), decided 2026-08-19 — `docs/rooms.md` had
+  left it open. `pair: [a, b]` in `rooms.json` is DECLARED, not counted, and it is what makes the
+  two exceptions true: **every entry wakes the other side** (`wakes(…, pair)`), and **reading is
+  restricted** (`assertMayRead`, the only such place on the bus — a boundary in the tools, not a
+  secret: `sac admin` and any process of the same user still see the file). The name is derived from the two seat names (slugged: `#` would cut a relay URL off
+  at the fragment), so both sides compute the same one and no pair registry is needed.
+  `inviteToRoom` puts the peer in it and **will not undo a `part`**.
 - `presence.json` — `quiet`, the fourth state. It lives in `seatPresence()`, **not** as a fourth
   value of `seatState` (which stays `true`/`null`/`false`): every consumer treats those three
   distinctly, and a fourth value would silently reclassify a quiet seat inside all of them. Applied

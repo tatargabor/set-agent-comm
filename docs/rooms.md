@@ -174,6 +174,40 @@ two-member room or a different object. The membership machinery was built so tha
 foreclosed — in particular nothing assumes membership is symmetric, which a room implies and a DM
 may not want. Decide that here, on the evidence, not by reading the implementation.
 
+## Decided, 2026-08-19 — a DM is a room of two
+
+⚠ This page's own open question ("whether a DM is a two-member room or a different object") is
+answered, and the answer is the cheap one. It came out of a dictated review, not a design round:
+*"a project has four or five agents, and when I say settle it with agent X, that should not be
+written into the shared room."*
+
+**A DM is a room whose membership is two.** Nothing below the room was built. The reasoning is that
+the properties this page wanted from a separate object were all delivered by the declared-state
+work of 2026-08-11: a room is created on purpose, so join-on-write no longer holds and a third
+party cannot enroll itself by knocking; membership is per seat, so a room of two is expressible;
+and `left` sticks, so nobody is put back in.
+
+What was actually missing was **ergonomics**, and that is what `sac dm <seat>` is: it derives the
+room name from the two seat names (sorted, slugged — a seat carries `#`, and `bridge.mjs` puts a
+room name straight into a URL path where a `#` would cut it off at the fragment), so both sides
+compute the same name and no pair registry, invitation or lifecycle is needed. The name IS the
+agreement — which is exactly what this page asked a DM to be: *implicit, not created, not named,
+no lifecycle.* It is created and named; it is simply never chosen.
+
+⚠ **And a prerequisite turned up that nothing here had predicted.** A room of two would have been
+SILENT. Measured the same day: the Stop hook iterated `SET_AGENT_ROOM` and `sac wait` resolved its
+room list once, at arm time, so a room *joined* rather than configured was watched by nothing —
+`send` reported `wakes: [<the peer>]` and the peer was never told. The DM depends on
+`store.wakingRooms`, which makes the environment a seed and the seat's own membership the answer.
+Every design on this page that assumed `sac join` was enough carried the same defect.
+
+**Read-everything within a room is untouched.** It is still true, still the reason a DM was wanted,
+and now the way to opt out of it is to pick a smaller room rather than a different mechanism.
+
+Still open, and unchanged by this: **does a DM bridge, and with what key?** `relays.json` holds one
+key per room, so a bridged pair room needs its own — better isolation, but per-pair key management
+that nobody has costed. `sac dm` is local-only until that is answered.
+
 ## Open
 
 - **DM-to-project depends on the shared daemon.** Seat-addressed DMs are buildable immediately;

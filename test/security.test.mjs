@@ -12,6 +12,7 @@ import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 import { randomUUID, createHash } from "node:crypto"
+import * as nodeFs from "node:fs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const RELAY = join(HERE, "..", "src", "relay.mjs")
@@ -191,4 +192,61 @@ test("the store never grew a file outside its channels directory", () => {
   const stray = readdirSync(ROOT).filter(n => !["channels", "registry.json", "cursors.json",
     "nudges.json", "relays.json"].includes(n))
   assert.deepEqual(stray, [], `the store grew something it should not have: ${stray.join(", ")}`)
+})
+
+// ── the LOCAL door: the HTTP daemon's identity ───────────────────────────────
+//
+// ⚠ Measured 2026-08-19, and it was the weaker of the two transports all along: identity on
+// `src/http.mjs` is the URL path and nothing else, so a process that was not that project
+// connected to `/mcp/api-service` and wrote as `api-service`, presenting nothing. stdio has no
+// such hole — identity is the cwd. Closed for the case that made it worth closing: a framework
+// that WRITES an agent's MCP config knows the name and can carry a secret into it.
+const HTTPD = join(HERE, "..", "src", "http.mjs")
+const initBody = JSON.stringify({
+  jsonrpc: "2.0", id: 1, method: "initialize",
+  params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "probe", version: "0" } },
+})
+const post = async (port, path, headers = {}) => {
+  const r = await fetch(`http://127.0.0.1:${port}/mcp/${path}`, {
+    method: "POST", body: initBody,
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+  })
+  return r.status
+}
+const daemon = async port => {
+  const p = spawn(process.execPath, [HTTPD], {
+    env: { ...process.env, SET_AGENT_COMM_DIR: ROOT, MCP_PORT: String(port), SET_AGENT_ROOM: ROOM },
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  await new Promise(res => p.stdout.once("data", res))          // it prints once it is listening
+  return p
+}
+
+test("with a token minted, the HTTP daemon refuses everything that cannot present it", async () => {
+  const { token } = store.mintHttpToken("fleet--0906")
+  const p = await daemon(7699)
+  try {
+    assert.equal(await post(7699, "fleet--0906"), 401, "no credential at all was admitted")
+    assert.equal(await post(7699, "fleet--0906", { authorization: "Bearer wrong" }), 401)
+    // The token is bound to the NAME: holding one does not let you speak as somebody else, which
+    // is the whole property the URL path could not provide on its own.
+    assert.equal(await post(7699, "someone-else", { authorization: `Bearer ${token}` }), 401)
+    assert.equal(await post(7699, "fleet--0906", { authorization: `Bearer ${token}` }), 200)
+  } finally { p.kill() }
+})
+
+test("…and revoking one closes that door without touching the others", async () => {
+  const other = store.mintHttpToken("fleet--0907").token
+  store.revokeHttpToken("fleet--0906")
+  const p = await daemon(7698)
+  try {
+    assert.equal(await post(7698, "fleet--0907", { authorization: `Bearer ${other}` }), 200)
+    assert.equal(await post(7698, "fleet--0906", { authorization: `Bearer ${other}` }), 401)
+  } finally { p.kill() }
+})
+
+test("the token file is not world-readable — anyone who can read it can BE that agent", () => {
+  const { statSync } = nodeFs
+  const mode = statSync(join(ROOT, "http-tokens.json")).mode & 0o777
+  assert.equal(mode, 0o600, `http-tokens.json is mode ${mode.toString(8)}`)
 })
