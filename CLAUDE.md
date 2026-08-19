@@ -214,6 +214,9 @@ collapsing them would hide the one number that says whether it earns its cost.
   and retractions kept visible rather than edited away. Read them before designing anything that
   touches rooms or cross-project traffic: `docs/rooms.md` (what a channel is: DM vs room — upstream
   of the other) and `docs/cross-project-requests.md` (the authorization and wake-up layer).
+  **`docs/not-built-yet.md` is the open-ends list** — what was deliberately left on 2026-08-19 and
+  why, with the numbers behind each one. Read it before picking up anything in this area; several
+  of its items are "do not build this unless somebody's rule needs it".
 - Style: ESM, no semicolons, double quotes, 2-space indent, no runtime dependency in the core.
 
 ## Env vars worth knowing
