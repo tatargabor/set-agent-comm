@@ -217,6 +217,27 @@ collapsing them would hide the one number that says whether it earns its cost.
   **`docs/not-built-yet.md` is the open-ends list** — what was deliberately left on 2026-08-19 and
   why, with the numbers behind each one. Read it before picking up anything in this area; several
   of its items are "do not build this unless somebody's rule needs it".
+- **The language of this repo is ENGLISH** — code, identifiers, UI strings, comments, `.md` docs
+  and specs. Gábor's rule for the open-source `set-*` projects, 2026-08-19: Hungarian belongs to the
+  consumer projects, the same cut the architecture already makes between the framework and the
+  domain. **Talking to the user stays Hungarian** — the rule is about what goes INTO the repo.
+
+  Four exceptions, and they are the load-bearing half — applied without them, the rule damages what
+  it touches:
+  1. a deliberate translation ALONGSIDE the English (`docs/**/hu/`);
+  2. a fixture that SIMULATES a Hungarian consumer — translate it and it stops resembling the thing
+     it stands in for (`demo/scenarios/*.json`, all five of them);
+  3. a verbatim quote inside an English comment — the measured traffic this codebase reasons from
+     (`"Vettem — és jól tetted…"`, `## Hatókör — megerősítve`). Translating evidence destroys it;
+  4. **wire compatibility**: `LEGACY_TYPES` in `store.mjs` maps `KÉRDÉS`/`VÁLASZ`/`TÉNY`/`KÉRÉS`
+     onto the four types. That Hungarian is DATA — it exists to keep reading what older senders
+     wrote — and it is the only Hungarian string literal in anything shipped (measured 2026-08-19).
+
+  ⚠ **Translate a file and its tests in the SAME commit, and say in the message what was left.**
+  Measured on set-core the same day: one screen's Hungarian UI strings were translated with no i18n
+  layer under them, six unit tests asserted on those literals directly, and 15 tests failed — all
+  15 on text, none on behaviour. A half-translated screen is worse than either end state: an
+  assertion against a string the source does not say yet tests a screen nobody built.
 - Style: ESM, no semicolons, double quotes, 2-space indent, no runtime dependency in the core.
 
 ## Env vars worth knowing
