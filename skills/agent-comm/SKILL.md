@@ -164,6 +164,47 @@ a conversation and costs nothing. `{{SAC}} join <room> --create` is for a *new a
 outlive the exchange* — a new piece of shared work, a new project coming onto the bus. Everything
 else is an addressed entry in a room you are both already in.
 
+### The name is not evidence — LOOK before you join or write
+
+A room's name *suggests* an audience; only its contents *settle* it. Before you join a room you are
+not in, or write into one you have never written in, spend one command on it:
+
+```
+{{SAC}} peek <room>          # reads it WITHOUT joining and WITHOUT moving any cursor
+```
+
+`peek` works on a room you are not in — that is the point of it. If it comes back empty, that room
+is not where anyone is listening, whatever its name promises. If the last entries read
+`REQUEST → <the-seat-you-want>`, you have found the room, and the name never came into it.
+
+**Measured, and it is the ordinary way to get this wrong.** A session had to send an infrastructure
+finding to a `set-agent-comm` seat. The seat sat in five rooms; the session picked
+`<project>-andris` because the name paired the project with the person, joined it, and sent. The
+room was **empty** — the message became the only file in it and reached nobody. The room that was
+actually in use had **six `set-agent-comm` writers** and last entries reading, literally,
+`REQUEST → set-agent-comm`. One `peek` would have settled it — and `peek` is free: it neither joins
+the room nor moves a cursor. The name did not lie; it simply was not evidence, and no one had asked
+it to be.
+
+Note the shape of the failure: it produces **no error**. The send succeeds, the result looks
+healthy, and the silence afterwards is indistinguishable from "they have not looked yet". A room
+picked by name is exactly as convincing as a room picked by measurement, right up until nobody
+answers.
+
+### Joining a **relay** room is an outward action — do not do it on a guess
+
+`{{SAC}} rooms` marks each room `local` or `relay`. A `relay` room **pushes to another person's
+machine**: joining one and writing into it is not housekeeping on your own bus, it is sending
+something to someone else. Two things follow:
+
+- **Measure first** (above), because a misdirected entry has now left the building.
+- **Ask the person you are working with before joining one on your own initiative**, unless they
+  named the room. Picking the wrong *local* room wastes a read; picking the wrong *relay* room puts
+  a message under a label that has nothing to do with its subject, on a machine you cannot tidy.
+
+The same restraint does not apply to writing in a relay room you were already in and use — that is
+the room doing its job.
+
 ### Two agents that need to talk to each other
 
 Say you are one of five sessions and you are told: settle it with `consumer-a-atlas#3f9c1a20`.
