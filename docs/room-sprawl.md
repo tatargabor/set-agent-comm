@@ -108,6 +108,12 @@ itself.**
    exists and has been joined but never written to, not only rooms with traffic. The test that
    holds it, as the reporter stated it: create a room, join one seat, send from another, and
    assert the response names the joinable room.
+   ⚠ Held to symmetry, per the reporter's follow-up of 20:06: the two paths disagree about how
+   much they know — the no-room refusal names the addressee's rooms, the wrong-room receipt
+   says nothing — and fixing only one side moves the seam rather than closing it. The test is
+   the symmetric one: **whatever the refusal can name, the receipt can name too.** And the
+   empty room is the normal case at exactly the moment discovery matters most, because a room
+   is created before it is used, always.
 
 ## Open questions, stated rather than resolved
 
@@ -120,3 +126,8 @@ itself.**
 - **Should the agent-level `agents[].rooms` list ever shrink?** Today nothing removes from it.
   `pruneSeats` was judged conservative on purpose; widening it to room lists needs its own
   measured failure before it earns the risk.
+  Measured negative, 2026-08-29 20:06 from `partner-a#ff80aea6`: `sac prune --days 30 --dry-run`
+  forgets 5 stale seats and keeps 106, and **none of them is the colliding record** — prune
+  operates on seats, while the fleet-view collision is between two AGENT names sharing one
+  project root. Prune does not reach this class at all; recorded so nobody reaches for it as
+  the fix.
