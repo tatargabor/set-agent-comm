@@ -1204,12 +1204,33 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   const elsewhere = dormant.filter(n =>
     knownSeats.some(([w, s]) => isForMe({ to: [n] }, w) && seatState(s) !== false))
   const gone = dormant.filter(n => !elsewhere.includes(n))
-  if (elsewhere.length)
+  if (elsewhere.length) {
+    // ⚠ AND WHERE IT DOES LISTEN — the symmetric half of the no-room refusal, added 2026-08-29
+    // after the measured false-success in `docs/room-sprawl.md`: two of three sends returned
+    // success, `wakes: []`, and a notice that stopped at "has not joined" — although the
+    // mechanism could tell where the addressee DID listen. The refusal names the addressee's
+    // rooms; the receipt names them too now, or the seam has only moved (the reporter's own
+    // hold: "whatever the refusal can name, the receipt can name too"). The rooms come from the
+    // matched seats' own records and book, never from `participants` of this room — the current
+    // room is exactly the one it has NOT joined, and an agent-level roster mention of it proves
+    // nothing about the seat.
+    const listening = new Set()
+    for (const [w, s] of knownSeats) {
+      if (!elsewhere.some(n => isForMe({ to: [n] }, w)) || seatState(s) === false) continue
+      for (const r of (s.rooms || [])) listening.add(r)
+      for (const r of (members(w) || [])) listening.add(r)
+    }
+    listening.delete(room)
+    const listens = [...listening].sort()
     notice.push(`${elsewhere.map(n => `'${n}'`).join(", ")} IS running, but has not joined ` +
       `'${room}' — so it was not woken, and this entry is not in its inbox here. The entry is in ` +
       `the room and will be read once that session joins: arm its watch with ` +
-      `SET_AGENT_ROOM=${room}, or have it write to '${room}' once. \`agents\` shows which rooms ` +
-      `each seat has joined.`)
+      `SET_AGENT_ROOM=${room}, or have it write to '${room}' once.` +
+      (listens.length
+        ? ` That seat listens in ${listens.map(r => `'${r}'`).join(", ")} — address it there, ` +
+          `or re-send here once it has joined.`
+        : ` \`agents\` shows which rooms each seat has joined.`))
+  }
   if (gone.length)
     notice.push(`No session of ${gone.map(n => `'${n}'`).join(", ")} is running. The entry ` +
       `waits in the room and is read if that session comes back — \`agents\` lists who is live now.`)
@@ -1373,7 +1394,26 @@ export function participants(room) {
 export function roomsReaching(to) {
   const want = parseTo(to)
   if (!want.length) return []
-  return knownRooms().filter(r => participants(r).some(p => want.includes(p)))
+  const hit = knownRooms().filter(r => participants(r).some(p => want.includes(p)))
+  // ⚠ AND THE SEAT'S OWN BOOK — added 2026-08-29, the discovery half of the false-success
+  // defect in `docs/room-sprawl.md`: a room created and joined but NEVER WRITTEN TO has no
+  // writer file, and at that exact moment discovery matters most, because a room is created
+  // before it is used, always. `members.json` is the membership record the reporter named —
+  // it is why the mechanism "had the answer both times" and the suggestion did not. Kept OUT
+  // of `participants` on purpose: that function answers "who may be addressed" and already
+  // reads two sources; the repo's own note in `docs/not-built-yet.md` §7 says a fourth would
+  // be one too many. Rooms the seat has LEFT are not re-offered: `partRoom` removes them from
+  // this list, and a person's decision outranks a suggestion.
+  const membersBook = readJson(MEMBERS, {})
+  for (const n of want) {
+    for (const [seat, rec] of Object.entries(membersBook)) {
+      if (!addressForms(seat).has(n)) continue
+      for (const r of (Array.isArray(rec?.rooms) ? rec.rooms : [])) {
+        if (!hit.includes(r)) hit.push(r)
+      }
+    }
+  }
+  return hit.sort()
 }
 
 /**

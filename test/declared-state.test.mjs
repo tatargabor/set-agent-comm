@@ -418,6 +418,58 @@ test("an archived room is NOT resurrected by the settings that name it", () => {
   store.restoreRoom("regi-wired")   // leave the store as the tests below expect it
 })
 
+// ── step 5: the receipt tells the truth the refusal tells ─────────────────────
+//
+// The measured false-success of 2026-08-29 (docs/room-sprawl.md): two of three sends returned
+// success with `wakes: []` and a notice that stopped at "has not joined", although the
+// mechanism could tell where the addressee DID listen. The reporter's hold on the fix:
+// "whatever the refusal can name, the receipt can name too."
+
+test("the receipt names where a not-joined addressee listens — symmetric with the refusal", () => {
+  store.createRoom("szoba-b", seatB)
+  // Alive, registered, listening in szoba-b — and absent from szoba-a, whose roster knows the
+  // AGENT name only, the way an old session's registration leaves it behind. That is exactly
+  // how the measured send passed addressing and then woke nobody.
+  store.register({ agent: "beta", session: "bbbb2222-0000-4000-8000-000000000001",
+                   room: "szoba-b", writer: seatB })
+  store.joinRoom(seatB, "szoba-b")
+  store.createRoom("szoba-a", seatA)
+  const regpath = join(ROOT, "registry.json")
+  const reg = JSON.parse(readFileSync(regpath, "utf8"))
+  reg.agents.beta.rooms = [...new Set([...(reg.agents.beta.rooms || []), "szoba-a"])]
+  writeFileSync(regpath, JSON.stringify(reg, null, 2))
+
+  const r = store.send({ room: "szoba-a", from: seatA, type: "QUESTION", text: "hol vagy",
+                         to: ["beta"] })
+  assert.deepEqual(r.wakes, [], "the fixture is wrong: the send woke somebody")
+  const said = (r.notice || []).join(" ")
+  assert.match(said, /has not joined/, "the old notice did not fire at all")
+  assert.match(said, /szoba-b/, "the receipt does not name the room where the addressee listens")
+  assert.doesNotMatch(said, /listens in 'szoba-a'/, "the receipt offered the room it has NOT joined")
+})
+
+test("discovery sees a room that was created and joined but never written to", () => {
+  // The reporter's sharpest half: a NEW room is invisible to every discovery route except the
+  // membership record — and a room is created before it is used, always, so the empty case is
+  // the normal one at exactly the moment discovery matters most.
+  store.createRoom("uj-szoba", seatB)
+  store.joinRoom(seatB, "uj-szoba")
+  // Not one entry written. The roster alone must answer…
+  assert.ok(store.roomsReaching([seatB]).includes("uj-szoba"),
+    "a joined but never-written room is missing from discovery with its roster record present")
+  // …and with even the roster record gone, the seat's own book (`members.json`) still answers —
+  // the state the reported room was actually found in.
+  const regpath = join(ROOT, "registry.json")
+  const reg = JSON.parse(readFileSync(regpath, "utf8"))
+  for (const a of Object.values(reg.agents)) {
+    for (const s of Object.values(a.seats || {})) s.rooms = (s.rooms || []).filter(r => r !== "uj-szoba")
+    a.rooms = (a.rooms || []).filter(r => r !== "uj-szoba")
+  }
+  writeFileSync(regpath, JSON.stringify(reg, null, 2))
+  assert.ok(store.roomsReaching([seatB]).includes("uj-szoba"),
+    "the joined-but-unwritten room disappeared from discovery once the roster forgot it")
+})
+
 test("the read cursors go with the room, and only that room's", () => {
   store.createRoom("kurzoros", zart)
   store.createRoom("marad", zart)

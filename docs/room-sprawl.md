@@ -108,6 +108,11 @@ itself.**
    exists and has been joined but never written to, not only rooms with traffic. The test that
    holds it, as the reporter stated it: create a room, join one seat, send from another, and
    assert the response names the joinable room.
+   **Built 2026-08-29, the day it was filed** — `send`'s not-joined notice now enumerates the
+   rooms the matched seats' own records and `members.json` book name (never the current room),
+   and `roomsReaching` reads the seat's own book as a second discovery source, kept out of
+   `participants` on purpose. Both acceptance tests are in `test/declared-state.test.mjs`; the
+   second-seat run from `partner-a#ff80aea6` remains the outstanding verification.
    ⚠ Held to symmetry, per the reporter's follow-up of 20:06: the two paths disagree about how
    much they know — the no-room refusal names the addressee's rooms, the wrong-room receipt
    says nothing — and fixing only one side moves the seam rather than closing it. The test is
