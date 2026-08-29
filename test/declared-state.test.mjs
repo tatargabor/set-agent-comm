@@ -344,6 +344,62 @@ test("…unless the operator says --force, who may know better than the default"
   assert.ok(!store.roomExists("lakott"))
 })
 
+// ── a DM retires itself once neither side is reachable ───────────────────────
+//
+// ⚠ Added 2026-08-29 from `docs/room-sprawl.md`: a pair room's name is derived from two SEAT
+// names, and seats are session-scoped, so a DM room can never be reused by a later conversation
+// — and until now nothing retired one. The sweep (`archiveDeadPairRooms`) is the auto form of
+// `sac rooms --archive`, bound to pair rooms only, because a dead pair room cannot mean "paused"
+// the way a dead ordinary room can.
+
+const gomb1 = "gombe-projekt#cccc3333"
+const gomb2 = "gombb-projekt#cccc4444"
+
+test("a pair room with a reachable side is left alone", () => {
+  store.createRoom("dm-eles", seatA, { pair: [seatA, seatB].sort() })
+  store.send({ room: "dm-eles", from: seatA, type: "FACT", text: "itt vagyok" })
+  assert.deepEqual(store.archiveDeadPairRooms(), [], "it swept a room somebody is still in")
+  assert.ok(store.roomExists("dm-eles"))
+})
+
+test("a pair room whose both seats are gone is swept; an ordinary dead room is not", () => {
+  store.createRoom("dm-holt", gomb1, { pair: [gomb1, gomb2].sort() })
+  store.send({ room: "dm-holt", from: gomb1, type: "FACT", text: "vegeztunk" })
+  store.createRoom("sima-holt", gomb1)
+  store.send({ room: "sima-holt", from: gomb1, type: "FACT", text: "ez meg var" })
+  closeWindow(gomb1)
+  // `closeWindow` only edits seats the registry already has, so the peer — who never wrote —
+  // needs no closing: an unregistered seat is nobody, and nobody is not reachable either.
+  assert.deepEqual(store.archiveDeadPairRooms(), ["dm-holt"],
+    "the sweep took the wrong rooms (or missed its own)")
+  assert.ok(!store.roomExists("dm-holt"))
+  assert.ok(store.roomExists("sima-holt"),
+    "an ordinary room is history someone may return to — it waits for `sac rooms --archive`")
+})
+
+test("the dry run reports the sweep without performing it", () => {
+  store.createRoom("dm-proba", gomb1, { pair: [gomb1, gomb2].sort() })
+  assert.deepEqual(store.archiveDeadPairRooms({ dry: true }), ["dm-proba"])
+  assert.ok(store.roomExists("dm-proba"), "the dry run archived the room anyway")
+  assert.deepEqual(store.archiveDeadPairRooms(), ["dm-proba"])
+})
+
+test("a swept DM's pair rides out the archive and comes back with it", () => {
+  // Without this, restoring a DM would hand back an ordinary room wearing a DM's name — no
+  // wake-every-entry, no read restriction — and nothing would warn about it.
+  store.createRoom("dm-paros", gomb1, { pair: [gomb1, gomb2].sort() })
+  store.send({ room: "dm-paros", from: gomb1, type: "FACT", text: "szia" })
+  closeWindow(gomb1)
+  store.archiveDeadPairRooms()
+  assert.deepEqual(store.archivedRooms().filter(r => r.startsWith("dm-")).sort(),
+    ["dm-holt", "dm-paros", "dm-proba"])
+  const r = store.restoreRoom("dm-paros")
+  assert.deepEqual(r.pair, [gomb1, gomb2].sort())
+  assert.deepEqual(store.pairOf("dm-paros"), [gomb1, gomb2].sort())
+  assert.ok(store.roomExists("dm-paros"))
+  store.archiveRoom("dm-paros", { force: true })   // leave the store as the tests below expect it
+})
+
 test("the read cursors go with the room, and only that room's", () => {
   store.createRoom("kurzoros", zart)
   store.createRoom("marad", zart)

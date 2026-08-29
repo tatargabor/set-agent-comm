@@ -68,7 +68,7 @@ const USAGE = {
   history: "sac history <room> [n]              read back",
   install: "sac install <room>[,<room>…] [--dry-run] [--replace]   · adds to the project's rooms; --replace cuts it down to what you name",
   wait: "sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)",
-  prune: "sac prune [--days N] [--dry-run]    forget seats whose window is long gone",
+  prune: "sac prune [--days N] [--dry-run]    forget dead seats, and retire DM rooms nobody is left in",
   "watch-paths": "sac watch-paths <room>              the files to watch (for the hook)",
   register: "sac register <room>                 check in to the registry",
   relay: "sac relay use <url> --secret <s>   |   sac relay status",
@@ -378,6 +378,10 @@ try {
       for (const d of r.dropped) console.log(`${dry ? "would drop" : "dropped  "} ${d.seat.padEnd(44)} last seen ${d.lastSeen || "never"}`)
       console.log(`${r.dropped.length} seat(s) ${dry ? "would be forgotten" : "forgotten"}, ${r.kept} kept` +
         ` — no message file is ever touched${dry ? " (dry run: nothing was written)" : ""}`)
+      // Dead PAIR rooms are the one exception to "no message file is ever touched" — the files
+      // move to the archive, they do not go away (see `store.archiveDeadPairRooms`).
+      const swept = store.archiveDeadPairRooms({ dry })
+      for (const room of swept) console.log(`${dry ? "would archive" : "archived "} dm:${room.padEnd(40)} both seats gone — restore: sac rooms --restore ${room}`)
       break
     }
     case "unread": {
@@ -800,6 +804,10 @@ try {
         if (once) process.exit(0)
       }
 
+      // In memory, and correctly so — unlike `shouldNudge`, which had to go to disk. This
+      // suppresses a LEDGER LINE, not a delivery: losing it on restart costs one duplicate
+      // statistic, while the entry itself is still unread and still announced normally.
+      const heldSaid = new Set()
       const check = async () => {
         watched = roomsNow()
         for (const room of watched) {
@@ -808,6 +816,41 @@ try {
           const waking = r.messages.filter(m => m.wakes)
           const last = waking.at(-1)
           if (!last) { await net(room, r); continue }
+
+          /**
+           * ⚠ A SEAT THAT IS MID-TURN IS NOT WOKEN — IT IS LET FINISH. Measured 2026-08-27 across
+           * the whole ledger: of 380 deliveries, 44 were the same entry announced by the Monitor
+           * and then, a median of 119 seconds later, blocked on by the Stop hook. Every one of
+           * those 44 ran `announced → blocked`, never the other way: the Monitor spent a turn,
+           * the agent did not read the entry (the cursor never moved), and the Stop hook had to
+           * say it again at the end of the turn anyway.
+           *
+           * The second delivery is the cheap one. A Stop hook lands in a context that is already
+           * loaded; a Monitor notification to an idle session pays for the whole context again —
+           * and 55% of all deliveries came more than five minutes after the previous one, i.e.
+           * into a cold one. So when the seat is demonstrably working, the right move is to say
+           * nothing and let the Stop hook do it.
+           *
+           * ⚠ THIS IS A DELAY, NEVER A DROP, and it is bounded by the heartbeat itself: the stamp
+           * goes stale ~90 seconds after the last tool call, so a seat that stops working is
+           * announced to normally. Nothing is marked read, `shouldNudge` is NOT spent (that is
+           * why this sits above it — a nudge burned here would mean silence after the seat goes
+           * quiet, turning a delay into the drop this project exists to prevent), and the
+           * letterbox is not called, so the hold costs nothing at all.
+           *
+           * ⚠ A DIRECT ADDRESS IS NEVER HELD. Someone typed this seat's name; a delay is the
+           * expensive mistake there, and `triage.isDirect` is the one rule for it.
+           */
+          if (store.seatBusy(ME) && !triage.isDirect(last, ME)) {
+            // Recorded once per entry — this fires every 5 s while the turn runs, and a ledger
+            // that logged each pass would drown the numbers it exists to produce.
+            if (!heldSaid.has(last.ts)) {
+              heldSaid.add(last.ts)
+              store.recordDecision({ room, seat: ME, entry: last.ts, by: "held-busy", woke: false })
+            }
+            await net(room, r); continue
+          }
+
           // ⚠ THE LEDGER IS ON DISK (`shouldNudge`), not in a variable here. Measured 2026-08-06:
           // an in-memory ledger meant every restart of this process re-announced the whole
           // backlog — the same three notifications, 32 seconds apart, one of them "48 unread FOR
@@ -851,6 +894,31 @@ try {
             (rest > 0 ? ` (${rest} other unread ${rest === 1 ? "entry" : "entries"} here, none urgent.)` : ""))
           if (once) process.exit(0)
         }
+      }
+
+      // ⚠ ONE WATCH PER SEAT, AND THE NEW ONE WINS — before the file watchers are armed, not
+      // after. See `store.claimWatch` for the measurement (19 processes, 8 sessions) and for why
+      // the newer process is the one that may keep the claim.
+      //
+      // The order matters twice over. The old watcher holds an inotify INSTANCE, and this
+      // machine ran out of those on 2026-08-17 — 126 of 128 in use — with the failure landing on
+      // whichever watch was armed NEXT. Stopping the duplicate first hands its instance back
+      // before we ask for ours; doing it afterwards would mean competing with the process we are
+      // about to stop. The 250 ms is for the same reason: SIGTERM returns immediately, the exit
+      // that frees the instance does not.
+      const claim = store.claimWatch({ seat: ME, rooms: watched })
+      // The dead heat: another watch of this seat claimed it in the same instant. One of us has
+      // to go, both of us can see which — see `lost` in `store.claimWatch`.
+      if (claim.lost) {
+        console.error(`[set-agent-comm] another watch of ${ME} (pid ${claim.heldBy}) claimed the ` +
+          `seat at the same moment — leaving it to that one.`)
+        process.exit(0)
+      }
+      if (claim.superseded.length) {
+        console.error(`[set-agent-comm] stopped ${claim.superseded.length} older watch(es) of ` +
+          `${ME} (pid ${claim.superseded.join(", ")}) — one session should hold one watch, and ` +
+          `this is the one it armed last.`)
+        await new Promise(r => setTimeout(r, 250))
       }
 
       // Coalesce a burst. Four seats answering each other inside a minute is one conversation,
@@ -926,6 +994,57 @@ try {
           process.exit(0)
         }
       }, 30_000).unref()
+
+      /**
+       * ⚠ A WATCH MAY NOT OUTLIVE ITS OWN CODE. This is the rule CLAUDE.md already states for a
+       * person — "after changing anything on the read path, restart what polls" — turned into a
+       * mechanism, for the reason the heartbeat exists at all: a rule that has to be remembered
+       * under load is a rule that will be forgotten.
+       *
+       * The cost of forgetting it is not a stale feature, it is a corrupt log. This process
+       * INGESTS remote entries (the bridge loop below) into an APPEND-ONLY file. Whatever the old
+       * code writes meanwhile is written wrong for good — there is no later run that fixes it.
+       * Measured 2026-08-27: the oldest live watcher had been running 25.3 hours, i.e. through
+       * any commit anyone made that day.
+       *
+       * SETTLED_MS is what keeps this from being a restart storm. An edit is not one event: a
+       * save, an `npm install`, a `git checkout` all move several mtimes over several seconds,
+       * and exiting on the first of them means exiting again on the next. So the newest stamp
+       * must be OLDER than 30 seconds — i.e. the editing has stopped — before we act on it.
+       *
+       * The age cap is the other half, and it is the cheaper of the two: a watcher that has seen
+       * no commit at all still drifts, from ~50 MB at start to 161-195 MB after 20 hours
+       * (measured across 19 processes the same day). Exiting hands that back. `persistent: true`
+       * on the Monitor is what makes both of these free — the harness starts a new one, on the
+       * new code, at the new size. `SET_AGENT_WATCH_MAX_HOURS=0` turns the cap off.
+       *
+       * ⚠ STDERR, and exit 0. Every stdout line here is a NOTIFICATION and therefore a turn of
+       * the main agent, and "your watcher restarted itself" is nothing anyone can act on from
+       * inside a session. A non-zero exit would additionally read as a failed command to whoever
+       * started it by hand.
+       */
+      const CODE_AT_START = store.sourceStamp()
+      const SETTLED_MS = 30_000
+      const capHours = Number(process.env.SET_AGENT_WATCH_MAX_HOURS ?? 12)
+      const MAX_AGE_MS = capHours > 0 ? capHours * 3600_000 : Infinity
+      const STARTED_AT = Date.now()
+      const restart = why => {
+        console.error(`[set-agent-comm] ${why} — stopping so a fresh watch takes over. The ` +
+          `Monitor that armed this is persistent and starts one; if you started it by hand, ` +
+          `start it again.`)
+        process.exit(0)
+      }
+      // Half a minute is the right cadence for a 12-hour cap and a 30-second settle; a SHORTER cap
+      // (the tests set fractions of an hour) has to be checked proportionally, or the guard would
+      // first look long after the deadline it is guarding.
+      const TICK = Math.min(30_000, MAX_AGE_MS / 3)
+      setInterval(() => {
+        const newest = store.sourceStamp()
+        if (newest > CODE_AT_START && Date.now() - newest > SETTLED_MS)
+          restart("the set-agent-comm code under this watch changed since it started")
+        if (Date.now() - STARTED_AT > MAX_AGE_MS)
+          restart(`this watch has been running for over ${capHours}h`)
+      }, TICK).unref()
 
       // THE REMOTE LEG rides on this same watcher: for rooms that have a relay we long-poll it
       // in parallel, and what arrives is written into the local room — where the loop above
@@ -1074,12 +1193,18 @@ try {
         `dm: '${peer}' is in no room this store knows, so there is nobody to open one with. ` +
         `\`agents\` lists who is reachable.`)
       const room = store.dmRoom(ME, peer)
+      // Minting a DM pays for the dead ones (2026-08-29, `docs/room-sprawl.md`): a pair room
+      // whose both seats are gone can never be reused, and this is the one moment that is
+      // guaranteed to think about DMs at all.
+      const swept = store.archiveDeadPairRooms()
       // DECLARED, not counted: `pair` is what makes the two rules below true of this room —
       // only these two may read it, and every entry in it wakes the other one.
       const made = store.createRoom(room, ME, { pair: [ME, peer].sort() })
       store.joinRoom(ME, room)
       const invited = store.inviteToRoom(peer, room)
       json({ room, with: peer, created: made.created, invited,
+        ...(swept.length ? { swept,
+          sweptNote: `${swept.length} finished DM room(s) moved to the archive — restore: sac rooms --restore <room>` } : {}),
         ...(invited ? {} : { note: `'${peer}' has LEFT this room before, so it was not put back — ` +
           `that decision is theirs. Reach them in ${shared.join(", ")} instead.` }) })
       // The point of the room is who is NOT in it, so that is what gets said out loud.

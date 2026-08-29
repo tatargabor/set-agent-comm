@@ -10,6 +10,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, un
          existsSync, renameSync, openSync, fsyncSync, closeSync, statSync, chmodSync } from "node:fs"
 import { join, dirname, resolve } from "node:path"
 import { homedir, hostname } from "node:os"
+import { fileURLToPath } from "node:url"
 // Only for the non-Linux branch of `parentOf` — everything else here stays dependency-free and
 // synchronous, because hooks and cron call it where there is no node_modules and no event loop.
 import { execFileSync } from "node:child_process"
@@ -450,6 +451,113 @@ export function headless(owner = ownerPid()) {
   return printMode(owner) || ttyNr(owner) === 0
 }
 
+// ── the watch: one per seat, and never older than the code it runs ─────────────
+/**
+ * ⚠ Measured 2026-08-27 on this machine: 19 live `sac wait` processes held by EIGHT Claude Code
+ * sessions. One session had five, all on the same room list; two more had four and three. The
+ * "DIE WITH THE SESSION" guard in `sac wait` did not see any of it, and correctly so — it watches
+ * for REPARENTING, and every one of those sessions was alive. The duplicates come from the other
+ * direction: the SessionStart note says "arm your inbox watch once, now", and after a compact, a
+ * resume, or a second arm nothing tells the model that one is already running. Each arm adds a
+ * process; none of them removes one.
+ *
+ * What it cost, in the two currencies this project spends: 2.31 GB of RSS in watchers alone (a
+ * fresh one is ~50 MB, a 20-hour-old one 161-195 MB), and — from the ledger — 57 duplicate
+ * wake-ups, the same entry reported 2-4 times by 2-4 watchers of one seat. That is 15% of every
+ * wake this bus has ever delivered, and a wake is a whole turn.
+ *
+ * ⚠ THE NEW WATCH WINS, the old one is stopped. The other order looks equally good and is wrong:
+ * the harness reads the Monitor task it armed LAST, so an older process that kept the claim would
+ * be printing its notifications into a task nobody is listening to — the same silent delivery
+ * failure as no watch at all, which is the one failure this project does not accept.
+ *
+ * This is NOT a lock, for the reason at the top of this file: a lock left by a dead session stays
+ * stuck forever. It is a stamp — a pid that is gone is simply overwritten, and nothing waits.
+ */
+const WATCHES = join(ROOT, "watches")
+
+/**
+ * Does that pid still look like one of our watches? Asked immediately before the signal, because
+ * a pid is a REUSABLE number: between the stamp being written and being read, the process may
+ * have exited and the kernel handed the same integer to something else. `alive()` cannot tell
+ * those apart, and the difference is whether we SIGTERM a stale watcher or a stranger's process.
+ *
+ * `/proc/<pid>/cmdline` is NUL-separated, so the argv boundaries are exact — the same reason
+ * `printMode` reads it rather than `ps -o args=`. Off Linux there is no such evidence, and the
+ * answer is NO: an extra watcher costs memory and a duplicate turn, while a wrong signal costs
+ * somebody else's process. The two are not comparable, so this one fails CLOSED.
+ */
+function looksLikeWatch(pid) {
+  try {
+    const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")
+    return argv.some(a => a.endsWith("sac.mjs") || a.endsWith("sac")) && argv.includes("wait")
+  } catch { return false }
+}
+
+/**
+ * Take the seat's watch. Returns the pids it stopped, so the caller can say so on STDERR —
+ * never stdout, where every line is a notification and therefore a turn.
+ *
+ * ⚠ ONLY a watch of the SAME WINDOW is stopped (`owner`, the `claude` process — the same identity
+ * `claimSeat` and the heartbeat use, not the session id, because the MCP server and the hook can
+ * be handed two different session ids for one window). Without an owner — cron, a bare terminal,
+ * a test — nothing is stopped at all: "no window" is not an identity, and two of them would be
+ * indistinguishable from one window twice.
+ */
+export function claimWatch({ seat, rooms = [], pid = process.pid, owner = ownerPid() }) {
+  assertSafeWriter(seat)                       // it becomes a file name; see the note on that fn
+  const file = join(WATCHES, `${seat}.json`)
+  const prev = readJson(file, null)
+  const superseded = []
+  if (prev && prev.pid !== pid && owner && prev.owner === owner
+      && alive(prev.pid) && looksLikeWatch(prev.pid)) {
+    // SIGTERM, not SIGKILL: the watcher holds an inotify instance and a relay long-poll, and a
+    // clean exit returns both. If it ignores the signal we do not escalate — a stuck process is
+    // a bug to find, not something to hide by killing it harder.
+    try { process.kill(prev.pid, "SIGTERM"); superseded.push(prev.pid) } catch { /* it just went */ }
+  }
+  ensureDir(WATCHES)
+  writeJson(file, { pid, owner: owner ?? null, rooms, startedAt: now() })
+
+  /**
+   * ⚠ AND THEN READ IT BACK — `lost` is the other half of the rule, found by its own test on
+   * 2026-08-27. Two watches armed in the same millisecond BOTH read "no previous claim", both
+   * stop nothing, and both stay: the check above is only sound against a claim that was already
+   * on disk when we looked. `writeJson` is tmp → fsync → rename, so the last writer wins
+   * atomically and everyone can see who that was.
+   *
+   * The loser exits (`bin/sac.mjs` acts on this) and exactly one watch survives. This is not the
+   * lock the top of this file rules out: nothing is held and nothing waits — a claim whose pid is
+   * gone is simply overwritten by the next arm, so a crash costs one restart, never a stuck seat.
+   */
+  const held = readJson(file, null)
+  const lost = !!held && held.pid !== pid && alive(held.pid) && looksLikeWatch(held.pid)
+  return { superseded, lost, heldBy: lost ? held.pid : null }
+}
+
+/**
+ * The newest mtime of the code this process is running, in ms. The watcher compares it against
+ * what it saw at start-up and exits when it moves — see the block on it in `bin/sac.mjs`.
+ *
+ * Directory mtimes rather than a hash: this runs every 30 seconds for the life of a watch, and
+ * `stat` on a couple of dozen files is free where reading and digesting them is not. It answers
+ * `0` if it can read nothing, and `0` never looks newer than a real stamp, so the check simply
+ * does not fire — the honest direction for a signal whose only action is to restart something.
+ */
+export function sourceStamp() {
+  const here = dirname(fileURLToPath(import.meta.url))
+  let newest = 0
+  for (const dir of [here, join(here, "..", "bin"), join(here, "..", "hooks")]) {
+    let names
+    try { names = readdirSync(dir) } catch { continue }
+    for (const n of names) {
+      if (!n.endsWith(".mjs")) continue
+      try { newest = Math.max(newest, statSync(join(dir, n)).mtimeMs) } catch { /* gone mid-scan */ }
+    }
+  }
+  return newest
+}
+
 /** The seat this window already holds, whatever either half thinks its session id is. */
 const seatOfOwner = (seats, owner) => owner
   ? Object.keys(seats).find(n => seats[n].owner === owner && seatState(seats[n]) !== false)
@@ -509,7 +617,58 @@ const SEAT_TTL_MS = 30 * 60_000
 const seatState = seat => {
   if (!seat) return false
   if (Object.keys(seat.writers || {}).some(p => alive(Number(p)))) return true
+  // ⚠ THE OWNER IS THE SESSION'S OWN PROCESS, recorded for exactly this question — and it was
+  // never consulted here. Measured 2026-08-29: seat `partner-a#d8d9bf29` had `owner` 2725597
+  // alive, the window open and mid-turn, while its single writer pid had long exited (a `sac`
+  // invocation is short-lived; the session is not). The seat therefore fell through to the TTL
+  // guess and answered `null` about a session that was demonstrably there.
+  //
+  // A live owner is the strongest evidence this file can have, and guessing from a timestamp
+  // while ignoring it is strictly worse. Placed AFTER the writer check so the cheap path is
+  // unchanged, and before the TTL so certainty always beats a guess.
+  if (seat.owner && alive(Number(seat.owner))) return true
   return Date.now() - (Date.parse(seat.lastSeen) || 0) < SEAT_TTL_MS ? null : false
+}
+
+/**
+ * Is this seat WORKING right now? The heartbeat (`hooks/heartbeat.mjs`, PostToolUse) refreshes
+ * `lastSeen` at most once a minute while a session is calling tools, so a stamp inside the last
+ * 90 seconds means "a turn is running" — and a turn that is running will reach its Stop hook,
+ * which blocks on unread mail. That is the whole point: the Stop hook delivers into a context
+ * that is already warm, while the Monitor's notification starts a cold one.
+ *
+ * ⚠ IT READS THE BEAT STAMP, NOT `lastSeen`, and the difference is the whole mechanism. Caught
+ * while building this, 2026-08-27: `lastSeen` is refreshed by `claimSeat`, i.e. by EVERY `sac`
+ * invocation — including `sac wait`'s own start-up. A watcher reading that would have declared
+ * its own seat busy for 90 seconds every time it started, silencing itself precisely when it had
+ * just been armed. The stamp under `beats/` has exactly one writer, the PostToolUse hook, so it
+ * means what this function claims it means: a tool call happened, therefore a turn is running.
+ *
+ * A consequence worth knowing: where the heartbeat hook is NOT installed there is no stamp, so no
+ * seat is ever busy and the hold never applies. That is the right default — the feature degrades
+ * to the behaviour that came before it rather than to silence.
+ *
+ * ⚠ NOT the same question as `seatState`, and it may not be folded into it. `seatState` is
+ * three-state and answers "is anyone there"; this answers "is anyone MID-TURN", which is a
+ * strictly narrower and much shorter-lived claim. A seat that is `true` for `seatState` is
+ * usually NOT busy — it has an MCP server alive and is sitting at the prompt.
+ *
+ * It fails towards NOT busy: no stamp, an unreadable registry, a seat we have never seen all
+ * answer `false`, and the caller then does the expensive, safe thing (wake). The rate limit is
+ * 60 s, so the window has to be wider than that or a working seat would flicker in and out of it
+ * between beats.
+ */
+const BUSY_MS = Number(process.env.SET_AGENT_BUSY_MS ?? 90_000)
+
+export function seatBusy(seat, within = BUSY_MS) {
+  const rec = readJson(REGISTRY, { agents: {} }).agents?.[seatBase(seat)]?.seats?.[seat]
+  if (!rec?.session) return false
+  // The seat name carries a PREFIX of the session id; the beat stamp carries the whole thing.
+  // The registry is what maps one to the other, which is also why this cannot be answered from
+  // the seat name alone.
+  try {
+    return Date.now() - statSync(join(ROOT, "beats", `${seatBase(seat)}#${rec.session}`)).mtimeMs < within
+  } catch { return false }                       // no stamp, no claim — see "fails towards NOT busy"
 }
 
 /**
@@ -1011,9 +1170,34 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   // long after its window closed — 25 of them for one project, measured. Addressing one of those
   // is not an error (the entry waits in the room, and a session that comes back reads it), but it
   // is not delivery either, and the difference is invisible unless it is said out loud.
+  // ⚠ THREE STATES, NOT TWO — and collapsing them sent an operator hunting for a dead process
+  // while the session sat there working. Measured 2026-08-29: a send to `partner-a#d8d9bf29`
+  // answered "No session is running"; its owner pid was alive the whole time, and the human
+  // had the window open on screen. What was actually true is that the seat had joined NO rooms,
+  // because that session never armed a watch — so `liveSeats(room)` rightly excluded it, and
+  // then the notice explained it with the one cause that was false.
+  //
+  // The advice for the two cases has nothing in common: "arm the watch there" versus "it waits
+  // until they come back". A sentence that covers both is wrong for whichever one is true, and
+  // the reader cannot tell which they got.
   const dormant = addressed.filter(n => !live.some(s => isForMe({ to: [n] }, s)))
-  if (dormant.length)
-    notice.push(`No session of ${dormant.map(n => `'${n}'`).join(", ")} is running. The entry ` +
+  const knownSeats = []
+  if (dormant.length) {
+    const reg = readJson(REGISTRY, { agents: {} })
+    for (const a of Object.values(reg.agents || {}))
+      for (const [w, s] of Object.entries(a.seats || {})) knownSeats.push([w, s])
+  }
+  const elsewhere = dormant.filter(n =>
+    knownSeats.some(([w, s]) => isForMe({ to: [n] }, w) && seatState(s) !== false))
+  const gone = dormant.filter(n => !elsewhere.includes(n))
+  if (elsewhere.length)
+    notice.push(`${elsewhere.map(n => `'${n}'`).join(", ")} IS running, but has not joined ` +
+      `'${room}' — so it was not woken, and this entry is not in its inbox here. The entry is in ` +
+      `the room and will be read once that session joins: arm its watch with ` +
+      `SET_AGENT_ROOM=${room}, or have it write to '${room}' once. \`agents\` shows which rooms ` +
+      `each seat has joined.`)
+  if (gone.length)
+    notice.push(`No session of ${gone.map(n => `'${n}'`).join(", ")} is running. The entry ` +
       `waits in the room and is read if that session comes back — \`agents\` lists who is live now.`)
   // ⚠ A QUIET ADDRESSEE BOUGHT NO ATTENTION, and that has to be visible at the moment of
   // writing, where it can still be redirected — the same argument as the two notices around it.
@@ -1858,7 +2042,12 @@ function assertSafeRoom(room) {
 }
 
 export function archivedRooms() {
-  try { return readdirSync(ARCHIVE).filter(d => !d.startsWith(".")).sort() } catch { return [] }
+  // Directories only: a pair room's stash (`<room>.json`, see `archiveRoom`) rides in the same
+  // directory, and a stash is not an archived room.
+  try {
+    return readdirSync(ARCHIVE, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !d.name.startsWith(".")).map(d => d.name).sort()
+  } catch { return [] }
 }
 
 export function archiveRoom(room, { force = false } = {}) {
@@ -1882,7 +2071,8 @@ export function archiveRoom(room, { force = false } = {}) {
     renameSync(from, to)
   }
   const all = readJson(ROOMS_FILE, {})
-  const declared = !!all[room]
+  const rec = all[room]
+  const declared = !!rec
   delete all[room]
   writeJson(ROOMS_FILE, all)
   // The read cursors go with it: they are keyed `<room>::<seat>` and mean nothing once the room
@@ -1893,7 +2083,18 @@ export function archiveRoom(room, { force = false } = {}) {
     if (key === `${room}::` || key.startsWith(`${room}::`)) { delete cursors[key]; dropped++ }
   }
   writeJson(CURSORS, cursors)
-  return { room, archived: true, entries, declared, cursorsDropped: dropped, at: to }
+  // A PAIR ROOM'S `pair` IS DECLARED STATE THAT LIVES ONLY HERE, so deleting the rooms.json
+  // entry would forget what kind of room this was — and a restore would bring back an ordinary
+  // room wearing a DM's name, with neither the wake-every-entry rule nor the read restriction.
+  // Added 2026-08-29 with the auto-retire of dead pair rooms below, which makes that restore
+  // path a matter of time rather than a rare operator whim. The stash rides beside the room in
+  // the archive dir and is consumed by `restoreRoom`.
+  let pair = null
+  if (Array.isArray(rec?.pair) && rec.pair.length === 2) {
+    writeJson(join(ARCHIVE, `${room}.json`), { pair: rec.pair, archivedAt: now() })
+    pair = rec.pair
+  }
+  return { room, archived: true, entries, declared, cursorsDropped: dropped, at: to, ...(pair ? { pair } : {}) }
 }
 
 export function restoreRoom(room) {
@@ -1903,11 +2104,47 @@ export function restoreRoom(room) {
   if (existsSync(channelDir(room))) throw new Error(`restore: a live room called '${room}' already exists`)
   renameSync(from, channelDir(room))
   // Declared again, because it exists again on purpose. The original creator is not recoverable —
-  // saying so beats inventing one.
+  // saying so beats inventing one. The pair IS recoverable: it rode out the archive beside the
+  // room (see `archiveRoom`), and without it a restored DM would silently be no DM at all.
+  const stashPath = join(ARCHIVE, `${room}.json`)
+  const stash = readJson(stashPath, null)
+  const pair = Array.isArray(stash?.pair) && stash.pair.length === 2 ? stash.pair : null
   const all = readJson(ROOMS_FILE, {})
-  all[room] = { by: null, at: now(), restored: true }
+  all[room] = { by: null, at: now(), restored: true, ...(pair ? { pair } : {}) }
   writeJson(ROOMS_FILE, all)
-  return { room, restored: true }
+  if (stash) { try { unlinkSync(stashPath) } catch { /* already gone — the stash did its job */ } }
+  return { room, restored: true, ...(pair ? { pair } : {}) }
+}
+
+/**
+ * A DM IS RETIRED AUTOMATICALLY ONCE NEITHER SIDE IS REACHABLE — added 2026-08-29, from the
+ * sprawl measured in `docs/room-sprawl.md`: a pair room's name is derived from two SEAT names,
+ * and seats are session-scoped, so every conversation mints a room that no later conversation
+ * can ever reuse — and until now nothing retired them. Two DM rooms existed; both were younger
+ * than 24 hours. An ordinary room waits for `sac rooms --archive`, because its emptiness may be
+ * a pause and its people may come back; a pair room with no reachable seat in it cannot mean
+ * that — both seats are provably gone (`seatState === false`, the rule `liveSeats` already
+ * reads), and the next contact between the same two sessions re-derives the name and
+ * re-declares the pair in `sac dm`, so archiving costs nobody anything. Unknown liveness
+ * (`null`) counts as present: the house rule is that a missed message is the failure, not a
+ * needless keep.
+ *
+ * Where it runs: `sac dm` (minting one pays for the dead ones), the SessionStart hook (the
+ * hygiene moment a session start already is), and `sac prune`. Dry for the `--dry-run` flag.
+ * Never throws for a room it lost a race on: two sessions starting at once may both sweep, and
+ * the loser's "no such room" is the winner's success.
+ */
+export function archiveDeadPairRooms({ dry = false } = {}) {
+  const all = readJson(ROOMS_FILE, {})
+  const swept = []
+  for (const [room, rec] of Object.entries(all)) {
+    if (!Array.isArray(rec?.pair) || rec.pair.length !== 2) continue
+    if (liveSeats(room).length) continue
+    swept.push(room)
+    if (dry) continue
+    try { archiveRoom(room) } catch { /* a racing sweep or archiver got there first */ }
+  }
+  return swept
 }
 
 /**

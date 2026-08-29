@@ -89,6 +89,13 @@ const backlog = []
 spawnSync(process.execPath, [join(HERE, "..", "bin", "sac.mjs"), "sync", ...rooms],
   { timeout: 2500, stdio: "ignore" })
 
+// A session start is the one hygiene moment this hook already owns, so the DM rooms whose both
+// seats are provably gone are retired here (store.archiveDeadPairRooms — 2026-08-29, see
+// docs/room-sprawl.md). This seat cannot be among the gone: it registered itself above, so any
+// pair room it is still in counts as reachable and survives. Silent, like everything else in
+// this hook — an archive able to fail a session start would be worse than the sprawl it fixes.
+try { store.archiveDeadPairRooms() } catch { }
+
 for (const room of rooms) {
   store.register({ agent, project: cwd, session, room, writer })
 
