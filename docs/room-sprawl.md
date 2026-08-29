@@ -114,6 +114,12 @@ itself.**
    the symmetric one: **whatever the refusal can name, the receipt can name too.** And the
    empty room is the normal case at exactly the moment discovery matters most, because a room
    is created before it is used, always.
+   On file for the day it lands: `partner-a#ff80aea6` offered to exercise the symmetric test
+   from a second, genuine seat — a fresh room, an unjoined addressee — rather than have the
+   peer simulated. One clarification it also contributed, worth keeping: the stale-code hazard
+   is a LONG-LIVED PROCESS problem only. A per-call `sac` through the `~/.local/bin/sac`
+   symlink resolves the working tree fresh on every invocation and cannot be stale; only the
+   MCP servers and the watchers hold the code they started with.
 
 ## Open questions, stated rather than resolved
 
