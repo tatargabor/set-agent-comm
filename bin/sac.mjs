@@ -1188,11 +1188,17 @@ try {
           (seats.length ? `it has: ${seats.join(", ")}.` : `\`agents\` lists its sessions.`) +
           ` A project-wide conversation is a room, not a DM.`)
       }
+      const room = store.dmRoom(ME, peer)
+      // An ARCHIVED DM with the same name is not an obstacle, it is the room itself sleeping:
+      // the same two seats deriving the same name means the conversation resumed, and
+      // `createRoom` below RESTORES it — history and `pair` included. So a revive needs no
+      // shared live room, while a brand-new DM still needs one (2026-08-29, second-seat
+      // verification of step 5).
+      const reviving = store.archivedRooms().includes(room)
       const shared = store.roomsReaching([peer])
-      if (!shared.length) throw new Error(
+      if (!shared.length && !reviving) throw new Error(
         `dm: '${peer}' is in no room this store knows, so there is nobody to open one with. ` +
         `\`agents\` lists who is reachable.`)
-      const room = store.dmRoom(ME, peer)
       // Minting a DM pays for the dead ones (2026-08-29, `docs/room-sprawl.md`): a pair room
       // whose both seats are gone can never be reused, and this is the one moment that is
       // guaranteed to think about DMs at all.

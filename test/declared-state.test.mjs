@@ -470,6 +470,51 @@ test("discovery sees a room that was created and joined but never written to", (
     "the joined-but-unwritten room disappeared from discovery once the roster forgot it")
 })
 
+test("the receipt does not suggest an archived room — it names the sleep and the restore", () => {
+  // The second-seat verification found this seam, 2026-08-29: the suggestion list offered two
+  // rooms the archive had retired hours earlier, and the refusal's repair hint then offered
+  // `--create` — which would have minted a fresh, empty room over the retired name. An
+  // archived room is not a place a send can go; when it is the ONLY place the addressee
+  // listens, the notice says so and offers `--restore`, never `--create`. A FRESH seat keeps
+  // the fixture honest: beta carries live rooms from the tests above, and those SHOULD be
+  // suggested.
+  const alvo = "gamma#cccc7777"
+  store.createRoom("szoba-alszik", alvo)
+  store.register({ agent: "gamma", session: "cccc7777-0000-4000-8000-000000000001",
+                   room: "szoba-alszik", writer: alvo })
+  store.joinRoom(alvo, "szoba-alszik")
+  store.archiveRoom("szoba-alszik", { force: true })  // it holds a reachable seat; the
+  // operator says that is the point — this is exactly the retired-while-populated shape
+  store.createRoom("szoba-eloles", seatA)
+  const regpath = join(ROOT, "registry.json")
+  const reg = JSON.parse(readFileSync(regpath, "utf8"))
+  reg.agents.gamma.rooms = [...new Set([...(reg.agents.gamma.rooms || []), "szoba-eloles"])]
+  writeFileSync(regpath, JSON.stringify(reg, null, 2))
+
+  const r = store.send({ room: "szoba-eloles", from: seatA, type: "QUESTION", text: "hol vagy",
+                         to: ["gamma"] })
+  const said = (r.notice || []).join(" ")
+  assert.doesNotMatch(said, /listens in '/, "an archived room was offered as a place to send")
+  assert.match(said, /ARCHIVED/, "the archived-only case did not say so in those words")
+  assert.match(said, /--restore szoba-alszik/, "the offered repair was not --restore")
+})
+
+test("a DM under an archived name is RESTORED, not recreated fresh", () => {
+  // The same two seats deriving the same DM name means the conversation resumed — so the
+  // archive comes back with its history and its `pair`, and the result does not pretend to be
+  // a creation. This is the one revive `createRoom` permits, because the derivation IS the
+  // agreement (see `dmRoom`).
+  store.createRoom("dm-ujra", gomb1, { pair: [gomb1, gomb2].sort() })
+  store.send({ room: "dm-ujra", from: gomb1, type: "FACT", text: "elso felvonas" })
+  closeWindow(gomb1)
+  assert.deepEqual(store.archiveDeadPairRooms(), ["dm-ujra"])
+  const made = store.createRoom("dm-ujra", gomb2, { pair: [gomb1, gomb2].sort() })
+  assert.equal(made.created, false, "a revive masqueraded as a creation")
+  assert.deepEqual(store.pairOf("dm-ujra"), [gomb1, gomb2].sort())
+  assert.match(store.history({ room: "dm-ujra" }).messages.map(m => m.text).join(), /elso felvonas/,
+    "the restored DM lost its history")
+})
+
 test("the read cursors go with the room, and only that room's", () => {
   store.createRoom("kurzoros", zart)
   store.createRoom("marad", zart)
@@ -489,10 +534,16 @@ test("the read cursors go with the room, and only that room's", () => {
     "it took another room's cursors with it — the prefix match is too loose")
 })
 
-test("a room that never existed cannot be archived, and one already archived is not clobbered", () => {
+test("a room that never existed cannot be archived, and a creation cannot wear an archived name", () => {
   assert.throws(() => store.archiveRoom("nincs-ilyen"), /there is no room called/)
-  store.createRoom("kurzoros", zart)          // the same NAME, a new and empty room
-  assert.throws(() => store.archiveRoom("kurzoros"), /already archived/,
+  // Found by the second-seat verification of step 5, 2026-08-29: following two correct
+  // messages in sequence (a suggestion naming the room, then a refusal offering `--create`)
+  // would have minted a fresh, EMPTY room over a name whose real log sat in the archive.
+  assert.throws(() => store.createRoom("kurzoros", zart), /is ARCHIVED/,
+    "a creation under an archived name hides the log — --restore is the honest way back")
+  // With the creation refused, the name is ARCHIVED-ONLY now — not live, so the archive
+  // refusal is the room-level one. Either refusal keeps the log from being clobbered.
+  assert.throws(() => store.archiveRoom("kurzoros"), /no room called|already archived/,
     "the second archive would have overwritten the first one's log")
 })
 

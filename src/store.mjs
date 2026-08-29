@@ -1215,13 +1215,16 @@ export function send({ room, from, type = "FACT", text, re, to }) {
     // room is exactly the one it has NOT joined, and an agent-level roster mention of it proves
     // nothing about the seat.
     const listening = new Set()
+    const retired = new Set(archivedRooms())
+    const sleeping = new Set()
     for (const [w, s] of knownSeats) {
       if (!elsewhere.some(n => isForMe({ to: [n] }, w)) || seatState(s) === false) continue
-      for (const r of (s.rooms || [])) listening.add(r)
-      for (const r of (members(w) || [])) listening.add(r)
+      for (const r of (s.rooms || [])) (retired.has(r) ? sleeping : listening).add(r)
+      for (const r of (members(w) || [])) (retired.has(r) ? sleeping : listening).add(r)
     }
     listening.delete(room)
     const listens = [...listening].sort()
+    const sleeps = [...sleeping].filter(r => r !== room).sort()
     notice.push(`${elsewhere.map(n => `'${n}'`).join(", ")} IS running, but has not joined ` +
       `'${room}' — so it was not woken, and this entry is not in its inbox here. The entry is in ` +
       `the room and will be read once that session joins: arm its watch with ` +
@@ -1229,7 +1232,11 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       (listens.length
         ? ` That seat listens in ${listens.map(r => `'${r}'`).join(", ")} — address it there, ` +
           `or re-send here once it has joined.`
-        : ` \`agents\` shows which rooms each seat has joined.`))
+        : sleeps.length
+          ? ` Its only rooms are ARCHIVED (${sleeps.map(r => `'${r}'`).join(", ")}) — retired by ` +
+            `decision, so no suggestion is offered. ` +
+            `\`sac rooms --restore ${sleeps[0]}\` brings one back first if that is wanted.`
+          : ` \`agents\` shows which rooms each seat has joined.`))
   }
   if (gone.length)
     notice.push(`No session of ${gone.map(n => `'${n}'`).join(", ")} is running. The entry ` +
@@ -1392,9 +1399,28 @@ export function participants(room) {
  * retired room is never offered as a place to write.
  */
 export function roomsReaching(to) {
+  return reachingRooms(to, { archived: false })
+}
+
+/**
+ * The ARCHIVED rooms an addressee still listens in — the complement of `roomsReaching`, and
+ * just as deliberate about the split. Found by the second-seat verification of step 5
+ * (2026-08-29): the suggestion list offered rooms the archive had retired hours earlier, and
+ * the refusal's `--create` hint then offered to mint a fresh, empty room over the retired
+ * name. An archived room is not a place a send can go, so it is not a suggestion; but if it
+ * is the ONLY place the addressee listens, the notice has to say so — with `--restore` as the
+ * offered repair, never `--create`.
+ */
+export function archivedRoomsReaching(to) {
+  return reachingRooms(to, { archived: true })
+}
+
+function reachingRooms(to, { archived = false }) {
   const want = parseTo(to)
   if (!want.length) return []
-  const hit = knownRooms().filter(r => participants(r).some(p => want.includes(p)))
+  const retired = new Set(archivedRooms())
+  const known = knownRooms().filter(r => retired.has(r) === archived)
+  const hit = known.filter(r => participants(r).some(p => want.includes(p)))
   // ⚠ AND THE SEAT'S OWN BOOK — added 2026-08-29, the discovery half of the false-success
   // defect in `docs/room-sprawl.md`: a room created and joined but NEVER WRITTEN TO has no
   // writer file, and at that exact moment discovery matters most, because a room is created
@@ -1409,7 +1435,7 @@ export function roomsReaching(to) {
     for (const [seat, rec] of Object.entries(membersBook)) {
       if (!addressForms(seat).has(n)) continue
       for (const r of (Array.isArray(rec?.rooms) ? rec.rooms : [])) {
-        if (!hit.includes(r)) hit.push(r)
+        if (retired.has(r) === archived && !hit.includes(r)) hit.push(r)
       }
     }
   }
@@ -1958,6 +1984,26 @@ export function roomExists(room) {
  * members is still a room.
  */
 export function createRoom(room, by, meta = {}) {
+  // ⚠ A CREATION MAY NOT WEAR AN ARCHIVED NAME — added 2026-08-29, from the second-seat
+  // verification of step 5 (`partner-a#ff80aea6`): the refusal path offered `--create` for a
+  // room the archive had retired hours before, and following two correct messages in sequence
+  // would have minted a fresh, EMPTY room over a name whose real log sat in
+  // `channels/.archive` — an operator decision undone by a repair hint, with nothing in
+  // either message saying so. So: an ordinary archived name is REFUSED, and `--restore` is
+  // the honest way back. A PAIR room is the exception, and it is the opposite move: the same
+  // two seats deriving the same DM name means the conversation resumed, so the archive is
+  // RESTORED — history and `pair` included — and the create proceeds. A resurrection that
+  // announces itself as a restore keeps the 617 preserved entries in anyone's mental model;
+  // one that looks like a creation loses them even when the files survive.
+  if (archivedRooms().includes(room)) {
+    const stash = readJson(join(ARCHIVE, `${room}.json`), null)
+    if (!(Array.isArray(stash?.pair) && stash.pair.length === 2)) {
+      throw new Error(`create: '${room}' is ARCHIVED — creating it fresh would look empty while ` +
+        `its log sits in channels/.archive/${room}. Bring it back with ` +
+        `\`sac rooms --restore ${room}\`, or pick another name.`)
+    }
+    restoreRoom(room)
+  }
   const all = readJson(ROOMS_FILE, {})
   if (all[room]) return { room, created: false, ...all[room] }
   const rec = { by: by || null, at: now(), ...meta }
