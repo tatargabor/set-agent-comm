@@ -207,8 +207,8 @@ try {
       if (toArchive) {
         const r = store.archiveRoom(toArchive, { force })
         json({ ...r, note: "it is out of every list and reversible with `sac rooms --restore " +
-          `${toArchive}\`. If a project's settings.json still names it, the SessionStart hook ` +
-          "will open it again — the store cannot see that file." })
+          `${toArchive}\`. A project whose settings.json still names it does NOT bring it ` +
+          "back: the SessionStart hook skips archived rooms and says so in its session note." })
         break
       }
       if (toRestore) { json(store.restoreRoom(toRestore)); break }

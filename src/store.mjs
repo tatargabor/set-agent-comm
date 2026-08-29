@@ -826,8 +826,20 @@ export function register({ agent, project, session, room, pid = process.pid, wri
    *
    * `seedMembers` has had this asymmetry since 2026-08-11 — the environment may ADD a room,
    * never restore one somebody removed. This is the same rule, applied where it is visible.
+   *
+   * ⚠ AND AN ARCHIVED ROOM IS NOT RESURRECTED BY THE CONFIG THAT ONCE NAMED IT — added
+   * 2026-08-29, when retiring `consumer-a-atlas` and `consumer-a-promo` was blocked not by the rooms
+   * themselves but by ten settings files still naming them: without this guard, every archive
+   * of a wired room lasts exactly one session start, and retiring one becomes a two-lane race
+   * (edit `SET_AGENT_ROOM`, then archive, per room, per project). With it, the archive sticks
+   * and the environment cannot override an explicit retire, any more than it restores a
+   * `part`. `restoreRoom` — a person running `sac rooms --restore` — is the only way back.
+   * Measured on the live store the same evening: consumer-b, consumer-c and consumer-d were
+   * archived while their own projects still name them in `.claude/settings.json`; this guard
+   * is what keeps those archives real.
    */
-  const joining = room && !leftRooms(seat).includes(room) ? room : null
+  const archived = new Set(archivedRooms())
+  const joining = room && !leftRooms(seat).includes(room) && !archived.has(room) ? room : null
   const reg = readJson(REGISTRY, { agents: {} })
   const prev = reg.agents[agent] || {}
   const seats = { ...(prev.seats || {}) }
@@ -866,6 +878,8 @@ export function register({ agent, project, session, room, pid = process.pid, wri
     writer: seat,
     seatSession: mine.session,
     coWriters: Object.keys(mine.writers).map(Number).filter(p => p !== pid),
+    // So a caller can say why the seat is NOT in the room its settings named.
+    ...(room && archived.has(room) ? { archivedSkipped: room } : {}),
   }
 }
 
@@ -2026,10 +2040,13 @@ export function knownRooms() {
  * not the same claim as "nobody is there" — `liveSeats` is the rule the rest of the bus reads,
  * so it is the rule here. `--force` exists because an operator may know better; the default may not.
  *
- * ⚠ AND IT DOES NOT UNWIRE THE PROJECT. `SET_AGENT_ROOM` lives in a project's `.claude/settings.json`,
- * which this store cannot see and must not edit; the SessionStart hook re-opens whatever it names.
- * Archiving a room a project still points at therefore buys nothing until the settings change too,
- * so the caller is told the room may come back rather than left to discover it tomorrow.
+ * ⚠ THE PROJECT IT IS WIRED TO NO LONGER MATTERS — amended 2026-08-29. This block used to say
+ * the SessionStart hook re-opens whatever `SET_AGENT_ROOM` names, so archiving a wired room
+ * bought nothing until the settings changed too. That was true, and it made retiring a room a
+ * two-lane race against ten settings files. `register` now skips an archived room (the
+ * environment may add, never restore — the `part` rule at room level) and the hook skips it
+ * before creating so much as a directory, saying so in its session note. The archive sticks;
+ * `restoreRoom` is the only way back.
  */
 const ARCHIVE = join(CHANNELS, ".archive")
 

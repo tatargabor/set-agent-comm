@@ -86,7 +86,12 @@ const backlog = []
  * start of a session. Being cut off mid-pull is safe — `ingest` is idempotent and the cursor is
  * only saved at the end, so at worst the same entries are fetched again.
  */
-spawnSync(process.execPath, [join(HERE, "..", "bin", "sac.mjs"), "sync", ...rooms],
+// Computed before the sync below: an archived room is not pulled for either — ingest would
+// re-create its channel directory, and a channel directory counts as a room.
+const archivedHere = new Set(store.archivedRooms())
+
+spawnSync(process.execPath,
+  [join(HERE, "..", "bin", "sac.mjs"), "sync", ...rooms.filter(r => !archivedHere.has(r))],
   { timeout: 2500, stdio: "ignore" })
 
 // A session start is the one hygiene moment this hook already owns, so the DM rooms whose both
@@ -97,6 +102,16 @@ spawnSync(process.execPath, [join(HERE, "..", "bin", "sac.mjs"), "sync", ...room
 try { store.archiveDeadPairRooms() } catch { }
 
 for (const room of rooms) {
+  // ⚠ AN ARCHIVED ROOM IS NOT RE-OPENED, NOT EVEN BY THE CONFIG THAT NAMES IT — the same rule
+  // `register` enforces in the roster (2026-08-29), enforced here too because the hook would
+  // otherwise resurrect the room on its own: the `ensureDir` below creates a channel
+  // directory, and a channel directory counts as a room. Said out loud once, so a seat that
+  // finds itself with one room fewer knows it was the archive and not a failure.
+  if (archivedHere.has(room)) {
+    notices.push(`"${room}" is archived — not re-opened. Bring it back with ` +
+      `\`${ENV}${SAC} rooms --restore ${room}\` if it is wanted again.`)
+    continue
+  }
   store.register({ agent, project: cwd, session, room, writer })
 
   // COLD START (measured on the day it went live). Two gaps, both of which would have

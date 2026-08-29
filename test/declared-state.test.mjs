@@ -400,6 +400,24 @@ test("a swept DM's pair rides out the archive and comes back with it", () => {
   store.archiveRoom("dm-paros", { force: true })   // leave the store as the tests below expect it
 })
 
+test("an archived room is NOT resurrected by the settings that name it", () => {
+  // The measured situation of 2026-08-29: ten settings files still named `consumer-a-atlas`, so an
+  // archive without this guard lasted exactly one session start. The environment may ADD a
+  // room, never restore one somebody removed — `part` had this rule first; the archive is the
+  // same decision at room level.
+  store.createRoom("regi-wired", zart)
+  store.send({ room: "regi-wired", from: zart, type: "FACT", text: "tortenet" })
+  closeWindow(zart)
+  store.archiveRoom("regi-wired")
+  const r = store.register({ agent: "regi-projekt", session: "eeee5555-0000-4000-8000-000000000001",
+                             room: "regi-wired", writer: olvaso })
+  assert.equal(r.archivedSkipped, "regi-wired", "register did not say why the room was skipped")
+  assert.ok(!store.roomExists("regi-wired"), "register resurrected the archived room")
+  assert.ok(!store.liveSeats("regi-wired").includes(olvaso),
+    "the seat was rostered into a room that does not exist")
+  store.restoreRoom("regi-wired")   // leave the store as the tests below expect it
+})
+
 test("the read cursors go with the room, and only that room's", () => {
   store.createRoom("kurzoros", zart)
   store.createRoom("marad", zart)
