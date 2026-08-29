@@ -287,14 +287,31 @@ test("a corrupt relays.json is reported as corrupt, not as 'no relay configured'
   assert.doesNotMatch(r.stdout, /none configured/, "a broken config was reported as an absent one")
 })
 
-test("…and NOTHING overwrites it while it is broken — that is how the keys were lost", async () => {
+test("…and NOTHING overwrites it while it is broken — that is how the keys were lost", () => {
   const dir = mkdtempSync(join(tmpdir(), "sac-cfgw-"))
   const path = join(dir, "relays.json")
   const wreck = '{"rooms":{}}\nleftovers of a longer document'
   writeFileSync(path, wreck)
-  process.env.SET_AGENT_COMM_DIR = dir
-  const b = await import(`../src/bridge.mjs?cfgguard=${Date.now()}`)
-  assert.equal(b.configState().state, "broken")
-  assert.throws(() => b.writeConfig(b.readConfig()), /will NOT be overwritten/)
+  /**
+   * ⚠ IN A SEPARATE PROCESS, and that is the whole point of this test rather than a detail of it.
+   * It used to set `process.env.SET_AGENT_COMM_DIR` and re-import the bridge with a `?cfgguard=`
+   * query. The query does reload the BRIDGE — but the bridge's `CONFIG` is built from
+   * `store.ROOT`, and `store.mjs` reads that once at module load and was already loaded by the
+   * top of this file. So the assertions ran against the store of whatever test came first, not
+   * against the wreck written above, and the test failed from the commit that introduced it
+   * (`015e5de`, 2026-08-19) — a guard nobody could have trusted, which is the failure mode this
+   * repo's own diagnostics file opens with.
+   */
+  const probe = `
+    const b = await import(${JSON.stringify(new URL("../src/bridge.mjs", import.meta.url).href)})
+    let threw = null
+    try { b.writeConfig(b.readConfig()) } catch (e) { threw = e.message }
+    console.log(JSON.stringify({ state: b.configState().state, threw }))`
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", probe],
+    { env: { ...process.env, SET_AGENT_COMM_DIR: dir }, encoding: "utf8" })
+  assert.equal(r.status, 0, `the probe failed: ${r.stderr}`)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.state, "broken")
+  assert.match(out.threw ?? "", /will NOT be overwritten/, "a broken config was rewritten in place")
   assert.equal(readFileSync(path, "utf8"), wreck, "the broken file was rewritten anyway")
 })

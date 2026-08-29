@@ -155,6 +155,34 @@ export function createMcpServer(identify) {
     { capabilities: { tools: {} } },
   )
 
+  /**
+   * ⚠ THIS SERVER CANNOT RESTART ITSELF, SO IT SAYS SO INSTEAD. `sac wait` exits on a code change
+   * and its Monitor starts a fresh one; nothing does that for an MCP server — Claude Code starts
+   * it once per session and it holds the code it loaded until the session ends. Measured
+   * 2026-08-27: six of them running, the oldest 25.6 hours old, i.e. older than the working tree
+   * they were reading.
+   *
+   * The only channel out of here is the tool RESULT, so the note rides on that, addressed to the
+   * one reader who can act on it. It is appended AFTER the JSON rather than mixed into it: the
+   * payload is a contract, and a field that appears only on stale servers is a field every caller
+   * would have to learn about.
+   *
+   * Twice-bounded, because an unactionable line repeated on every call is how a real warning
+   * becomes scenery: the edit has to have SETTLED (the same 30 s as the watcher, so a save in
+   * progress does not speak), and once said it stays quiet for ten minutes.
+   */
+  const CODE_AT_START = store.sourceStamp()
+  let saidAt = 0
+  const staleNote = () => {
+    const newest = store.sourceStamp()
+    if (newest <= CODE_AT_START || Date.now() - newest < 30_000) return ""
+    if (Date.now() - saidAt < 10 * 60_000) return ""
+    saidAt = Date.now()
+    return `\n\n⚠ set-agent-comm: this MCP server is running the code it loaded at start-up, and ` +
+      `that code changed at ${store.now(new Date(newest))}. It cannot reload itself — run ` +
+      `\`/mcp reconnect\` (or start a new session) before trusting what it reads or writes.`
+  }
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFS }))
 
   server.setRequestHandler(CallToolRequestSchema, async req => {
@@ -240,7 +268,7 @@ export function createMcpServer(identify) {
         }
         default: throw new Error(`unknown tool: ${req.params.name}`)
       }
-      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] }
+      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) + staleNote() }] }
     } catch (e) {
       // Errors are LOUD. A silently swallowed error is indistinguishable from "there was no
       // message" — and "no new messages" is exactly the most dangerous false negative here.

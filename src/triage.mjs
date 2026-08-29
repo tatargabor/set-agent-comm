@@ -26,6 +26,20 @@
 import { spawn } from "node:child_process"
 import { getFocus, seatBase, addressForms } from "./store.mjs"
 
+/**
+ * Did someone type THIS seat's name, and nobody else's? Exported because two layers now need the
+ * same answer and neither may have its own version of it: the letterbox refuses to second-guess a
+ * direct address (property 2 above), and `sac wait` refuses to HOLD one back when the seat is
+ * busy — a deliberate address is the one case where a delay is the expensive mistake.
+ *
+ * ⚠ The `to.length === 1` half matters as much as the name match. An entry that lists five seats
+ * is a broadcast with extra steps, and without this it would be five guaranteed interruptions
+ * that neither layer is allowed to look at — the exact shape the wake-up rule exists to stop,
+ * wearing the one costume that gets waved through.
+ */
+export const isDirect = (entry, seat) =>
+  entry.to?.length === 1 && entry.to[0].includes("#") && addressForms(seat).has(entry.to[0])
+
 /** `claude-haiku-4-5` — cheapest current model, and plenty for a yes/no about one short message. */
 const MODEL = process.env.SET_AGENT_TRIAGE_MODEL || "claude-haiku-4-5"
 /**
@@ -123,7 +137,6 @@ function ask(text) {
  *   pretending to be a quiet one.
  */
 export async function triage({ entry, room, seat, live }) {
-  const forms = addressForms(seat)
   // Named THIS seat — not the project, this seat — and NOBODY ELSE. Never second-guessed.
   // (Property 2 above.)
   //
@@ -131,7 +144,7 @@ export async function triage({ entry, room, seat, live }) {
   //   seats is a broadcast with extra steps, and without this it would be five guaranteed
   //   interruptions that the letterbox is not even allowed to look at — the exact shape the whole
   //   wake-up rule exists to stop, wearing the one costume that gets waved through.
-  if (entry.to?.length === 1 && entry.to[0].includes("#") && forms.has(entry.to[0]))
+  if (isDirect(entry, seat))
     return { wake: true, why: "addressed to this seat by name", via: "direct" }
   if (!enabled()) return { wake: true, why: "triage off", via: "unavailable" }
   const v = await ask(prompt({ seat, focus: getFocus(seat), entry, room, live }))

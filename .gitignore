@@ -8,3 +8,6 @@ docs/internal/
 # baked in by `sac install` for THIS machine. Committing them would wire a cloner into
 # our store and our rooms. See CLAUDE.md, "Working in this repo".
 .claude/
+set/.work/
+.env
+.set-core/

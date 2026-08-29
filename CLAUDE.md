@@ -83,6 +83,38 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   inside node. Measured 2026-08-09: a `heartbeat.mjs` burning a whole core for 6h09m, orphaned by
   the test run that spawned it. A synchronous loop in a C++ builtin cannot be caught, timed out,
   or defended against by the hook's own `try`/`catch`.
+- **One seat, one watch, and the NEW one wins** (`store.claimWatch`). Measured 2026-08-27: 19 live
+  `sac wait` processes held by EIGHT sessions — one session had five, all on the same rooms. The
+  "die with the session" guard could not see it: it watches for reparenting, and every one of
+  those sessions was alive. It cost 2.31 GB of RSS and 24 of the 380 deliveries in the ledger —
+  the same entry announced twice by two watchers of one seat. (The larger share of the 67 total
+  duplicates, 44, is a different thing and NOT a fault: `announced → blocked`, the Stop hook
+  catching what the Monitor announced and the agent did not read. See the invariant below.)
+  The newer process
+  keeps the claim because the harness reads the Monitor it armed LAST. Not a lock (see the top of
+  `store.mjs`): a claim whose pid is gone is simply overwritten. The stamp is checked against the
+  live argv before any signal — a pid is a reusable number, and the alternative is SIGTERM to a
+  stranger.
+- **A watch may not outlive its own code.** `sac wait` records `store.sourceStamp()` at start-up
+  and exits when the sources move (once the edit has SETTLED for 30 s, or a restart storm follows
+  a `git checkout`); `persistent: true` on the Monitor starts a fresh one. This is the rule under
+  "restart what polls" below, made mechanical, because the cost of forgetting it is not a stale
+  feature but a corrupt append-only log. There is a 12-hour age cap too
+  (`SET_AGENT_WATCH_MAX_HOURS`, `0` = off): a watcher drifts from ~50 MB to 161-195 MB over 20
+  hours. An MCP server cannot restart itself, so it says so in the tool result instead
+  (`tools.mjs`) — the only channel it has.
+- **A seat that is MID-TURN is not woken — it is let finish** (`store.seatBusy`, applied in
+  `sac wait` and nowhere else). Measured 2026-08-27: of 380 deliveries, 44 were the same entry
+  announced by the Monitor and then blocked on by the Stop hook a median of 119 s later — all 44
+  in that order. The Monitor's was the expensive one: 55% of all deliveries land more than five
+  minutes after the previous one, i.e. into a cold context, while a Stop hook lands in a loaded
+  one. So while the heartbeat's `lastSeen` is fresh (90 s, `SET_AGENT_BUSY_MS`), the watcher says
+  nothing and lets the Stop hook deliver.
+  ⚠ **A DELAY, NEVER A DROP**, and the two things that keep it one: it sits ABOVE `shouldNudge`,
+  so no nudge is spent (a nudge burned during the hold would mean silence after the seat goes
+  quiet), and a DIRECT address (`triage.isDirect`) is never held — someone typed that seat name,
+  and there a delay is the expensive mistake. It is bounded by the beat itself: ~90 s after the
+  last tool call the seat is announced to normally.
 - **Interpreters are spelled out** (`process.execPath`), never a bare `node`, in anything written
   into a settings file or a skill — hooks do not run in an interactive shell.
 - **Names from the network become file names.** `assertSafeWriter` / `assertSafeTs` are enforced
@@ -197,8 +229,9 @@ collapsing them would hide the one number that says whether it earns its cost.
   `$PWD/.claude/`.
 - **After changing anything on the read path, restart what polls.** A running `sac wait` and the
   MCP server loaded their code at startup and both ingest remote entries; the log is append-only,
-  so whatever they write meanwhile is written wrong for good. `sac wait`: kill and restart.
-  MCP: `/mcp reconnect` or a new session.
+  so whatever they write meanwhile is written wrong for good. Since 2026-08-27 `sac wait` does
+  this ITSELF (see the invariant above) — the MCP server still cannot, so: `/mcp reconnect` or a
+  new session, and it now says so in its own tool results rather than waiting to be noticed.
 - **Tests point at a temp store.** Set `SET_AGENT_COMM_DIR` to a `mkdtemp` dir before importing
   `store.mjs` (it reads `ROOT` at module load). In-process multi-session tests also need
   `SET_AGENT_OWNER_PID`, otherwise the real `claude` ancestor above the test runner correctly
@@ -250,7 +283,46 @@ collapsing them would hide the one number that says whether it earns its cost.
 `SET_AGENT_ROOM` (comma-separated; with several rooms there is **no default room** and `send`
 without an explicit room fails) · `SET_AGENT_DEVICE` · `SET_AGENT_LONG_CHARS` (1500) ·
 `SET_AGENT_INBOX_CHARS` (1200, `0` = off) · `SET_AGENT_TRIAGE=off` · `SET_AGENT_TRIAGE_BIN` /
-`_MODEL` / `_TIMEOUT_MS` · `SET_AGENT_SAFETY_NET=off` · `SET_AGENT_QUIET_MS` ·
+`_MODEL` / `_TIMEOUT_MS` · `SET_AGENT_SAFETY_NET=off` · `SET_AGENT_QUIET_MS` · `SET_AGENT_BUSY_MS` (90000) ·
+`SET_AGENT_WATCH_MAX_HOURS` (12, `0` = off) ·
 `SET_AGENT_HEADLESS=1|0` (force/forbid the silent join; otherwise derived — see `store.headless`).
 Relay side: `RELAY_SECRET` (required), `RELAY_HOST`, `PORT`, `RELAY_RETENTION_HOURS`,
 `RELAY_DEVICE_TTL_DAYS`, `RELAY_LIMIT_*`, `RELAY_MAX_ROOM_*`.
+
+## Persistent Memory
+<!-- set-core:managed — DO NOT edit or remove this section. It is auto-generated by `set-project init`. -->
+
+This project uses Claude Code's own per-repository memory: Markdown files under
+`~/.claude/projects/<project-slug>/memory/`, indexed by `MEMORY.md`.
+
+**How it actually loads — the limit matters:**
+- Only the **first 200 lines, or 25 KB**, of `MEMORY.md` are injected at session start.
+  Content past that cut loads for nobody, and nothing warns you. Keep the index to one
+  line per memory.
+- The individual topic files are **not** loaded at startup. Read them with ordinary file
+  tools when the index says one is relevant.
+- Use `/memory` to browse and edit, `/context` to see what actually loaded this session.
+
+**What it does NOT do**, so you reach for a documented absence rather than a missing
+feature: no semantic search, no tag filtering, no temporal queries, no full-text search,
+no cross-device sync, no version history, and no automatic session-end extraction.
+Searching means reading the index and opening the file it points at.
+
+**Writing a memory:** one fact per file, with a `name`, a one-line `description`, and a
+`type` of user / feedback / project / reference. Add a one-line pointer to `MEMORY.md`.
+Never store a harness artifact verbatim — a task notification, another agent's prompt, a
+transcript fragment — and never record a claim about the user's emotional state.
+
+**Confidentiality:** no memory file may carry a consumer project name, a partner name, a
+personal name, or content derived from a customer's data. Generalise before saving; a
+memory naming a real entity is a defect to correct, not harmless content.
+
+## Auto-Commit After Apply
+<!-- set-core:managed — DO NOT edit or remove this section. It is auto-generated by `set-project init`. -->
+
+After a skill-driven apply (e.g. `/opsx:apply`) finishes or pauses, automatically commit all changes. Follow the standard commit flow (stage relevant files, write a concise commit message).
+
+## Getting Started
+<!-- set-core:managed — DO NOT edit or remove this section. It is auto-generated by `set-project init`. -->
+
+See [START.md](START.md) for application startup commands (install, dev server, database, tests).
