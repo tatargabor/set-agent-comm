@@ -216,12 +216,22 @@ test("an entry addressed TO US blocks, and says how many are not ours", () => {
 // Its own room, so no earlier test's backlog decides these.
 const post = (session, ...args) =>
   spawnSync(process.execPath, [SAC, ...args], { env: env(session, { SET_AGENT_ROOM: "post" }), encoding: "utf8" })
+// A different agent — not a sibling of web-app — whose messages go through the letterbox normally.
+const postOther = (...args) =>
+  spawnSync(process.execPath, [SAC, ...args], { env: {
+    ...process.env, SET_AGENT_COMM_DIR: ROOT, SET_AGENT_ROOM: "post",
+    SET_AGENT_NAME: "api-server", CLAUDE_CODE_SESSION_ID: "other",
+    SET_AGENT_OWNER_PID: "900009",
+    SET_AGENT_TRIAGE_BIN: LETTERBOX, SET_AGENT_QUIET_MS: "100", SET_AGENT_SAFETY_NET: "off",
+  }, encoding: "utf8" })
 for (const s of ["one", "two"]) post(s, "register", "post")
+postOther("register", "post")
 
 test("the letterbox can decline to interrupt — and the entry is still delivered", async () => {
   // Addressed to the PROJECT, which every session of it satisfies: the rule must let this through,
   // and only a reader can tell whether this particular window is the one meant.
-  post("one", "send", "post", "REQUEST", "Someone please re-run the billing eval.", "--to", "web-app")
+  // Sent from a DIFFERENT project so the sibling bypass does not fire.
+  postOther("send", "post", "REQUEST", "Someone please re-run the billing eval.", "--to", "web-app")
   const out = await waitFor("two", ["--once", "post"], 3000,
     { SET_AGENT_ROOM: "post", SET_AGENT_TRIAGE_SAYS: "no" })
   assert.equal(out.text, "", `the letterbox said no and the agent was woken anyway: ${out.text}`)

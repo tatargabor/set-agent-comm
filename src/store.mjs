@@ -808,6 +808,20 @@ export function seatOf({ agent, session, owner = ownerPid() }) {
 }
 
 /**
+ * What agent name did this session register under? Returns the agent name if found, null
+ * otherwise. Used by the cwd identity guard: a session whose cwd moved would silently derive
+ * a new agent name, and the guard compares it against what the registry says.
+ */
+export function registeredAgent(session) {
+  if (!session) return null
+  const reg = readJson(REGISTRY, { agents: {} })
+  for (const [name, a] of Object.entries(reg.agents || {}))
+    for (const s of Object.values(a.seats || {}))
+      if (s.session === session) return name
+  return null
+}
+
+/**
  * An agent checking in. Idempotent: the same name is updated, not duplicated.
  *
  * With a `session` the check-in claims a seat (see `claimSeat`); `writer` skips the claim for
@@ -1334,6 +1348,42 @@ export function pruneSeats({ days = 7, keep = SEATS_KEPT_PER_AGENT, dry = false 
   }
   if (dropped.length && !dry) writeJson(REGISTRY, reg)
   return { dropped, dry,
+           kept: Object.values(reg.agents).reduce((n, a) => n + Object.keys(a.seats || {}).length, 0) }
+}
+
+/**
+ * Reap ghost sessions: seats that checked in but NEVER WROTE — `lastWrote` is null or missing —
+ * and whose process is gone (`seatState === false`). Measured 2026-08-30: 35 ghosts in 24 hours
+ * across three projects. They are harmless individually but inflate `agents` output and slow
+ * down every roster query.
+ *
+ * `pruneSeats` does not catch these because its cutoff is 7 days and most ghosts are from today —
+ * they die within seconds but leave a registry entry. This is the tighter rule: a seat that never
+ * wrote has no cursor, no file, no focus — nothing to preserve — so the only condition is death.
+ */
+export function reapGhosts({ dry = false } = {}) {
+  const reg = readJson(REGISTRY, { agents: {} })
+  const reaped = []
+  for (const a of Object.values(reg.agents)) {
+    for (const [name, s] of Object.entries(a.seats || {})) {
+      if (seatState(s) === false && !s.lastWrote) {
+        if (!dry) delete a.seats[name]
+        reaped.push({ seat: name, lastSeen: s.lastSeen ?? null })
+      }
+    }
+  }
+  // An agent entry with zero seats is unreachable — no session can be woken, and the room list
+  // is a phantom: it inflates the Fleet wires view with connections nobody is listening on.
+  // Swept here because the reap is what creates the empties.
+  const swept = []
+  for (const [name, a] of Object.entries(reg.agents)) {
+    if (!Object.keys(a.seats || {}).length) {
+      if (!dry) delete reg.agents[name]
+      swept.push(name)
+    }
+  }
+  if ((reaped.length || swept.length) && !dry) writeJson(REGISTRY, reg)
+  return { reaped, swept, dry,
            kept: Object.values(reg.agents).reduce((n, a) => n + Object.keys(a.seats || {}).length, 0) }
 }
 

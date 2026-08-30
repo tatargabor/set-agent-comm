@@ -40,6 +40,20 @@ import { getFocus, seatBase, addressForms } from "./store.mjs"
 export const isDirect = (entry, seat) =>
   entry.to?.length === 1 && entry.to[0].includes("#") && addressForms(seat).has(entry.to[0])
 
+/**
+ * Is the sender a sibling session — same project, different session? A sibling is not a stranger:
+ * it is another window of the SAME project, and its messages are almost always relevant (a status
+ * report from yourself is the one thing the letterbox is worst at judging). Skipping the model
+ * call here avoids the measured failure: 7 consecutive `net-failed` on a morning where the model
+ * was down, while sibling messages sat unjudged.
+ *
+ * ⚠ Same project only, not same device — a remote seat of a different project that shares a
+ * device is not a sibling. And the sender must carry a session suffix (`#`), otherwise it is
+ * a bare-name send (cron, a terminal) which may well not be relevant.
+ */
+export const isSibling = (entry, seat) =>
+  entry.from?.includes("#") && seatBase(entry.from) === seatBase(seat) && entry.from !== seat
+
 /** `claude-haiku-4-5` — cheapest current model, and plenty for a yes/no about one short message. */
 const MODEL = process.env.SET_AGENT_TRIAGE_MODEL || "claude-haiku-4-5"
 /**
@@ -119,14 +133,23 @@ function ask(text) {
         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         "--permission-mode", "plan",
         "--settings", '{"disableAllHooks":true}',
-      ], { stdio: ["ignore", "pipe", "ignore"], cwd: "/" })
+      ], { stdio: ["ignore", "pipe", "pipe"], cwd: "/" })
     } catch { return resolve(null) }     // no binary at all — fail open
-    let out = ""
-    const done = v => { clearTimeout(timer); child.kill("SIGKILL"); resolve(v) }
-    const timer = setTimeout(() => done(null), TIMEOUT_MS)
+    let out = "", err = ""
+    const done = (v, reason) => {
+      clearTimeout(timer)
+      child.kill("SIGKILL")
+      if (!v && (err || reason)) {
+        const detail = err.replace(/\s+/g, " ").trim().slice(0, 200)
+        process.stderr.write(`[set-agent-comm triage] ${reason || "failed"}: ${detail || "(no stderr)"}\n`)
+      }
+      resolve(v)
+    }
+    const timer = setTimeout(() => done(null, `timeout after ${TIMEOUT_MS}ms`), TIMEOUT_MS)
     child.stdout.on("data", d => { out += d; if (out.length > 8000) done(parse(out)) })
-    child.on("error", () => done(null))
-    child.on("close", () => done(parse(out)))
+    child.stderr.on("data", d => { err += d; if (err.length > 2000) err = err.slice(0, 2000) })
+    child.on("error", () => done(null, "spawn error"))
+    child.on("close", code => done(parse(out), code ? `exit ${code}` : null))
   })
 }
 
@@ -146,6 +169,8 @@ export async function triage({ entry, room, seat, live }) {
   //   wake-up rule exists to stop, wearing the one costume that gets waved through.
   if (isDirect(entry, seat))
     return { wake: true, why: "addressed to this seat by name", via: "direct" }
+  if (isSibling(entry, seat))
+    return { wake: true, why: "from a sibling session of this project", via: "sibling" }
   if (!enabled()) return { wake: true, why: "triage off", via: "unavailable" }
   const v = await ask(prompt({ seat, focus: getFocus(seat), entry, room, live }))
   return v ? { ...v, via: "model" } : { wake: true, why: "letterbox unavailable", via: "unavailable" }

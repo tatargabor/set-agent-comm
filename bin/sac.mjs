@@ -106,6 +106,19 @@ const seat = { agent: AGENT, session: SESSION }
 const ME = CLAIMS.has(cmd) ? store.claimSeat(seat) : store.seatOf(seat)
 const json = v => console.log(JSON.stringify(v, null, 2))
 
+// ⚠ CWD IDENTITY GUARD. Measured 2026-08-30: a session registered as `set-core#9eae8f4a` ran
+// `sac send` from a worktree whose basename was `web`, writing as `web#9eae8f4a` — a seat that
+// nobody watches and nobody answers. The cwd moved; the session id did not; the name silently
+// changed. ENV overrides are deliberate and not guarded.
+if (SESSION && CLAIMS.has(cmd) && !process.env.SET_AGENT_NAME) {
+  const registered = store.registeredAgent(SESSION)
+  if (registered && registered !== AGENT) {
+    process.stderr.write(
+      `[set-agent-comm] ⚠ cwd says "${AGENT}" but this session registered as "${registered}" ` +
+      `— set SET_AGENT_NAME=${registered} or run from the right directory\n`)
+  }
+}
+
 // The addressee is shown where it stands in the file, and `(not for you)` is spelled out:
 // reading an entry aimed at someone else and answering it as if asked is a real failure mode —
 // it happened on the live bus before addressing existed.
@@ -382,6 +395,17 @@ try {
       // move to the archive, they do not go away (see `store.archiveDeadPairRooms`).
       const swept = store.archiveDeadPairRooms({ dry })
       for (const room of swept) console.log(`${dry ? "would archive" : "archived "} dm:${room.padEnd(40)} both seats gone — restore: sac rooms --restore ${room}`)
+      break
+    }
+    case "reap": {
+      // Ghost sessions: checked in, never wrote, now dead. `pruneSeats` misses these because its
+      // cutoff is 7 days and most ghosts are from the same day. Measured 2026-08-30: 35 in 24h.
+      const dry = rest.includes("--dry-run") || rest.includes("--dry")
+      const r = store.reapGhosts({ dry })
+      for (const d of r.reaped) console.log(`${dry ? "would reap" : "reaped   "} ${d.seat.padEnd(44)} last seen ${d.lastSeen || "never"}`)
+      for (const name of r.swept) console.log(`${dry ? "would sweep" : "swept    "} ${name.padEnd(44)} agent entry (no seats, no rooms)`)
+      console.log(`${r.reaped.length} ghost(s) ${dry ? "would be reaped" : "reaped"}, ` +
+        `${r.swept.length} empty agent(s) ${dry ? "would be swept" : "swept"}, ${r.kept} seat(s) kept`)
       break
     }
     case "unread": {
@@ -841,7 +865,7 @@ try {
            * ⚠ A DIRECT ADDRESS IS NEVER HELD. Someone typed this seat's name; a delay is the
            * expensive mistake there, and `triage.isDirect` is the one rule for it.
            */
-          if (store.seatBusy(ME) && !triage.isDirect(last, ME)) {
+          if (store.seatBusy(ME) && !triage.isDirect(last, ME) && !triage.isSibling(last, ME)) {
             // Recorded once per entry — this fires every 5 s while the turn runs, and a ledger
             // that logged each pass would drown the numbers it exists to produce.
             if (!heldSaid.has(last.ts)) {
@@ -876,7 +900,7 @@ try {
             // `via` says which layer answered: `direct` never reached the model (someone typed a
             // seat name and a classifier does not get to overrule that), `unavailable` is the
             // fail-open path, `model` is a real verdict.
-            const by = v.via === "direct" ? "rule" : v.via === "unavailable" ? "letterbox-failed" : "letterbox"
+            const by = v.via === "direct" || v.via === "sibling" ? "rule" : v.via === "unavailable" ? "letterbox-failed" : "letterbox"
             store.recordDecision({ room, seat: ME, entry: candidates[i].ts, by, woke: !!v.wake })
           }
           const yes = judged.findLastIndex(v => v.wake)
