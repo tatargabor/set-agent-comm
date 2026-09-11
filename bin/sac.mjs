@@ -66,7 +66,7 @@ const USAGE = {
   peek: "sac peek <room>                     the same, without moving the cursor",
   unread: "sac unread <room> [n]               make the last n messages unread again",
   history: "sac history <room> [n]              read back",
-  install: "sac install <room>[,<room>…] [--dry-run] [--replace]   · adds to the project's rooms; --replace cuts it down to what you name",
+  install: "sac install <room>[,<room>…] [--dry-run] [--replace] [--rewrite]   · adds to the project's rooms; --replace cuts it down to what you name; only the room list of a wired hook is edited — --rewrite restores the canonical command",
   wait: "sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)",
   prune: "sac prune [--days N] [--dry-run]    forget dead seats, and retire DM rooms nobody is left in",
   "watch-paths": "sac watch-paths <room>              the files to watch (for the hook)",
@@ -596,9 +596,10 @@ try {
       // from the outside a forgotten hook looks exactly like a quiet room.
       const dry = rest.includes("--dry-run")
       const replace = rest.includes("--replace")
+      const rewrite = rest.includes("--rewrite")
       const asked = rest.filter(a => !a.startsWith("--")).flatMap(store.parseRooms)
       const want = asked.length ? asked : store.parseRooms(process.env.SET_AGENT_ROOM)
-      if (!want.length) throw new Error("usage: sac install <room>[,<room>…] [--dry-run] [--replace]")
+      if (!want.length) throw new Error("usage: sac install <room>[,<room>…] [--dry-run] [--replace] [--rewrite]")
 
       // ⚠ THE PROJECT GETS AN ADDRESS ROOM, whether or not anyone asked. Measured 2026-08-04: an
       // agent INFERRED a room name from a naming convention and then spent a whole entry asking
@@ -669,8 +670,24 @@ try {
           (h.command || "").includes(scripts[event])
         const mine = groups.flatMap(g => g.hooks || []).find(ours)
         if (!mine) { groups.push({ hooks: [{ type: "command", command }] }); changes.push(`${event}: added`) }
-        else if (mine.command !== command) { mine.command = command; changes.push(`${event}: updated`) }
-        else changes.push(`${event}: already wired`)
+        else if (mine.command === command) changes.push(`${event}: already wired`)
+        else if (rewrite) { mine.command = command; changes.push(`${event}: rewritten to the canonical form (--rewrite)`) }
+        else if (!/SET_AGENT_ROOM=\S+/.test(mine.command)) {
+          mine.command = command
+          changes.push(`${event}: replaced — the wired command had no SET_AGENT_ROOM to update`)
+        } else {
+          // ⚠ ONLY THE ROOM LIST (and the name) IS OURS. Measured 2026-09-11 on blackbelt-web: the
+          // wired commands carried a portable `sh -c` form (the file is tracked, and a second
+          // machine has no `/opt/homebrew/Cellar/node/25.8.2/…`) and a guard that keeps `claude -p`
+          // children off the bus. A whole-command swap took both, silently. Everything outside
+          // the two variables is someone's decision; `--rewrite` is the explicit way back.
+          const edited = mine.command
+            .replace(/SET_AGENT_ROOM=\S+/, `SET_AGENT_ROOM=${rooms.join(",")}`)
+            .replace(/SET_AGENT_NAME=\S+/, `SET_AGENT_NAME=${AGENT}`)
+          if (edited === mine.command) changes.push(`${event}: already wired`)
+          else { mine.command = edited; changes.push(`${event}: rooms updated (the rest of the command kept as written)`) }
+        }
+        wanted[event] = mine ? mine.command : command
       }
 
       // The SKILL is the third piece, next to the two hooks: the hooks make sure a message is
@@ -705,14 +722,20 @@ try {
       if (dry) break
       if (changes.every(c => c.endsWith("already wired") || c.endsWith("already current"))) break
 
-      store.ensureDir(dirname(file))
-      // A backup before every write. This file is not ours, and it is not reconstructible.
-      if (existsSync(file)) {
-        const bak = `${file}.bak.${store.now().replace(/[:.]/g, "-")}`
-        copyFileSync(file, bak)
-        console.log(`  backup: ${bak}`)
+      // ⚠ settings.json is written ONLY when a hook changed. A skill-only update used to
+      // re-serialise the whole file too (measured 2026-09-11: byte diff with no hook change) —
+      // in a tracked, shared file that is a diff nobody asked for.
+      const hooksChanged = changes.some(c => !c.startsWith("skill:") && !c.endsWith("already wired"))
+      if (hooksChanged) {
+        store.ensureDir(dirname(file))
+        // A backup before every write. This file is not ours, and it is not reconstructible.
+        if (existsSync(file)) {
+          const bak = `${file}.bak.${store.now().replace(/[:.]/g, "-")}`
+          copyFileSync(file, bak)
+          console.log(`  backup: ${bak}`)
+        }
+        writeFileSync(file, JSON.stringify(settings, null, 2) + "\n")
       }
-      writeFileSync(file, JSON.stringify(settings, null, 2) + "\n")
 
       if (skillState !== "already current") {
         store.ensureDir(dirname(skillTo))

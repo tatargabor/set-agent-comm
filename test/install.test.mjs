@@ -145,3 +145,55 @@ test("--dry-run writes nothing", () => {
   assert.match(r.stdout, /\[dry run\]/)
   assert.equal(readFileSync(FILE, "utf8"), "{}")
 })
+
+// ⚠ A HAND-TUNED COMMAND IS SOMEONE'S WORK. Measured 2026-09-11 on blackbelt-web: the wired
+// hooks carried (1) a portable `sh -c` form that finds node and the checkout at run time — the
+// file is tracked and shared by two machines, so an absolute `/opt/homebrew/Cellar/node/25.8.2/…`
+// path breaks the other one and the next `brew upgrade` — and (2) a guard that keeps `claude -p`
+// children off the bus. `sac install bbweb-wpc --dry-run` previewed all three commands swapped
+// for the canonical form: both edits gone, silently. The room list is the only part install owns.
+const CUSTOM = (script, rooms) =>
+  `[ -n "\${APPLY_CYCLE_CHILD:-}" ] && exit 0; SET_AGENT_NAME=proj SET_AGENT_ROOM=${rooms} sh -c 'N=$(command -v node) || exit 0; for d in "$HOME/code/set-agent-comm" "$HOME/set-agent-comm"; do [ -f "$d/hooks/${script}" ] && exec "$N" "$d/hooks/${script}"; done; exit 0'`
+const customFile = rooms => writeFileSync(FILE, JSON.stringify({ hooks: {
+  SessionStart: [{ hooks: [{ type: "command", command: CUSTOM("session-start.mjs", rooms) }] }],
+  Stop: [{ hooks: [{ type: "command", command: CUSTOM("stop.mjs", rooms) }] }],
+  PostToolUse: [{ hooks: [{ type: "command", command: CUSTOM("heartbeat.mjs", rooms) }] }],
+} }, null, 2))
+
+test("REGRESSION: a new room edits ONLY the room list of a hand-tuned command", () => {
+  customFile("team")
+  const r = install("bbweb")
+  assert.equal(r.status, 0, r.stderr)
+  for (const [event, script] of [["SessionStart", "session-start.mjs"], ["Stop", "stop.mjs"], ["PostToolUse", "heartbeat.mjs"]]) {
+    const c = commands(settings(), event).find(c => c.includes(script))
+    assert.equal(c, CUSTOM(script, "team,bbweb"), `${event}: more than the room list changed`)
+  }
+  assert.match(r.stdout, /rooms updated/, "it did not say what it changed")
+})
+
+test("an unchanged room list leaves a hand-tuned command byte-for-byte alone", () => {
+  customFile("team")
+  const before = readFileSync(FILE, "utf8")
+  const r = install("team")
+  assert.match(r.stdout, /already wired/)
+  assert.equal(readFileSync(FILE, "utf8"), before, "it rewrote a command whose rooms were already right")
+})
+
+test("--rewrite restores the canonical command, and says so", () => {
+  customFile("team")
+  const r = install("team", "--rewrite")
+  const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
+  assert.doesNotMatch(c, /APPLY_CYCLE_CHILD|sh -c/, "--rewrite kept the hand-tuned form")
+  assert.match(c, /\s\/\S*node\S*\s/)
+  assert.match(r.stdout, /rewritten/, "a full rewrite happened without being named")
+})
+
+test("a command with no SET_AGENT_ROOM in it is replaced — out loud", () => {
+  writeFileSync(FILE, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{
+    type: "command", command: "node $HOME/set-agent-comm/hooks/session-start.mjs",
+  }] }] } }, null, 2))
+  const r = install("team")
+  const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
+  assert.match(c, /SET_AGENT_ROOM=team /)
+  assert.match(r.stdout, /no SET_AGENT_ROOM/, "the replacement was silent")
+})
