@@ -1754,9 +1754,27 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
     }
   }
   fresh.sort(byTime)
-  const shown = fresh.slice(-limit).map(clip)
-  if (advance && fresh.length) {
-    for (const e of fresh) seen[e.from] = seen[e.from] && t(seen[e.from]) > t(e.ts) ? seen[e.from] : e.ts
+  // ⚠ A DRAIN READS FORWARD, A GLANCE READS BACK — and the cursor may only ever move past what
+  // was actually RETURNED. Measured 2026-09-12 on a busy live room: `inbox({ limit: 3 })` against 229
+  // unread returned 3, reported `truncated: 226`, and advanced the cursor past all 229. Those 226
+  // were marked read by nobody, and the seat two of them were addressed to never woke — the exact
+  // failure this project exists to prevent, produced by ordinary paginated tool use rather than by
+  // a bug in delivery. It cost one live session a whole morning of mail.
+  //
+  // The page has to come off the OLD end when advancing, and that is forced, not a preference: the
+  // cursor is ONE high-water timestamp per writer (`seen[writer]`), so it cannot say "I read this
+  // writer's newest three but not its older two hundred". Only a contiguous prefix is expressible.
+  // Reading forward makes `truncated` mean "there is more, call again" and repeated calls drain
+  // the room in order; every unshown entry is newer than every shown one, so nothing is buried.
+  //
+  // A NON-ADVANCING read keeps the newest page, because it is not draining anything — `peek`, the
+  // Stop hook and the SessionStart hook want to see what just arrived, and the hook quotes
+  // `messages.at(-1)` as "the last one". They pass `advance: false` and read only the counts below,
+  // which have always been computed over ALL fresh entries rather than the page.
+  const page = advance ? fresh.slice(0, limit) : fresh.slice(-limit)
+  const shown = page.map(clip)
+  if (advance && page.length) {
+    for (const e of page) seen[e.from] = seen[e.from] && t(seen[e.from]) > t(e.ts) ? seen[e.from] : e.ts
     cursors[key] = seen
     writeJson(CURSORS, cursors)
   }

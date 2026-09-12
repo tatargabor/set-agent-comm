@@ -58,7 +58,8 @@ test("it installs the skill too, with the commands baked in", () => {
   // a path is an agent that silently does not watch.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   assert.doesNotMatch(skill, /\{\{/, "a placeholder was left in the installed skill")
-  assert.match(skill, /Monitor\(\{ command: ".*sac\.mjs wait team"/, "the watch command is not spelled out")
+  assert.match(skill, /Monitor\(\{ command: ".*sac\.mjs wait \|\| break; sleep 2; done"/,
+    "the watch command is not spelled out")
   assert.match(skill, /^---\nname: agent-comm$/m, "the frontmatter is not what Claude Code reads")
 })
 
@@ -196,4 +197,28 @@ test("a command with no SET_AGENT_ROOM in it is replaced — out loud", () => {
   const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
   assert.match(c, /SET_AGENT_ROOM=team /)
   assert.match(r.stdout, /no SET_AGENT_ROOM/, "the replacement was silent")
+})
+
+// ── the watch command the skill hands the agent ─────────────────────────────────────────────
+// `sac wait` is DESIGNED to exit by itself (source-stamp restart, 12-hour age cap), on the stated
+// assumption that `persistent: true` on the Monitor re-arms it. Measured 2026-09-12 on two seats
+// in one morning: it does not. Armed bare, a healthy self-exit leaves the seat silently unwatched.
+
+test("the skill's watch command re-arms itself, and only on a CLEAN exit", () => {
+  const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
+  const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
+  assert.match(line, /while true; do /, "a bare command — one self-exit and the seat is unwatched")
+  assert.match(line, /\|\| break/,
+    "without this it spins: a real failure, or the singleton SIGTERM, would restart forever")
+  assert.match(line, /sleep 2/, "no pause between restarts")
+})
+
+test("the skill's watch command SEEDS the rooms in the environment, never as arguments", () => {
+  // ⚠ Argued, the rooms mean 'watch exactly these', resolved once when the Monitor is armed — so a
+  // room joined later is watched by nothing while `send` reports the seat woken (2026-08-19). The
+  // SessionStart note has always been right about this; the skill's copy had drifted.
+  const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
+  const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
+  assert.match(line, /SET_AGENT_ROOM=team/, "the room list is not in the environment")
+  assert.match(line, /sac\.mjs wait \|\| break/, "a room was argued to `wait` — it pins the list")
 })

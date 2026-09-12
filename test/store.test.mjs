@@ -761,3 +761,59 @@ test("…but a seat that really is in both rooms stays in both", () => {
   assert.deepEqual(store.liveSeats("scope-d"), ["bothrooms#s1"],
     "a seat registered for two rooms lost one of them")
 })
+
+// ── the inbox cursor may not outrun the page ────────────────────────────────────────────────
+// Measured 2026-09-12 on a busy live room: `inbox({ limit: 3 })` against 229 unread returned
+// 3, said `truncated: 226`, and marked all 229 read. The 226 were shown to nobody, and a seat two
+// of them were addressed to never woke.
+
+test("REGRESSION: a limited inbox does NOT mark the entries it truncated as read", () => {
+  for (let i = 0; i < 5; i++)
+    store.send({ room: "drain", from: "w", type: "FACT", text: `entry ${i}` })
+  const first = store.inbox({ room: "drain", agent: "reader", limit: 2 })
+  assert.equal(first.unread, 5)
+  assert.equal(first.truncated, 3)
+  const left = store.inbox({ room: "drain", agent: "reader", advance: false })
+  assert.equal(left.unread, 3, "the truncated entries were swallowed — read by nobody")
+})
+
+test("an ADVANCING inbox pages from the OLDEST, so repeated calls drain the room in order", () => {
+  for (let i = 0; i < 5; i++)
+    store.send({ room: "order2", from: "w", type: "FACT", text: `entry ${i}` })
+  const a = store.inbox({ room: "order2", agent: "reader", limit: 2 })
+  assert.deepEqual(a.messages.map(m => m.text), ["entry 0", "entry 1"])
+  const b = store.inbox({ room: "order2", agent: "reader", limit: 2 })
+  assert.deepEqual(b.messages.map(m => m.text), ["entry 2", "entry 3"])
+  const c = store.inbox({ room: "order2", agent: "reader", limit: 2 })
+  assert.deepEqual(c.messages.map(m => m.text), ["entry 4"])
+  assert.equal(store.inbox({ room: "order2", agent: "reader", advance: false }).unread, 0)
+})
+
+test("a PEEK still shows the NEWEST page — the Stop hook quotes `messages.at(-1)`", () => {
+  for (let i = 0; i < 5; i++)
+    store.send({ room: "glance", from: "w", type: "FACT", text: `entry ${i}` })
+  const p = store.inbox({ room: "glance", agent: "reader", advance: false, limit: 2 })
+  assert.deepEqual(p.messages.map(m => m.text), ["entry 3", "entry 4"])
+  assert.equal(store.inbox({ room: "glance", agent: "reader", advance: false }).unread, 5,
+    "a non-advancing read moved the cursor")
+})
+
+test("the counts are over ALL fresh entries, never over the page — a wake-up is decided on them", () => {
+  store.send({ room: "counts", from: "w", type: "FACT", text: "plain" })
+  store.send({ room: "counts", from: "w", type: "REQUEST", text: "wakes the room" })
+  store.send({ room: "counts", from: "w", type: "FACT", text: "also plain" })
+  const r = store.inbox({ room: "counts", agent: "reader", advance: false, limit: 1 })
+  assert.equal(r.unread, 3)
+  assert.equal(r.unreadWaking, 1, "a waking entry outside the page stopped being counted")
+})
+
+test("a truncated page from ONE writer leaves that writer's older entries unread", () => {
+  // The high-water cursor is per WRITER, so this is the case a newest-first page cannot express:
+  // one timestamp cannot say 'I read this writer's newest, not its older'.
+  for (let i = 0; i < 4; i++)
+    store.send({ room: "single", from: "solo", type: "FACT", text: `entry ${i}` })
+  store.inbox({ room: "single", agent: "reader", limit: 1 })
+  const left = store.inbox({ room: "single", agent: "reader", advance: false })
+  assert.equal(left.unread, 3)
+  assert.deepEqual(left.messages.map(m => m.text), ["entry 1", "entry 2", "entry 3"])
+})

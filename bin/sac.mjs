@@ -351,7 +351,14 @@ try {
       if (!room) throw new Error(`usage: sac ${cmd} <room>`)
       const r = store.inbox({ room, agent: ME, advance: cmd === "inbox" })
       if (!r.unread) { console.log("(no new messages)"); break }
-      if (r.truncated) console.log(`… ${r.truncated} older skipped\n`)
+      // ⚠ The two commands truncate at opposite ends now (see `store.inbox`), so they cannot share
+      // one sentence: `inbox` hands back the OLDEST page and leaves the rest unread — saying
+      // "older skipped" there would describe the opposite of what happened and invite the reader
+      // to write the remainder off. `peek` still shows the newest and skips the old.
+      if (r.truncated)
+        console.log(cmd === "inbox"
+          ? `… ${r.truncated} more still unread — run \`sac inbox ${room}\` again\n`
+          : `… ${r.truncated} older skipped\n`)
       for (const m of r.messages) console.log(fmt(m))
       break
     }
@@ -702,7 +709,16 @@ try {
       const skill = readFileSync(skillFrom, "utf8")
         .replaceAll("{{ROOMS}}", rooms.join(", "))
         .replaceAll("{{SAC}}", `${process.execPath} ${sac}`)
-        .replaceAll("{{WAIT_COMMAND}}", `SET_AGENT_NAME=${AGENT} ${process.execPath} ${sac} wait ${rooms.join(",")}`)
+        // ⚠ THE SAME TWO CORRECTIONS THE SessionStart NOTE CARRIES, and this copy had drifted from
+        // it in both. (1) The rooms go in the ENVIRONMENT, not the argument list: argued, they are
+        // "watch exactly these", resolved once when the Monitor is armed, so a room joined later is
+        // watched by nothing while `send` reports the seat woken (measured 2026-08-19). (2) The
+        // command is WRAPPED, because `sac wait` exits on purpose — source-stamp restart, age cap —
+        // and `persistent: true` was measured NOT to re-arm it (2026-09-12, two seats, one morning);
+        // bare, a healthy self-exit leaves the seat silently unwatched. `|| break` keeps it from
+        // spinning: only a clean exit re-arms, a real failure and the singleton SIGTERM end it.
+        .replaceAll("{{WAIT_COMMAND}}", `while true; do SET_AGENT_NAME=${AGENT} ` +
+          `SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${sac} wait || break; sleep 2; done`)
       const skillState = !existsSync(skillTo) ? "installed"
         : readFileSync(skillTo, "utf8") === skill ? "already current" : "updated"
       changes.push(`skill: ${skillState}`)

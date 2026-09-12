@@ -216,7 +216,20 @@ const siblings = writer !== agent
 // that it had woken this seat. As an environment variable the same list is a SEED: `sac wait`
 // re-reads `store.wakingRooms` on every check, so a join is picked up and a `part` drops out,
 // and a seat whose own book is somehow empty still watches what the project configured.
-const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${SAC} wait`
+// ⚠ AND IT IS WRAPPED, because `sac wait` is DESIGNED to exit on its own — the source-stamp
+// restart and the 12-hour age cap both call `process.exit(0)`, quietly and on stderr, on the
+// stated assumption that "`persistent: true` on the Monitor starts a fresh one". Measured
+// 2026-09-12, twice in one morning, on two different seats: it does NOT. A `git pull` moved
+// `bin/sac.mjs`, both watchers exited 0, and the harness reported them merely finished — one seat
+// then sat unwatched for hours while `send` kept reporting that it had woken it. A bare command
+// turns a deliberate, healthy self-exit into a silently unwatched seat, which is the one failure
+// this whole line exists to prevent.
+//
+// `|| break` is the guard that keeps this from being a spin: only a CLEAN exit re-arms. A real
+// failure (bad room, unreadable store) and the singleton claim's SIGTERM — a newer watch taking
+// the seat, which must not be fought — both exit non-zero and end the loop.
+const waitCmd = `while true; do ${ENV}SET_AGENT_ROOM=${rooms.join(",")} ` +
+  `${process.execPath} ${SAC} wait || break; sleep 2; done`
 const monitor = rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
     `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +
