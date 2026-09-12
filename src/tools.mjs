@@ -125,7 +125,12 @@ export const TOOL_DEFS = [
       "an answer (`unreadWaking` counts them); everything else is yours to read and act on or " +
       "not, and needs no reply. " +
       "A long entry that does NOT wake you arrives as its opening, with `clipped: <full length>` " +
-      "— use `history` if you need the whole thing. An entry that wakes you is never clipped.",
+      "— use `history` if you need the whole thing. An entry that wakes you is never clipped. " +
+      "⚠ `truncated: N` MEANS THERE ARE N MORE AND YOU MUST CALL AGAIN — an advancing read hands " +
+      "back the OLDEST page and leaves the rest unread, so the room drains in order over several " +
+      "calls. Until `truncated` is 0 you have not seen everything: `unreadWaking` counts the " +
+      "entries owed an answer across the WHOLE backlog, so it can be 3 while no entry on this " +
+      "page has `wakes: true` — the ones that want you are newer than the page you are holding.",
     inputSchema: S({
       room: ROOM,
       advance: { type: "boolean", description: "Should the read cursor move forward (default: true)" },

@@ -216,20 +216,24 @@ const siblings = writer !== agent
 // that it had woken this seat. As an environment variable the same list is a SEED: `sac wait`
 // re-reads `store.wakingRooms` on every check, so a join is picked up and a `part` drops out,
 // and a seat whose own book is somehow empty still watches what the project configured.
-// ⚠ AND IT IS WRAPPED, because `sac wait` is DESIGNED to exit on its own — the source-stamp
-// restart and the 12-hour age cap both call `process.exit(0)`, quietly and on stderr, on the
-// stated assumption that "`persistent: true` on the Monitor starts a fresh one". Measured
-// 2026-09-12, twice in one morning, on two different seats: it does NOT. A `git pull` moved
-// `bin/sac.mjs`, both watchers exited 0, and the harness reported them merely finished — one seat
-// then sat unwatched for hours while `send` kept reporting that it had woken it. A bare command
-// turns a deliberate, healthy self-exit into a silently unwatched seat, which is the one failure
-// this whole line exists to prevent.
+// ⚠ AND IT IS A SIMPLE COMMAND — never wrapped in a `while` loop, however tempting. Tried and
+// REVERTED the same day, 2026-09-12: `sac wait` exits on its own (source-stamp restart, age cap)
+// and `persistent: true` was measured not to re-arm it, so a self-re-arming wrapper looks like the
+// obvious fix. It is the opposite. `bash -c '<simple command>'` EXECS, so the watch's
+// `PARENT = process.ppid` is the process the Monitor spawned it from; inside a loop bash FORKS,
+// node's parent becomes the loop's own bash, and that bash is merely REPARENTED when the session
+// dies. The "die with the session" guard then never fires and the age cap RESPAWNS the watcher
+// instead of ending it — the measured 2026-08-06 orphan failure (five `sac wait` processes from
+// dead sessions, notifications into a dead context, remote entries ingested off a cursor nobody
+// advances) made permanent, and `claimWatch` cannot clear it because it only supersedes a watch of
+// the same owner. `|| break` does not save it either: `break` returns 0, so the loop reports a
+// clean finish even when the watch died on a bad room.
 //
-// `|| break` is the guard that keeps this from being a spin: only a CLEAN exit re-arms. A real
-// failure (bad room, unreadable store) and the singleton claim's SIGTERM — a newer watch taking
-// the seat, which must not be fought — both exit non-zero and end the loop.
-const waitCmd = `while true; do ${ENV}SET_AGENT_ROOM=${rooms.join(",")} ` +
-  `${process.execPath} ${SAC} wait || break; sleep 2; done`
+// The silent-self-exit gap is real, and it is closed where it belongs instead — `sac wait` now
+// says on STDOUT that it stopped and asks for a fresh watch. See the note above `restart` in
+// `bin/sac.mjs`: that line is actionable, which is exactly what the earlier stderr-only text was
+// not.
+const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${SAC} wait`
 const monitor = rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
     `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +

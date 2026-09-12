@@ -138,8 +138,21 @@ test("a watch that outlives its age cap exits, so the Monitor starts a fresh one
   w.stdout.on("data", d => { out += d }); w.stderr.on("data", d => { err += d })
   const code = await new Promise(r => w.on("exit", c => r(c)))
   assert.equal(code, 0, "it exited non-zero — that reads as a failed command to whoever ran it")
-  assert.match(err, /running for over/, "it exited without saying why")
-  assert.equal(out, "", "it spoke on STDOUT — every line there is a notification, i.e. a whole turn")
+  // ⚠ THIS ASSERTION WAS REVERSED on 2026-09-12, and the old one is quoted here because it was
+  // right about the cost and wrong about the alternative: "it spoke on STDOUT — every line there
+  // is a notification, i.e. a whole turn". True, and worth paying, because NOTHING re-arms the
+  // watch: `persistent: true` was measured not to, twice in one morning on two seats, and a
+  // `while` wrapper orphans the watch from its session instead (see `waitCmd` in the hook). A
+  // seat that silently stops being watched is the failure this whole command exists to prevent.
+  // What earns the turn is that the line is ACTIONABLE — it carries the command that arms a new
+  // watch, so the notification is a fix rather than a bulletin.
+  assert.match(out, /watch STOPPED/, "it stopped in silence — the seat is now unwatched, unnoticed")
+  assert.match(out, /Monitor\(\{ command: .*sac\.mjs wait"/, "it did not say how to arm a new one")
+  assert.match(out, /SET_AGENT_ROOM=cap-room/, "the re-arm command would watch the wrong rooms")
+  assert.ok(out.includes(`SET_AGENT_COMM_DIR=${ROOT}`), "the re-arm command names a different store")
+  assert.match(out, /running for over/, "it exited without saying why")
+  // The detail that is NOT a call to action stays off stdout; `err` carries nothing here now.
+  assert.equal(err, "", `stderr should be quiet on a self-exit, got: ${err}`)
 })
 
 // ── holding back a seat that is mid-turn ──────────────────────────────────────

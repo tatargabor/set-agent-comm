@@ -58,8 +58,7 @@ test("it installs the skill too, with the commands baked in", () => {
   // a path is an agent that silently does not watch.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   assert.doesNotMatch(skill, /\{\{/, "a placeholder was left in the installed skill")
-  assert.match(skill, /Monitor\(\{ command: ".*sac\.mjs wait \|\| break; sleep 2; done"/,
-    "the watch command is not spelled out")
+  assert.match(skill, /Monitor\(\{ command: ".*sac\.mjs wait"/, "the watch command is not spelled out")
   assert.match(skill, /^---\nname: agent-comm$/m, "the frontmatter is not what Claude Code reads")
 })
 
@@ -200,25 +199,35 @@ test("a command with no SET_AGENT_ROOM in it is replaced — out loud", () => {
 })
 
 // ── the watch command the skill hands the agent ─────────────────────────────────────────────
-// `sac wait` is DESIGNED to exit by itself (source-stamp restart, 12-hour age cap), on the stated
-// assumption that `persistent: true` on the Monitor re-arms it. Measured 2026-09-12 on two seats
-// in one morning: it does not. Armed bare, a healthy self-exit leaves the seat silently unwatched.
+// It has to agree with the SessionStart note in all three respects, and the skill copy had drifted
+// in all three. The third one is the counter-intuitive one: see `waitCmd` in the hook for why a
+// self-re-arming `while` wrapper is not the fix it looks like.
 
-test("the skill's watch command re-arms itself, and only on a CLEAN exit", () => {
+test("the skill's watch command is a SIMPLE command — never a self-re-arming loop", () => {
+  // ⚠ Tried and reverted 2026-09-12. `bash -c '<simple command>'` execs, so the watch's parent is
+  // the process the Monitor spawned it from and the "die with the session" guard works. In a loop
+  // bash forks, node's parent becomes that bash, the guard never fires, and the age cap respawns
+  // the watcher instead of ending it — an immortal watch ingesting off a cursor nobody advances.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
-  assert.match(line, /while true; do /, "a bare command — one self-exit and the seat is unwatched")
-  assert.match(line, /\|\| break/,
-    "without this it spins: a real failure, or the singleton SIGTERM, would restart forever")
-  assert.match(line, /sleep 2/, "no pause between restarts")
+  assert.doesNotMatch(line, /while true/, "a wrapper orphans the watch from its session")
+  assert.doesNotMatch(line, /\|\| break/, "`break` returns 0 — a failed watch reports a clean finish")
 })
 
 test("the skill's watch command SEEDS the rooms in the environment, never as arguments", () => {
   // ⚠ Argued, the rooms mean 'watch exactly these', resolved once when the Monitor is armed — so a
-  // room joined later is watched by nothing while `send` reports the seat woken (2026-08-19). The
-  // SessionStart note has always been right about this; the skill's copy had drifted.
+  // room joined later is watched by nothing while `send` reports the seat woken (2026-08-19).
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
   assert.match(line, /SET_AGENT_ROOM=team/, "the room list is not in the environment")
-  assert.match(line, /sac\.mjs wait \|\| break/, "a room was argued to `wait` — it pins the list")
+  assert.match(line, /sac\.mjs wait"/, "a room was argued to `wait` — it pins the list")
+})
+
+test("…and it carries SET_AGENT_COMM_DIR, so the watch is on the store the hook uses", () => {
+  // The measured 2026-08-08 failure the hook's own ENV exists for: a watch armed against the
+  // DEFAULT store creates an empty room directory and sits watching it. Nothing fails, and it is
+  // indistinguishable from a working watch until a message does not arrive.
+  const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
+  const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
+  assert.ok(line.includes(`SET_AGENT_COMM_DIR=${STORE}`), "the skill would watch a different store")
 })

@@ -709,16 +709,21 @@ try {
       const skill = readFileSync(skillFrom, "utf8")
         .replaceAll("{{ROOMS}}", rooms.join(", "))
         .replaceAll("{{SAC}}", `${process.execPath} ${sac}`)
-        // ⚠ THE SAME TWO CORRECTIONS THE SessionStart NOTE CARRIES, and this copy had drifted from
-        // it in both. (1) The rooms go in the ENVIRONMENT, not the argument list: argued, they are
-        // "watch exactly these", resolved once when the Monitor is armed, so a room joined later is
-        // watched by nothing while `send` reports the seat woken (measured 2026-08-19). (2) The
-        // command is WRAPPED, because `sac wait` exits on purpose — source-stamp restart, age cap —
-        // and `persistent: true` was measured NOT to re-arm it (2026-09-12, two seats, one morning);
-        // bare, a healthy self-exit leaves the seat silently unwatched. `|| break` keeps it from
-        // spinning: only a clean exit re-arms, a real failure and the singleton SIGTERM end it.
-        .replaceAll("{{WAIT_COMMAND}}", `while true; do SET_AGENT_NAME=${AGENT} ` +
-          `SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${sac} wait || break; sleep 2; done`)
+        // ⚠ THE SAME THREE CORRECTIONS THE SessionStart NOTE CARRIES — this copy had drifted from
+        // it in all three, and the whole point of the note is that the two commands agree.
+        // (1) The rooms go in the ENVIRONMENT, not the argument list: argued, they mean "watch
+        // exactly these", resolved once when the Monitor is armed, so a room joined afterwards is
+        // watched by nothing while `send` reports the seat woken (measured 2026-08-19).
+        // (2) `SET_AGENT_COMM_DIR` is carried across when it is set. A watch armed against the
+        // default store is indistinguishable from a working one until a message does not arrive —
+        // the measured 2026-08-08 failure the hook's own `ENV` exists for, and the skill's copy
+        // simply did not have it.
+        // (3) It stays a SIMPLE COMMAND. See the note on `waitCmd` in `hooks/session-start.mjs`
+        // for why a self-re-arming `while` wrapper is not the fix it looks like: it puts a bash
+        // between the Monitor and node, and the "die with the session" guard dies with it.
+        .replaceAll("{{WAIT_COMMAND}}",
+          (process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : "") +
+          `SET_AGENT_NAME=${AGENT} SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${sac} wait`)
       const skillState = !existsSync(skillTo) ? "installed"
         : readFileSync(skillTo, "utf8") === skill ? "already current" : "updated"
       changes.push(`skill: ${skillState}`)
@@ -1081,20 +1086,37 @@ try {
        * on the Monitor is what makes both of these free — the harness starts a new one, on the
        * new code, at the new size. `SET_AGENT_WATCH_MAX_HOURS=0` turns the cap off.
        *
-       * ⚠ STDERR, and exit 0. Every stdout line here is a NOTIFICATION and therefore a turn of
-       * the main agent, and "your watcher restarted itself" is nothing anyone can act on from
-       * inside a session. A non-zero exit would additionally read as a failed command to whoever
-       * started it by hand.
+       * ⚠ This used to say "STDERR, and exit 0", on the ground that every stdout line is a
+       * NOTIFICATION and therefore a turn, and "your watcher restarted itself" is not worth one.
+       * Half of that is now WRONG and the retraction is kept visible rather than edited away: the
+       * sentence assumed `persistent: true` re-arms the watch, and it does not (measured
+       * 2026-09-12, two seats, one morning). Exit 0 stays — a non-zero exit reads as a failed
+       * command to whoever started it by hand. The line moved to stdout and became actionable; see
+       * the note on `restart` below.
        */
       const CODE_AT_START = store.sourceStamp()
       const SETTLED_MS = 30_000
       const capHours = Number(process.env.SET_AGENT_WATCH_MAX_HOURS ?? 12)
       const MAX_AGE_MS = capHours > 0 ? capHours * 3600_000 : Infinity
       const STARTED_AT = Date.now()
+      // ⚠ ON STDOUT, and that is a REVERSAL of the line above, made 2026-09-12 with the measurement
+      // that overturned it. The old reasoning — a stdout line is a notification and therefore a
+      // turn, and "your watcher restarted itself" is not worth one — was sound only while the
+      // premise held that something re-arms the watch. Measured that day on two seats: `persistent:
+      // true` does NOT, so the seat simply went unwatched, silently, for hours, while `send` kept
+      // reporting that it had woken it. A `while` wrapper cannot fix it either (see `waitCmd` in
+      // `hooks/session-start.mjs`: it orphans the watch instead).
+      //
+      // So the line stays, but it had to become ACTIONABLE to earn the turn, which is the whole
+      // difference: not "it restarted itself" but "it stopped, here is the command that arms a new
+      // one". One line, once, at the end of the watch's life.
+      const rearm = (process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : "") +
+        `SET_AGENT_NAME=${store.seatBase(ME)} SET_AGENT_ROOM=${watched.join(",")} ` +
+        `${process.execPath} ${fileURLToPath(import.meta.url)} wait`
       const restart = why => {
-        console.error(`[set-agent-comm] ${why} — stopping so a fresh watch takes over. The ` +
-          `Monitor that armed this is persistent and starts one; if you started it by hand, ` +
-          `start it again.`)
+        console.log(`[set-agent-comm] this inbox watch STOPPED — ${why}. Nothing re-arms it: arm ` +
+          `a new one now, or this seat is unwatched. Monitor({ command: "${rearm}", ` +
+          `description: "agent-comm inbox", persistent: true })`)
         process.exit(0)
       }
       // Half a minute is the right cadence for a 12-hour cap and a 30-second settle; a SHORTER cap

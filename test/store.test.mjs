@@ -817,3 +817,88 @@ test("a truncated page from ONE writer leaves that writer's older entries unread
   assert.equal(left.unread, 3)
   assert.deepEqual(left.messages.map(m => m.text), ["entry 1", "entry 2", "entry 3"])
 })
+
+// ── a doubled entry in an append-only file ──────────────────────────────────────────────────
+// Measured 2026-09-12 on the first entry a newly joined remote seat ever sent: two identical
+// headers at the same millisecond in one writer's file. `ingest` does check for the ts, but
+// check-then-append is not atomic ACROSS PROCESSES, and three of them ingest the same room —
+// the bridge loop in `sac wait`, the MCP server's pull, and the pull that rides on every send.
+
+test("REGRESSION: an entry written twice by two ingesting processes is read ONCE", () => {
+  store.send({ room: "dup", from: "local", type: "FACT", text: "anchor" })
+  const path = store.busFile("dup", "far@host#1")
+  const block = "## 2026-09-12T13:20:42.502+02:00 — FACT → local\nlanded twice\n"
+  writeFileSync(path, `${block}\n${block}`)
+  const h = store.history({ room: "dup", from: "far@host#1" })
+  assert.equal(h.messages.length, 1, "the duplicate reached a reader — append-only cannot undo it")
+  assert.equal(store.inbox({ room: "dup", agent: "local", advance: false }).unread, 1)
+})
+
+test("…but two DIFFERENT entries sharing one millisecond are both kept", () => {
+  // The trap in the obvious fix: keying on the timestamp alone. The store is synchronous, so one
+  // seat can send twice inside a millisecond — dropping one of those is the lost message itself.
+  const path = store.busFile("sharedms", "far@host#2")
+  store.createRoom("sharedms", "test")
+  writeFileSync(path,
+    "## 2026-09-12T13:20:42.502+02:00 — FACT\nfirst thing\n\n" +
+    "## 2026-09-12T13:20:42.502+02:00 — FACT\nsecond thing\n")
+  const h = store.history({ room: "sharedms", from: "far@host#2" })
+  assert.deepEqual(h.messages.map(m => m.text), ["first thing", "second thing"])
+})
+
+test("a duplicate does not survive by differing only in its ADDRESSEE or type", () => {
+  // Same instant, same text, but genuinely different headers — those are different entries.
+  const path = store.busFile("hdr", "far@host#3")
+  store.createRoom("hdr", "test")
+  writeFileSync(path,
+    "## 2026-09-12T13:20:42.502+02:00 — FACT → a\nsame body\n\n" +
+    "## 2026-09-12T13:20:42.502+02:00 — FACT → b\nsame body\n\n" +
+    "## 2026-09-12T13:20:42.502+02:00 — FACT → b\nsame body\n")
+  const h = store.history({ room: "hdr", from: "far@host#3" })
+  assert.equal(h.messages.length, 2, "the third is a duplicate of the second and must go")
+  assert.deepEqual(h.messages.map(m => m.to.join()), ["a", "b"])
+})
+
+// ── what the review of the paging fix found ─────────────────────────────────────────────────
+// Three defects the first version of `inbox` paging introduced or exposed, 2026-09-12.
+
+test("REGRESSION: `unread` NEVER drags the cursor forward over a partially drained room", () => {
+  // The rewind is the one command that exists so reading is not irreversible. Once `inbox` pages,
+  // a room can sit half-read — and rebuilding the cursor as "everything but the last N" then marks
+  // the untouched middle read. Measured: 10 entries, inbox(limit 3), unread 1 → six swallowed.
+  store.createRoom("rewind", "test")
+  for (let i = 0; i < 10; i++) store.send({ room: "rewind", from: "w", type: "FACT", text: `m${i}` })
+  store.inbox({ room: "rewind", agent: "reader", limit: 3 })
+  store.unread({ room: "rewind", agent: "reader", count: 1 })
+  const left = store.inbox({ room: "rewind", agent: "reader", advance: false })
+  assert.equal(left.unread, 7, "the rewind marked the undrained middle as read")
+  assert.deepEqual(left.messages.map(m => m.text), ["m3", "m4", "m5", "m6", "m7", "m8", "m9"])
+})
+
+test("REGRESSION: a page never cuts a millisecond in half — the twin is not buried", () => {
+  // The cursor is a per-writer high-water ts compared with `>`. A page ending between two entries
+  // that share a ts advances past both, and the second is invisible for good. Found in review with
+  // exactly this shape: the buried one was a directly addressed REQUEST, and `unreadWaking` fell
+  // to 0 with nobody having seen it.
+  store.createRoom("twins", "test")
+  const path = store.busFile("twins", "far@host#4")
+  writeFileSync(path,
+    "## 2026-09-12T14:00:00.500+02:00 — FACT\nfirst of the pair\n\n" +
+    "## 2026-09-12T14:00:00.500+02:00 — REQUEST → reader\nthe twin, addressed to me\n")
+  const first = store.inbox({ room: "twins", agent: "reader", limit: 1 })
+  assert.equal(first.messages.length, 2, "the page stopped inside the millisecond")
+  const after = store.inbox({ room: "twins", agent: "reader", advance: false })
+  assert.equal(after.unread, 0)
+  assert.ok(first.messages.some(m => m.wakes), "the addressed REQUEST was swallowed")
+})
+
+test("`send` never mints a colliding timestamp for one writer", () => {
+  // The ts is the entry's identity: the cursor, `re:` threading, the ledger and `ingest` all key
+  // on it. Two entries of one writer sharing a millisecond cannot be told apart. Measured before
+  // the fix: 2 of 40 consecutive sends landed in the same millisecond.
+  store.createRoom("burst", "test")
+  for (let i = 0; i < 40; i++) store.send({ room: "burst", from: "fast", type: "FACT", text: `m${i}` })
+  const h = store.history({ room: "burst", from: "fast", limit: 100 })
+  assert.equal(h.messages.length, 40, "an entry was lost or collapsed")
+  assert.equal(new Set(h.messages.map(m => m.ts)).size, 40, "two entries of one writer share a ts")
+})

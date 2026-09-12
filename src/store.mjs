@@ -1141,7 +1141,18 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   }
   const path = busFile(room, from)
   ensureDir(dirname(path))
-  const ts = now()
+  // ⚠ ONE WRITER, ONE TIMESTAMP — the ts is this entry's IDENTITY everywhere downstream: the read
+  // cursor is a per-writer high-water `ts`, `re:` threads point at a `ts`, the ledger and
+  // `shouldNudge` key on it, and `ingest` refuses a `ts` it has already seen. Two entries from one
+  // writer sharing a millisecond therefore cannot be told apart, and the cursor cannot sit between
+  // them: whichever is second becomes permanently invisible. Measured 2026-09-12 while reviewing
+  // the paging fix — 2 of 40 consecutive sends landed in the same millisecond, because the store is
+  // synchronous and nothing here bumped or checked the clock. Bumping is the cheap end to fix: one
+  // millisecond of drift on a burst, against a silently dropped message.
+  let ts = now()
+  const already = parse(path, from)
+  const last = already.length ? already[already.length - 1].ts : null
+  for (let bump = 1; last && ts === last; bump++) ts = now(new Date(Date.now() + bump))
   const head = `## ${ts} — ${type}${addressed.length ? ` → ${addressed.join(", ")}` : ""}${re ? ` (re: ${re})` : ""}`
   const body = escapeBodyHeaders(text.trim())
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
@@ -1619,7 +1630,37 @@ function parse(path, agent) {
     } else if (cur) cur.lines.push(line)
   }
   if (cur) out.push(cur)
-  return out.map(e => ({ ...e, text: e.lines.join("\n").trim(), lines: undefined }))
+  // ⚠ A DOUBLED ENTRY IS DROPPED HERE, at READ time, and that is the only place it can be.
+  // `ingest` already refuses a ts it can see in the file — but check-then-append is not atomic
+  // ACROSS PROCESSES, and several of them ingest the same room: the bridge loop inside `sac wait`,
+  // the MCP server's `pullReport`, and the pull that rides on every `send` and `sync`. Two of them
+  // parsing before either appends both see a clean file and both write. Measured 2026-09-12, on
+  // the first entry a newly joined remote seat ever sent: two identical headers at the same
+  // millisecond, in an append-only file that "one file, one writer" says cannot hold one.
+  //
+  // A lock is not the answer — see the top of this file: a dead session's lock stays stuck
+  // forever, and these are exactly the processes that get killed. Dropping at read time needs no
+  // coordination between them, is idempotent, and HEALS the files that already carry a double:
+  // an append-only log is never rewritten, so a duplicate already on disk has no other cure.
+  //
+  // The key is the WHOLE entry, never the timestamp alone. Two DIFFERENT entries can share a
+  // millisecond — the store is synchronous and a seat can send twice inside one — and dropping
+  // one of those would be precisely the lost message this file exists to prevent.
+  //
+  // Two passes, because the cheap one answers for almost every file: a repeated TIMESTAMP is the
+  // only way a duplicate can exist, so a file where none repeats — nearly every file, nearly
+  // always — is returned untouched without a single key being built. `parse` runs once per writer
+  // file on every `inbox`, `wakes` and `history` call, and the busiest measured room holds 232
+  // entries; keying all of them on their full text would put hundreds of kilobytes of string
+  // building on a hot path, every call, to find nothing.
+  const entries = out.map(e => ({ ...e, text: e.lines.join("\n").trim(), lines: undefined }))
+  if (new Set(entries.map(e => e.ts)).size === entries.length) return entries
+  const seen = new Set()
+  return entries
+    .filter(e => {
+      const key = `${e.ts} ${e.type} ${e.to.join(",")} ${e.re || ""} ${e.text}`
+      return seen.has(key) ? false : (seen.add(key), true)
+    })
 }
 
 /**
@@ -1771,7 +1812,19 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
   // Stop hook and the SessionStart hook want to see what just arrived, and the hook quotes
   // `messages.at(-1)` as "the last one". They pass `advance: false` and read only the counts below,
   // which have always been computed over ALL fresh entries rather than the page.
+  //
+  // ⚠ AND THE CUT IS TAKEN AT A TIMESTAMP, NOT AT AN INDEX. A page that ends in the MIDDLE of one
+  // millisecond buries what it left there: the cursor is `>`-compared, so once `seen[writer]`
+  // reaches that ts, a second entry of that writer bearing the same ts is read forever after. Found
+  // in review, 2026-09-12, on the very fix above — a directly addressed REQUEST vanished with
+  // `unreadWaking` dropping to 0. `send` no longer mints a colliding ts, but files written by older
+  // senders and by `ingest` from another machine still can, so the reader defends itself too.
+  // Pulling in the rest of the boundary millisecond is bounded and cannot livelock, which the
+  // alternative — refusing to advance over it — could.
   const page = advance ? fresh.slice(0, limit) : fresh.slice(-limit)
+  while (advance && page.length && page.length < fresh.length &&
+         t(fresh[page.length].ts) <= t(page[page.length - 1].ts))
+    page.push(fresh[page.length])
   const shown = page.map(clip)
   if (advance && page.length) {
     for (const e of page) seen[e.from] = seen[e.from] && t(seen[e.from]) > t(e.ts) ? seen[e.from] : e.ts
@@ -1820,7 +1873,21 @@ export function unread({ room, agent, count = 1 }) {
     if (back.has(e)) continue
     if (!seen[e.from] || t(e.ts) > t(seen[e.from])) seen[e.from] = e.ts
   }
-  cursors[key] = seen
+  // ⚠ A REWIND MAY ONLY EVER MOVE BACKWARDS. `seen` above is the high-water of everything except
+  // the last `count` entries, which was the whole cursor only while `inbox` always advanced to the
+  // end of the room. Since it pages (2026-09-12) a room can sit PARTIALLY drained, and writing
+  // `seen` wholesale then drags the cursor FORWARD over everything between the page and the tail:
+  // measured on 10 entries, `inbox({ limit: 3 })` then `unread 1` left 1 unread and silently
+  // marked six read. The one command that exists so that reading is not irreversible would have
+  // become the biggest swallower in the store. So each writer keeps whichever mark is EARLIER, and
+  // a writer nothing was ever read from stays that way.
+  const prev = cursors[key] || {}
+  const rewound = {}
+  for (const w of Object.keys(prev)) {
+    const back = seen[w]
+    rewound[w] = !back || t(back) > t(prev[w]) ? prev[w] : back
+  }
+  cursors[key] = rewound
   writeJson(CURSORS, cursors)
   return { room, agent, restored: Math.min(count, all.length) }
 }
