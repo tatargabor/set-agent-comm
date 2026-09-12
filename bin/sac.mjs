@@ -402,6 +402,15 @@ try {
       // move to the archive, they do not go away (see `store.archiveDeadPairRooms`).
       const swept = store.archiveDeadPairRooms({ dry })
       for (const room of swept) console.log(`${dry ? "would archive" : "archived "} dm:${room.padEnd(40)} both seats gone — restore: sac rooms --restore ${room}`)
+      // ⚠ Watch claims accumulate for the same reason seats do, and nothing ever removed one:
+      // measured 2026-09-12, 74 claim files with 70 dead pids, the oldest a fortnight old. They are
+      // harmless — `claimWatch` checks `alive` and `looksLikeWatch` before it signals anyone — so
+      // this rides along with the registry hygiene rather than earning a command of its own.
+      const watches = store.pruneWatches({ dry })
+      for (const w of watches.dropped)
+        console.log(`${dry ? "would drop" : "dropped  "} watch ${w.seat.padEnd(38)} pid ${w.pid ?? "?"} gone, armed ${w.startedAt || "?"}`)
+      if (watches.dropped.length || watches.kept)
+        console.log(`${watches.dropped.length} watch claim(s) ${dry ? "would be dropped" : "dropped"}, ${watches.kept} live watch(es) kept`)
       break
     }
     case "reap": {

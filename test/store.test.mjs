@@ -902,3 +902,32 @@ test("`send` never mints a colliding timestamp for one writer", () => {
   assert.equal(h.messages.length, 40, "an entry was lost or collapsed")
   assert.equal(new Set(h.messages.map(m => m.ts)).size, 40, "two entries of one writer share a ts")
 })
+
+// ── watch claims outlive their processes ────────────────────────────────────────────────────
+// Measured 2026-09-12 on the live store: 74 claim files, 70 naming a dead pid, the oldest from
+// 2026-08-27. Nothing removed one, because `claimWatch` only ever overwrites the file for a seat
+// that arms AGAIN — and a seat is a session id, so most never do.
+
+test("`pruneWatches` drops a claim whose process is gone and keeps a live one", () => {
+  store.claimWatch({ seat: "ghost#dead1111", rooms: ["r"], pid: 999999, owner: null })
+  store.claimWatch({ seat: "here#alive111", rooms: ["r"], pid: process.pid, owner: null })
+  const r = store.pruneWatches()
+  assert.deepEqual(r.dropped.map(d => d.seat), ["ghost#dead1111"])
+  assert.equal(r.kept, 1, "a live watch's claim was removed under it")
+})
+
+test("REGRESSION: a rehearsal never performs the act — `pruneWatches --dry` writes nothing", () => {
+  store.claimWatch({ seat: "ghost#dead2222", rooms: ["r"], pid: 999998, owner: null })
+  const dry = store.pruneWatches({ dry: true })
+  assert.ok(dry.dropped.some(d => d.seat === "ghost#dead2222"))
+  assert.ok(store.pruneWatches({ dry: true }).dropped.some(d => d.seat === "ghost#dead2222"),
+    "the dry run deleted the claim it was only supposed to describe")
+})
+
+test("a LIVE pid is left alone even when it no longer looks like a watch", () => {
+  // The reused-pid case. `claimWatch` judges it with `alive` AND `looksLikeWatch` before signalling
+  // anything; deleting the claim from out here would be a guess made with less information.
+  store.claimWatch({ seat: "reused#1111aaaa", rooms: ["r"], pid: process.pid, owner: null })
+  store.pruneWatches()
+  assert.equal(store.pruneWatches({ dry: true }).kept, 2, "a live claim was pruned on a guess")
+})

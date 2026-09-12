@@ -1363,6 +1363,36 @@ export function pruneSeats({ days = 7, keep = SEATS_KEPT_PER_AGENT, dry = false 
 }
 
 /**
+ * Forget WATCH CLAIMS whose process is gone.
+ *
+ * ⚠ Measured 2026-09-12 on the live store: 74 claim files, 70 of them naming a dead pid, the
+ * oldest from 2026-08-27. Nothing ever removed one — `claimWatch` overwrites the file for a seat
+ * that arms again, so a seat that never comes back keeps its claim for good, and the seats that
+ * never come back are the overwhelming majority (a seat is a session id, so every restart is a new
+ * one). Harmless by construction and therefore easy to leave: nothing READS a dead claim into a
+ * decision, because `claimWatch` checks `alive` and `looksLikeWatch` before it signals anything.
+ *
+ * So this is hygiene, not a fix, and it is written to stay that way: a claim is removed ONLY when
+ * its pid is gone. A live pid is never touched even if it no longer looks like a watch — that is
+ * the reused-pid case, where the right move is to leave the file for `claimWatch` to judge with
+ * its own two checks rather than to delete a claim on a guess from outside.
+ */
+export function pruneWatches({ dry = false } = {}) {
+  let names
+  try { names = readdirSync(WATCHES) } catch { return { dropped: [], dry, kept: 0 } }
+  const dropped = []
+  let kept = 0
+  for (const file of names) {
+    if (!file.endsWith(".json")) continue
+    const rec = readJson(join(WATCHES, file), null)
+    if (rec && rec.pid && alive(rec.pid)) { kept++; continue }
+    if (!dry) { try { unlinkSync(join(WATCHES, file)) } catch { /* someone else got there first */ } }
+    dropped.push({ seat: file.slice(0, -5), pid: rec?.pid ?? null, startedAt: rec?.startedAt ?? null })
+  }
+  return { dropped, dry, kept }
+}
+
+/**
  * Reap ghost sessions: seats that checked in but NEVER WROTE — `lastWrote` is null or missing —
  * and whose process is gone (`seatState === false`). Measured 2026-08-30: 35 ghosts in 24 hours
  * across three projects. They are harmless individually but inflate `agents` output and slow
