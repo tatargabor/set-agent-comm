@@ -234,11 +234,38 @@ const siblings = writer !== agent
 // `bin/sac.mjs`: that line is actionable, which is exactly what the earlier stderr-only text was
 // not.
 const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${SAC} wait`
+// ⚠ `timeout_ms` IS NOT OPTIONAL, AND THE NUMBER IS THE POINT. The Monitor tool caps a watch
+// at 30 minutes and DEFAULTS to five, so a line that omits it asks a literal-minded agent to
+// wake ~288 times a day instead of ~48. Every expiry wakes an idle session, and `bin/sac.mjs`
+// already states the price above `wait`: "a Monitor notification to an idle session pays for
+// the whole context again".
+//
+// Measured 2026-09-23 from one project's `.claude/logs/context-guard.jsonl`, 196 wake-ups since
+// 2026-09-16: **38,150,258 tokens of re-read context, ZERO messages** — 47 expiries and 8.9M
+// tokens on an average full day. The cost scales with the session's context (mean 194,644 here),
+// so it is worst exactly in the long sessions this bus exists to coordinate.
+//
+// ⚠ The 30-minute cap is the HARNESS's, not this project's, and the same log dates it: the gap
+// between wake-ups was a 103-minute median on 09-12 and has been 30.1 minutes every day since
+// 09-16 — with no commit here between 09-13 and 09-18. `sac wait` still has its own 12h age cap
+// (08-29) and `persistent: true` was measured not to re-arm (09-12); neither is the cause. What
+// this file CAN control is the number it asks for and what it says about the expiry.
+//
+// The second sentence matters as much as the number. Arming is a one-off; EXPIRY repeats for
+// the life of the session, and the reflex on an expiry notice is to re-arm. That reflex is
+// what produced the 27. The cheap delivery is named here so the agent can weigh it instead of
+// reaching for the expensive one: the Stop hook reports unread mail at the end of every turn,
+// into a context that is already loaded — the same asymmetry `sac.mjs` measured on 2026-08-27
+// ("The second delivery is the cheap one").
 const monitor = rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
-    `description: "agent-comm inbox", persistent: true }). Nothing else wakes you while you ` +
-    `are idle at the prompt, so without it a message addressed to you waits until someone ` +
-    `happens to write to you here.`
+    `description: "agent-comm inbox", timeout_ms: 1800000, persistent: true }). Nothing else ` +
+    `wakes you while you are idle at the prompt, so without it a message addressed to you ` +
+    `waits until someone happens to write to you here. Keep that timeout_ms: the tool's own ` +
+    `default is 5 minutes, and every expiry wakes you and re-reads your WHOLE context ` +
+    `(measured over 3 full days: 47 expiries a day, 8.9M tokens a day, zero messages). When it EXPIRES, re-arm ` +
+    `only if this session will sit idle and someone is actually waiting on you — the Stop hook ` +
+    `already reports unread mail at the end of each turn, in a context that is already loaded.`
   : ""
 
 if (notices.length || backlog.length || siblings || monitor) {

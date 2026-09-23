@@ -1123,9 +1123,14 @@ try {
         `SET_AGENT_NAME=${store.seatBase(ME)} SET_AGENT_ROOM=${watched.join(",")} ` +
         `${process.execPath} ${fileURLToPath(import.meta.url)} wait`
       const restart = why => {
+        // ⚠ The `timeout_ms` is carried here too, for the same reason the session-start hook
+        // states it (see the comment above `monitor` there): the tool's default is 5 minutes,
+        // and this line is read at the END of a watch's life — precisely when an agent re-arms
+        // by copying whatever it is handed. Measured 2026-09-23: 196 expiries since 09-16 cost
+        // 38,150,258 tokens of re-read context and delivered nothing (47 a day on a full day).
         console.log(`[set-agent-comm] this inbox watch STOPPED — ${why}. Nothing re-arms it: arm ` +
           `a new one now, or this seat is unwatched. Monitor({ command: "${rearm}", ` +
-          `description: "agent-comm inbox", persistent: true })`)
+          `description: "agent-comm inbox", timeout_ms: 1800000, persistent: true })`)
         process.exit(0)
       }
       // Half a minute is the right cadence for a 12-hour cap and a 30-second settle; a SHORTER cap

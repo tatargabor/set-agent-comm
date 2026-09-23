@@ -135,6 +135,36 @@ test("REGRESSION: an interactive session still gets all of it", () => {
   assert.ok(out.hookSpecificOutput.watchPaths?.length, "an interactive session is watching nothing")
 })
 
+test("REGRESSION: the watch it arms carries the LONGEST timeout the Monitor allows", () => {
+  // ⚠ Measured 2026-09-23, in a real session, from `.claude/logs/context-guard.jsonl`:
+  //
+  //     196 expiries since 09-16 · 38,150,258 tokens of re-read context · ZERO messages
+  //     (47 expiries and 8.9M tokens on an average full day, mean context 194,644)
+  //
+  // The Monitor tool caps every watch at 30 minutes and its DEFAULT is five. Each expiry wakes
+  // an idle session, and this file's own `sac.mjs` comment already states the price: "a Monitor
+  // notification to an idle session pays for the whole context again". A line that omits
+  // `timeout_ms` therefore asks a literal-minded agent to wake ~288 times a day instead of ~48 —
+  // and the cost is proportional to the session's context, so it is WORST exactly in the long
+  // sessions the bus exists to coordinate.
+  //
+  // The number is asserted, not just its presence: a smaller value is the regression, and
+  // "there is a timeout_ms" would pass while the watch woke every five minutes.
+  const ctx = hook(START, "human", { SET_AGENT_HEADLESS: "0" }).hookSpecificOutput.additionalContext
+  const ms = Number(ctx.match(/timeout_ms:\s*(\d+)/)?.[1])
+  assert.equal(ms, 1_800_000, `the armed watch does not carry the 30-minute cap: ${ctx}`)
+})
+
+test("REGRESSION: it says what to do when the watch EXPIRES, not only how to arm it", () => {
+  // Arming is a one-off; expiry happens every 30 minutes for the life of the session. Without a
+  // stated policy the reflex is to re-arm — that reflex is what produced the 27 expiries above.
+  // The cheap delivery already exists and is named here so the agent can weigh it: the Stop hook
+  // reports unread mail at the end of every turn, into a context that is already loaded.
+  const ctx = hook(START, "human", { SET_AGENT_HEADLESS: "0" }).hookSpecificOutput.additionalContext
+  assert.match(ctx, /expir/i, `nothing tells it what an expiry means: ${ctx}`)
+  assert.match(ctx, /Stop hook/, `the free delivery path is not named: ${ctx}`)
+})
+
 test("REGRESSION: the watch it arms points at THIS store, not the default one", () => {
   // ⚠ Measured 2026-08-08, in a throwaway project with its own store. The session obeyed the
   // "arm your inbox watch" line, and the watch read the DEFAULT store — it created an empty room
