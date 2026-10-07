@@ -1,7 +1,7 @@
 {
   "version": 2,
   "_help": "Written by `set-project init`. 'files' maps a project-relative path to the sha256 of the content set-core deployed there; a file whose hash still matches is treated as untouched and may be updated, one that differs belongs to the project and is left alone. 'tombstones' lists paths the project deleted on purpose — set-core will not recreate them. To accept the framework version of a tombstoned path again, remove its entry from the 'tombstones' list and re-run the init.",
-  "updated": "2026-08-29T17:38:09+00:00",
+  "updated": "2026-10-07T17:21:20+00:00",
   "files": {
     ".claude/agents/code-reviewer.md": "b011204625d57a3bbd8d115f6a30ff19bed46aed82411542498cc33fd2dfd4a6",
     ".claude/agents/gui-tester.md": "7a0ef70bea07d10ceb04d07101920393ac4d5c0fac1a07695877a07bd601289d",
@@ -45,8 +45,9 @@
     ".claude/skills/set/SKILL.md": "65a5b51230e6be88f2536adc7055a2692b81359d6b561c5dae4b1702cab55d5d",
     ".claude/skills/set/decompose/SKILL.md": "c72e386f8b34f5a602040dfc80cd900a46f5ae69fe06150198611e2776f029a3",
     ".claude/skills/set/forensics/SKILL.md": "dc109012770e35b0b1fd7dbe9b4bbb5907412b8c8ec8727b0beb16bf4df8c476",
-    ".claude/skills/set/glm/SKILL.md": "96f9ccdaace56cc20f9fa266684dcd989758e8c575fc8e2e307ca7250e12f8bc",
+    ".claude/skills/set/glm/SKILL.md": "7e0c099052f40b7ef633aa1b42825edc4ee88df20082ab89c7f91cd37c8843db",
     ".claude/skills/set/harvest/SKILL.md": "6e2bfba07d40651ddd2b9e3214932b428d3089a01394d28c1b25219f1798a0e2",
+    ".claude/skills/set/wave-board/SKILL.md": "152902d7b1f7920bfc8bef472cad4ecedbade7ba8800c69bf45dfbfb8e95752c",
     ".claude/skills/set/write-spec/SKILL.md": "2ab8b6d92aac34fa2ce7c8a25f6c884ee07bd8b4d42a75a637a44103e3d12242"
   },
   "tombstones": []
