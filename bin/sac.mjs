@@ -692,7 +692,7 @@ try {
           mine.command = command
           changes.push(`${event}: replaced — the wired command had no SET_AGENT_ROOM to update`)
         } else {
-          // ⚠ ONLY THE ROOM LIST (and the name) IS OURS. Measured 2026-09-11 on blackbelt-web: the
+          // ⚠ ONLY THE ROOM LIST (and the name) IS OURS. Measured 2026-09-11 on a consumer project: the
           // wired commands carried a portable `sh -c` form (the file is tracked, and a second
           // machine has no `/opt/homebrew/Cellar/node/25.8.2/…`) and a guard that keeps `claude -p`
           // children off the bus. A whole-command swap took both, silently. Everything outside
