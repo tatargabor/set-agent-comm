@@ -103,6 +103,15 @@ this is here to prevent. A name that matches several live windows is refused wit
 one, do not send to all of them. Fleet labels (`<project>-studio`, as the Fleet view shows them)
 work as addresses on their own too.
 
+## Asking the person — `owner`
+
+A question only the human can answer (a decision, a password, a go-ahead) goes to `owner`:
+`send` with `to: ["owner"]` and the room. It wakes no session — none of them could answer it —
+and it stays on the person's `sac owner` list until some entry in the room answers it with `re:`.
+If you relay the person's answer, send it with `re:` pointing at the question: that is what takes
+it off their list. Do not write "→ owner" into the text of a broadcast instead; nothing can count
+that, and the broadcast wakes everybody.
+
 ## Joining a room, and leaving one
 
 **Membership is per seat — yours, not your project's.** Two commands are the session's own arm:

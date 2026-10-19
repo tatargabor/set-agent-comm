@@ -315,3 +315,29 @@ test("…and NOTHING overwrites it while it is broken — that is how the keys w
   assert.match(out.threw ?? "", /will NOT be overwritten/, "a broken config was rewritten in place")
   assert.equal(readFileSync(path, "utf8"), wreck, "the broken file was rewritten anyway")
 })
+
+// ── owner-addressee: each machine's owner is their own ─────────────────────────
+// `owner` is the human of the machine that READS the entry. Sent bare across the wire it would
+// land on the other machine's person — so it leaves as `owner@<this device>`, and only that device
+// turns it back into `owner` (2026-10-19, asked for by set-core for Fleet's "waiting on you").
+test("OWNER: A's question to its owner is not on B's owner list, and comes home as `owner`", async () => {
+  const sent = await run(A, "desktop", ["send", ROOM, "QUESTION", "Owner A: may I deploy?", "--to", "owner"])
+  assert.equal(sent.code, 0, sent.err)
+  assert.match(sent.out, /"relay": "pushed 1"/)
+  await run(B, "macmini", ["sync", ROOM])
+  const onB = JSON.parse((await run(B, "macmini", ["owner", "--json"])).out)
+  assert.ok(!onB.open.some(o => o.text.includes("Owner A")), "B's person was handed A's question")
+  const hist = await run(B, "macmini", ["history", ROOM, "50"])
+  assert.match(hist.out, /→ owner@desktop/, `it did not travel as A's owner: ${hist.out}`)
+  const onA = JSON.parse((await run(A, "desktop", ["owner", "--json"])).out)
+  assert.ok(onA.open.some(o => o.text.includes("Owner A")), "A's own person does not see it")
+})
+
+test("OWNER: B can address A's owner by name, and it lands on A's list as `owner`", async () => {
+  await run(B, "macmini", ["send", ROOM, "QUESTION", "To the desktop's person: which branch?", "--to", "owner@desktop"])
+  await run(A, "desktop", ["sync", ROOM])
+  const onA = JSON.parse((await run(A, "desktop", ["owner", "--json"])).out)
+  const item = onA.open.find(o => o.text.includes("which branch"))
+  assert.ok(item, "A's person does not see the question addressed to them")
+  assert.deepEqual(item.to, ["owner"])
+})

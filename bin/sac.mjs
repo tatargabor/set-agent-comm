@@ -78,6 +78,7 @@ const USAGE = {
   quiet: "sac quiet [--for 2h|90m|1d] [--off]   stop being woken; delivery is unaffected",
   stats: "sac stats [room…] [--since 24h] [--seats]   what the bus cost: decisions, wake-ups, characters",
   sync: "sac sync [room…]                    push and pull once, without blocking",
+  owner: "sac owner [--json]                  what is waiting on you, the human: owner-addressed entries nobody has answered · sac owner close <room> <ts> [note…]",
   alias: 'sac alias                           the name book · sac alias <name…> names THIS window · sac alias <name…> --to <seat|project|fleet-label> · sac alias --rm <name…>',
 }
 if (cmd && (rest.includes("--help") || rest.includes("-h")) && USAGE[cmd]) {
@@ -351,6 +352,25 @@ try {
       // the outbox cursor will carry it next time — a dead relay is a delay, not a lost message.
       const rung = await (await import("../src/doorbell.mjs")).ringReport({ room, out, text: text.join(" ") })
       json({ ...out, ...(named.resolved.length && { resolved: named.resolved }), ...rung, ...(await relayPush(room)) })
+      break
+    }
+    case "owner": {
+      // The human's view (owner-addressee). `--json` is the `sac.owner/1` contract set-core's Fleet
+      // reads; the plain form is for the person at the terminal.
+      if (rest[0] === "close") {
+        const [, room, ts, ...note] = rest
+        json(store.ownerClose({ room, ts, note: note.join(" ") }))
+        break
+      }
+      const view = store.ownerOpen()
+      if (rest.includes("--json")) { json(view); break }
+      if (!view.open.length) { console.log("(nothing is waiting on you)"); break }
+      console.log(`${view.open.length} waiting on you:`)
+      for (const o of view.open) {
+        const first = String(o.text || "").replace(/\s+/g, " ").slice(0, 140)
+        const age = o.ageMinutes < 120 ? `${o.ageMinutes}m` : `${Math.round(o.ageMinutes / 60)}h`
+        console.log(`  [${o.room}] ${o.type} from ${o.from}, ${age} ago — ${first}\n    close: sac owner close ${o.room} ${o.ts}`)
+      }
       break
     }
     case "alias": {

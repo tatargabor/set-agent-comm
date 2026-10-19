@@ -210,7 +210,11 @@ export async function push({ room, log = () => {} }) {
         ts: e.ts,
         // The addressee travels INSIDE the ciphertext, with the text: who a message is for is
         // as much the room's business as what it says, and the relay is not entitled to either.
-        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text, to: e.to }),
+        // ⚠ `owner` LEAVES AS `owner@<this machine>` (owner-addressee): on the other side a bare
+        // `owner` is THEIR human. `localName` there leaves it as written, so it never reaches the
+        // wrong person's `sac owner`; back here it arrives as `owner` again.
+        cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text,
+                                                      to: (e.to || []).map(n => n === "owner" ? `owner@${ns}` : n) }),
                         entryAad(from, e.ts)),
         _writer: writer,
       })

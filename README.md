@@ -696,6 +696,25 @@ it survives the window being replaced. After that, *"tell Studio Lead the build 
 a name that matches several live windows is refused with the list. Fleet labels work as addresses on
 their own too. `sac alias Studio Lead` does the same from a shell — the rest of the line is the name.
 
+### `owner` — asking the person, not a session
+
+The human of the machine is an addressee: `send … --to owner`. It is stored in `to` like any
+address, wakes **no** session (none of them could answer it) and is never rung — where the same
+question as a broadcast REQUEST would have woken every seat in the room (measured: one bot seat's
+broadcasts were 66% of all wake decisions in 21 days). It stays on the person's list until an entry
+in the room answers it with `re:` — an agent relaying the answer, or the person closing it:
+
+```console
+$ sac owner
+2 waiting on you:
+  [ops] QUESTION from watch#11111111, 3h ago — Approve the v1.29 release?
+    close: sac owner close ops 2026-10-19T09:12:44.120+02:00
+$ sac owner --json          # schema sac.owner/1 — what set-core's Fleet reads
+```
+
+In a relayed room `owner` leaves the machine as `owner@<this device>`, so the other side's person is
+never handed this one's question; `owner@<device>` addresses another machine's person by name.
+
 ## CLI
 
 ```
@@ -719,6 +738,7 @@ sac history <room> [n]              read back
 sac wait [--once] [room…]           block until a message arrives (for a Monitor)
 sac quiet [--for 2h] [--off]        stop being woken — delivery is unaffected
 sac alias [name…] [--to <target>]   the name book · a name for THIS window · or for a seat/project/Fleet label · --rm
+sac owner [--json] | close <room> <ts> [note]   what is waiting on the human of this machine
 sac join <room> [--create]          put THIS SESSION in a room
 sac part <room>                     leave one (this session only; its entries stay)
 sac admin                           the operator's live view (see below)

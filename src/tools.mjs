@@ -103,6 +103,9 @@ export const TOOL_DEFS = [
           "(`consumer-a-atlas` — every session of it, on every machine), or a NAME from the alias " +
           "book or a Fleet label (`Studio Lead`, `consumer-a-studio`) — those resolve to one seat " +
           "and the result's `resolved` says which. " +
+          "`owner` is the HUMAN of this machine: use it for a question or decision only the person " +
+          "can answer, instead of a broadcast — it wakes no session, and it stays on the person's " +
+          "`sac owner` list until an entry answers it with `re:`. Give `room` with it. " +
           "PREFER THE SEAT: a project with four open sessions wakes all four, and three of them " +
           "will spend a turn working out it was not them. When you reply, the seat you want is " +
           "the `from` of the entry you are answering. " +

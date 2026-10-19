@@ -139,8 +139,20 @@ export const addressForms = seat => {
 export function isForMe(entry, me) {
   if (!entry.to?.length) return true
   const forms = addressForms(me)
-  return entry.to.some(n => forms.has(n))
+  // `owner` is the human, never a seat — not even a project that happens to carry that name
+  // (owner-addressee, 2026-10-19). An entry addressed only to the owner is for no seat at all.
+  return entry.to.some(n => !isOwner(n) && forms.has(n))
 }
+
+/**
+ * THE OWNER — the human of the machine that reads the entry (owner-addressee, 2026-10-19). Asked
+ * for by set-core: a consumer's operations watch wrote `→ <owner>` inside the TEXT of broadcast
+ * REQUESTs, dozens of open items nothing could count — and those broadcasts woke every live seat
+ * for questions only the person could answer (one bot seat, 66% of all wake decisions in 21 days).
+ * `owner@<device>` is another machine's owner; the bridge writes and reads that form.
+ */
+export const OWNER = "owner"
+export const isOwner = name => name === OWNER || String(name).startsWith(`${OWNER}@`)
 
 /**
  * DOES THIS ENTRY START A TURN? — a strictly narrower question than `isForMe`, and the two were
@@ -1133,7 +1145,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   const addressed = parseTo(to)
   if (addressed.length) {
     const known = participants(room)
-    const unknown = addressed.filter(n => !known.includes(n))
+    const unknown = addressed.filter(n => !isOwner(n) && !known.includes(n))
     if (unknown.length) {
       // ⚠ AND WHERE THEY ARE, when they exist somewhere else. A name that is right but in the
       // wrong room reads exactly like a typo here, and the two need opposite corrections: one
@@ -1167,7 +1179,11 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
   // `from` is a SEAT, so the registry entry belongs to the project behind it. `writer` keeps
   // the seat as it is: sending a message may not reshuffle who sits where.
-  const { coWriters, seatSession } = register({ agent: seatBase(from), writer: from, room })
+  // The OWNER writes (a close) but is not a session: registering it would put a pseudo-seat on the
+  // roster, and every broadcast would then record wake decisions against a person.
+  const { coWriters, seatSession } = isOwner(from)
+    ? { coWriters: [], seatSession: null }
+    : register({ agent: seatBase(from), writer: from, room })
   // Told to the WRITER, at the moment of writing: by the time the reader notices that one
   // sender is contradicting itself, the wrong instruction has already been acted on.
   //
@@ -1228,7 +1244,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   // The advice for the two cases has nothing in common: "arm the watch there" versus "it waits
   // until they come back". A sentence that covers both is wrong for whichever one is true, and
   // the reader cannot tell which they got.
-  const dormant = addressed.filter(n => !live.some(s => isForMe({ to: [n] }, s)))
+  const dormant = addressed.filter(n => !isOwner(n) && !live.some(s => isForMe({ to: [n] }, s)))
   const knownSeats = []
   if (dormant.length) {
     const reg = readJson(REGISTRY, { agents: {} })
@@ -1286,7 +1302,11 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       return `'${s}'${p.until ? ` until ${p.until}` : ""}`
     }).join(", ")} — the entry is delivered and read, but interrupts nobody there.`)
   }
-  if (!woke.length && others)
+  const ownerOnly = addressed.length && addressed.every(isOwner)
+  if (ownerOnly)
+    notice.push(`Addressed to the owner — the person, not a session: no seat is woken. It is listed ` +
+      `by \`sac owner\` until an entry in this room answers it with re: ${ts}.`)
+  else if (!woke.length && others)
     notice.push(`This wakes NOBODY — ${others} live seat(s) will read it when they next look. ` +
       `That is right for a fact nobody must act on. If someone has to DO something because of ` +
       `this, it needs \`to\` (one seat), or the QUESTION / REQUEST type.`)
@@ -1566,7 +1586,8 @@ function reachingRooms(to, { archived = false }) {
  */
 export function resolveRoom({ room, to, configured = [] }) {
   if (room) return { room, inferred: false }
-  const want = parseTo(to)
+  // The owner is in every room of this machine, so naming them says nothing about WHICH room.
+  const want = parseTo(to).filter(n => !isOwner(n))
   const mine = configured.filter(Boolean)
   const reaching = want.length ? mine.filter(r => participants(r).some(p => want.includes(p))) : []
   if (reaching.length === 1) return { room: reaching[0], inferred: true }
@@ -2930,7 +2951,7 @@ export function resolveAddressees(to) {
   let fleet = null
   const resolved = []
   const out = names.map(n => {
-    if (known.has(n) || n.includes("@") || n.includes("#")) return n
+    if (known.has(n) || isOwner(n) || n.includes("@") || n.includes("#")) return n
     fleet ||= fleetLabels()
     const a = book[aliasKey(n)]
     if (a) {
@@ -3125,4 +3146,40 @@ export function ringFallback({ seat, why, socket }, from) {
   if (why === "stale") return "its socket is gone — that window has closed; the entry waits in the room"
   if (why === "no-socket") return "no doorbell on record (an older hook, or not on this machine); its watch or Stop hook delivers it"
   return "its watch or Stop hook delivers it"
+}
+
+// ── what is waiting on the owner ──────────────────────────────────────────────
+/**
+ * `sac owner --json` — the one view set-core's Fleet reads (it does not parse text or read the
+ * store's files). OPEN means: no entry in the same room has `re:` pointing at it. One rule, no
+ * second store — an agent answering on the owner's behalf closes it, and so does the owner's own
+ * close, which is just such an entry written as `owner`. Archived rooms are not read.
+ */
+export const OWNER_SCHEMA = "sac.owner/1"
+
+export function ownerOpen() {
+  const archived = new Set(archivedRooms())
+  const open = []
+  for (const room of knownRooms()) {
+    if (archived.has(room)) continue
+    let msgs
+    try { msgs = history({ room, limit: 1_000_000 }).messages } catch { continue }
+    const answered = new Set(msgs.map(m => m.re).filter(Boolean))
+    for (const m of msgs) {
+      if (!(m.to || []).includes(OWNER) || answered.has(m.ts)) continue
+      open.push({ room, id: `${m.ts}|${m.from}`, ts: m.ts, type: m.type, from: m.from, to: m.to,
+                  text: m.text, ageMinutes: Math.round((Date.now() - (Date.parse(m.ts) || 0)) / 60000) })
+    }
+  }
+  open.sort((a, b) => (Date.parse(a.ts) || 0) - (Date.parse(b.ts) || 0))
+  return { schema: OWNER_SCHEMA, generatedAt: now(), open }
+}
+
+/** The owner's own close: a FACT with `re:` to the entry, written as `owner` — the same rule. */
+export function ownerClose({ room, ts, note }) {
+  if (!room || !ts) throw new Error("usage: sac owner close <room> <ts> [note…]")
+  const target = history({ room, limit: 1_000_000 }).messages.find(m => m.ts === ts)
+  if (!target) throw new Error(`no entry ${ts} in "${room}"`)
+  if (!(target.to || []).includes(OWNER)) throw new Error(`entry ${ts} in "${room}" is not addressed to the owner`)
+  return send({ room, from: OWNER, type: "FACT", re: ts, text: note?.trim() || "Closed by the owner." })
 }

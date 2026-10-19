@@ -136,6 +136,12 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   seat/project (or `@device` form) untouched → alias → Fleet label. Several live windows behind
   one name are refused with the list, never fanned out; every rewrite is reported in `resolved`.
   Fleet's roster is read-only and optional — its absence costs labels, never a working address.
+- **`owner` is the human, never a seat** (`store.isOwner`, 2026-10-19). It is exempt from the
+  participant check, ignored by `isForMe` (so it wakes nobody and is never rung), and an entry to it
+  is OPEN until something in the room answers it with `re:` — one rule, no second store
+  (`sac owner`, schema `sac.owner/1`, the only thing set-core's Fleet reads). A close is written AS
+  `owner` and must not `register` it, or the person becomes a seat that collects wake decisions.
+  The bridge sends a bare `owner` as `owner@<namespace>` — on the other machine `owner` is THEIR person.
 - **Interpreters are spelled out** (`process.execPath`), never a bare `node`, in anything written
   into a settings file or a skill — hooks do not run in an interactive shell.
 - **Names from the network become file names.** `assertSafeWriter` / `assertSafeTs` are enforced
