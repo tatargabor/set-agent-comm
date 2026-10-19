@@ -16,6 +16,7 @@ npm run demo:smoke                                    # harness + fake `claude`,
 npm run http                      # HTTP transport, 127.0.0.1:7510/mcp/<agent>
 RELAY_SECRET=… npm run relay      # the relay, PORT 7511
 npm run demo                      # LIVE run: real `claude -p` sessions, ~$3 and ~30 min
+npm run live                      # LIVE acceptance: kept-alive `claude -p` sessions (LIVE_MODEL, default haiku), ~1 min
 ```
 
 `npm run demo` / `demo:remote` spend real money and take half an hour. Use `npm run demo:smoke`
@@ -46,11 +47,16 @@ src/crypto.mjs    AES-256-GCM room encryption + stateless token signing
 src/triage.mjs    the letterbox: a cheap model deciding whether an entry is worth a turn
 src/policy.mjs    the authorization layer's evaluator — PURE, no I/O but reading the policy
                   file. Four verdicts: serve / gate / wake / deny. Nothing calls it yet
+src/doorbell.mjs  the doorbell's I/O: one line into a session's own inbox socket (async, so it
+                  stays out of the synchronous core, which only decides and records)
+hooks/watch-guard.mjs  PreToolUse on Monitor: declines an inbox watch where the doorbell works
 ```
 
 State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
 `~/.local/share/set-agent-comm/`): `registry.json`, `cursors.json`, `nudges.json`, `focus.json`,
-`relays.json` (mode 600 — device tokens and room keys), and `channels/<room>/<seat>.md`.
+`relays.json` (mode 600 — device tokens and room keys), `aliases.json` (the name book),
+`doorbells/<seat>.json` (socket, mode, inbound policy — one writer: that seat's hooks),
+`rung/<seat>.jsonl` (ring marks), and `channels/<room>/<seat>.md`.
 
 ### Invariants — breaking any of these reintroduces a measured failure
 
@@ -115,6 +121,21 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   quiet), and a DIRECT address (`triage.isDirect`) is never held — someone typed that seat name,
   and there a delay is the expensive mistake. It is bounded by the beat itself: ~90 s after the
   last tool call the seat is announced to normally.
+- **The doorbell decides from the RECORD, never by trying** (`store.ringable`, 2026-10-19,
+  `docs/native-messaging.md`). A line posted into a bypass-mode session's socket is HELD — a dialog
+  in somebody's window, then dropped — so a seat is rung only when what its own hooks recorded says
+  it would be delivered: an explicit `crossSessionInbound: accept`, or a mode in `RINGABLE_MODES`.
+  A sender-asserted mode does not release a hold (measured) and must not be tried. Only a direct
+  address or a pair room is rung; a broadcast stays with the letterbox. The ring is a POINTER (who,
+  room, first line, "read it with `inbox`") with no `from` reply address, so the answer stays on the
+  bus. It does not spend the Stop hook's nudge.
+- **`rung/<seat>.jsonl` is the one file here with several appenders** — a ring is written by the
+  SENDER, and `stats/` must keep its one writer. One short line per append (O_APPEND, atomic below
+  PIPE_BUF), never rewritten but by the half-trim. `sac wait` skips an entry rung to its seat.
+- **A name resolves to ONE seat, and says so** (`store.resolveAddressees`). Order: an existing
+  seat/project (or `@device` form) untouched → alias → Fleet label. Several live windows behind
+  one name are refused with the list, never fanned out; every rewrite is reported in `resolved`.
+  Fleet's roster is read-only and optional — its absence costs labels, never a working address.
 - **Interpreters are spelled out** (`process.execPath`), never a bare `node`, in anything written
   into a settings file or a skill — hooks do not run in an interactive shell.
 - **Names from the network become file names.** `assertSafeWriter` / `assertSafeTs` are enforced
@@ -285,7 +306,9 @@ without an explicit room fails) · `SET_AGENT_DEVICE` · `SET_AGENT_LONG_CHARS` 
 `SET_AGENT_INBOX_CHARS` (1200, `0` = off) · `SET_AGENT_TRIAGE=off` · `SET_AGENT_TRIAGE_BIN` /
 `_MODEL` / `_TIMEOUT_MS` · `SET_AGENT_SAFETY_NET=off` · `SET_AGENT_QUIET_MS` · `SET_AGENT_BUSY_MS` (90000) ·
 `SET_AGENT_WATCH_MAX_HOURS` (12, `0` = off) ·
-`SET_AGENT_HEADLESS=1|0` (force/forbid the silent join; otherwise derived — see `store.headless`).
+`SET_AGENT_HEADLESS=1|0` (force/forbid the silent join; otherwise derived — see `store.headless`) ·
+`SET_AGENT_DOORBELL=off` (ring nobody) · `SET_AGENT_FLEET_ROSTER` (set-core's `fleet-roster.json`) ·
+`CLAUDE_CONFIG_DIR` (where `inboundPolicy` / `initialMode` read the user settings; tests point it away).
 Relay side: `RELAY_SECRET` (required), `RELAY_HOST`, `PORT`, `RELAY_RETENTION_HOURS`,
 `RELAY_DEVICE_TTL_DAYS`, `RELAY_LIMIT_*`, `RELAY_MAX_ROOM_*`.
 

@@ -51,8 +51,9 @@ const api = await connect("api-service", ROOM, "a1")
 
 try {
   const tools = (await web.listTools()).tools.map(t => t.name).sort()
-  assert.deepEqual(tools, ["agents", "focus", "history", "inbox", "rooms", "send"])
-  ok(`both servers came up, 5 tools: ${tools.join(", ")}`)
+  // `alias` since 2026-10-19 (seat-aliases): names that outlive a window.
+  assert.deepEqual(tools, ["agents", "alias", "focus", "history", "inbox", "rooms", "send"])
+  ok(`both servers came up, ${tools.length} tools: ${tools.join(", ")}`)
 
   await call(web, "send", { type: "REQUEST", text: "Need the new field on the orders endpoint." })
   ok("web-app sent a REQUEST")

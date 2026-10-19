@@ -69,7 +69,9 @@ test("the JSON is a NAMED projection, not the registry record spread into the wi
   assert.deepEqual(Object.keys(out.agents[0]).sort(),
     ["agent", "host", "lastSeen", "project", "rooms", "seats", "silentMinutes"])
   assert.deepEqual(Object.keys(out.agents[0].seats[0]).sort(),
-    ["focus", "lastSeen", "lastWrote", "liveness", "quiet", "quietUntil", "seat", "session"])
+    // `label` and `aliases` added ON PURPOSE 2026-10-19 (seat-aliases): the Fleet label a window
+    // holds and the names that resolve to it — additive, so `sac.agents/1` stands.
+    ["aliases", "focus", "label", "lastSeen", "lastWrote", "liveness", "quiet", "quietUntil", "seat", "session"])
   // The registry keeps this one; the wire does not publish it. Named list, not a spread.
   assert.ok(!("firstSeen" in out.agents[0]), "an internal field reached the wire")
 })

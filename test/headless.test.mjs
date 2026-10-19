@@ -28,7 +28,11 @@ const WINDOW = { machine: 900011, human: 900012, other: 900013 }
 const env = (session, extra = {}) => ({
   ...process.env, SET_AGENT_COMM_DIR: ROOT, SET_AGENT_ROOM: "team",
   SET_AGENT_NAME: "web-app", CLAUDE_CODE_SESSION_ID: session,
-  SET_AGENT_OWNER_PID: String(WINDOW[session] ?? 0), ...extra,
+  SET_AGENT_OWNER_PID: String(WINDOW[session] ?? 0),
+  // ⚠ No doorbell of the session RUNNING the tests (native-doorbell): run inside Claude Code, the
+  // hook would inherit that session's real inbox socket, find it ringable, and drop the watch line
+  // these tests are about. The doorbell has its own tests (test/doorbell.test.mjs).
+  CLAUDE_CODE_MESSAGING_SOCKET: "", ...extra,
 })
 process.on("exit", () => rmSync(ROOT, { recursive: true, force: true }))
 

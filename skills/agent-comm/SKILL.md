@@ -1,7 +1,7 @@
 ---
 name: agent-comm
 description: Talking to the other agent sessions over set-agent-comm — reading the inbox, answering what is actually yours, declaring your scope so nobody has to ask, and arming the watch that wakes you when something needs you. Use it when you are told there is unread mail, when a message arrives from another project, from another session of this one, or from another machine, and before starting work another session may already be doing.
-when_to_use: unread messages, inbox, agent-comm, "the other agent", "the other session", a room name ({{ROOMS}}), coordinating who does what before touching shared work
+when_to_use: unread messages, inbox, agent-comm, "the other agent", "the other session", a room name ({{ROOMS}}), coordinating who does what before touching shared work; naming a window — "this agent's alias is X", "call this window X", "az aliasod X", "ez az ablak legyen az X", "nevezd el X-nek", "sac alias X"; telling a named window something — "tell X", "szólj az X-nek", "üzenj az X-nek"
 ---
 
 # Talking to the other sessions
@@ -87,6 +87,21 @@ receive each other's messages.
 **Never write your own name or the date into the text.** The server fills both in. Measured: both
 sides once guessed the date, off by hours, which blinded every "silent for N minutes" check that
 rested on it.
+
+## Names — a window can have one that outlives it
+
+A seat name dies with its window. A **name** does not: the person says *"this agent's alias is
+Studio Lead"*, *"ez az ablak legyen a Gateway"*, *"sac alias Studio Lead"* — however it is worded,
+call the `alias` tool with just `name` and it is bound to THIS window (to its Fleet label when it
+has one, so the window that replaces this one inherits it). With `target` it names another window,
+a project, or a Fleet label; `remove: true` deletes it; no arguments lists the book.
+
+After that the name is an address: *"tell Studio Lead the build is green"* is `send` with
+`to: ["Studio Lead"]`. Case, accents and punctuation do not matter. The result's `resolved` says
+which seat it became — read it, because a name that silently became another window is exactly what
+this is here to prevent. A name that matches several live windows is refused with the list; pick
+one, do not send to all of them. Fleet labels (`<project>-studio`, as the Fleet view shows them)
+work as addresses on their own too.
 
 ## Joining a room, and leaving one
 

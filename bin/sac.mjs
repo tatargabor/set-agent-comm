@@ -78,6 +78,7 @@ const USAGE = {
   quiet: "sac quiet [--for 2h|90m|1d] [--off]   stop being woken; delivery is unaffected",
   stats: "sac stats [room…] [--since 24h] [--seats]   what the bus cost: decisions, wake-ups, characters",
   sync: "sac sync [room…]                    push and pull once, without blocking",
+  alias: 'sac alias                           the name book · sac alias <name…> names THIS window · sac alias <name…> --to <seat|project|fleet-label> · sac alias --rm <name…>',
 }
 if (cmd && (rest.includes("--help") || rest.includes("-h")) && USAGE[cmd]) {
   console.log(`usage: ${USAGE[cmd]}`)
@@ -298,7 +299,13 @@ try {
     }
 
     case "send": {
-      const { value: to, rest: afterTo } = takeFlag(rest, "--to")
+      const { value: toRaw, rest: afterTo } = takeFlag(rest, "--to")
+      // Names first (seat-aliases), exactly as the MCP face does: an alias or a Fleet label
+      // becomes a seat before the room is inferred from it.
+      const named = toRaw ? store.resolveAddressees(toRaw) : { to: null, resolved: [] }
+      const to = named.to
+      for (const r of named.resolved)
+        console.error(`sac: '${r.asked}' is ${r.seat} (${r.via}${r.state === "live" ? "" : `, ${r.state}`})`)
       // ⚠ `--re` was in this command's OWN usage line and nothing parsed it — so `sac send room
       // ANSWER "…" --re <ts>` appended the flag and the timestamp to the MESSAGE TEXT and sent
       // it, silently, with no reference at all. The MCP face has had `re` from the start; this
@@ -342,7 +349,29 @@ try {
       if (inferred) console.error(`sac: no room given — '${to}' is only reachable in '${room}', so it went there.`)
       // LOCAL FIRST, then the wire. If the relay is down the entry is already safe on disk and
       // the outbox cursor will carry it next time — a dead relay is a delay, not a lost message.
-      json({ ...out, ...(await relayPush(room)) })
+      const rung = await (await import("../src/doorbell.mjs")).ringReport({ room, out, text: text.join(" ") })
+      json({ ...out, ...(named.resolved.length && { resolved: named.resolved }), ...rung, ...(await relayPush(room)) })
+      break
+    }
+    case "alias": {
+      // ⚠ THE REST OF THE LINE IS THE NAME. A person types `sac alias Studio Lead`, not
+      // `sac alias "Studio Lead"`; making the quotes mandatory would turn the one command that
+      // exists to spare them exact syntax into another thing to get exactly right.
+      const remove = rest.includes("--rm")
+      const { value: target, rest: afterTarget } = takeFlag(rest.filter(a => a !== "--rm"), "--to")
+      const name = afterTarget.join(" ").trim()
+      if (remove) { json(store.removeAlias(name)); break }
+      if (!name) { json({ aliases: store.aliases() }); break }
+      if (target) {
+        const kind = target.includes("#") ? "seat" : store.agents().some(x => x.agent === target) ? "project" : "label"
+        json(store.setAlias({ name, kind, target, by: ME })); break
+      }
+      if (!ME.includes("#")) throw new Error("sac alias <name>: this shell is not inside a Claude Code session, " +
+        "so there is no 'this window' to name — give the target with --to <seat|project|fleet-label>")
+      const label = store.labelOf(ME)
+      json({ ...store.setAlias({ name, kind: label ? "label" : "seat", target: label || ME, by: ME }),
+             note: label ? `bound to this window's Fleet label '${label}' — a replacement window inherits it`
+                         : `bound to this seat — no Fleet label, so a replacement window has to claim the name again` })
       break
     }
     case "inbox":
@@ -672,7 +701,12 @@ try {
       // written at session start, so a working seat looked silent (measured: 86 minutes).
       // It is fed by the machine because an agent-sent heartbeat costs a whole turn, and rate-
       // limited inside the script because `register` rewrites the shared registry.
-      const scripts = { SessionStart: "session-start.mjs", Stop: "stop.mjs", PostToolUse: "heartbeat.mjs" }
+      // PreToolUse on `Monitor` is the WATCH GUARD (native-doorbell, 2026-10-19): it declines an
+      // inbox watch for a seat the doorbell reaches, because there the watch only buys 30-minute
+      // expiries — measured ~51M tokens of re-read context in four weeks.
+      const scripts = { SessionStart: "session-start.mjs", Stop: "stop.mjs", PostToolUse: "heartbeat.mjs",
+                        PreToolUse: "watch-guard.mjs" }
+      const matchers = { PreToolUse: "Monitor" }
       const wanted = Object.fromEntries(Object.entries(scripts)
         .map(([event, script]) => [event, `${env} ${process.execPath} ${join(HOOKS, script)}`]))
       const changes = []
@@ -685,7 +719,10 @@ try {
         const ours = h => (h.command || "").includes("set-agent-comm") &&
           (h.command || "").includes(scripts[event])
         const mine = groups.flatMap(g => g.hooks || []).find(ours)
-        if (!mine) { groups.push({ hooks: [{ type: "command", command }] }); changes.push(`${event}: added`) }
+        if (!mine) {
+          groups.push({ ...(matchers[event] && { matcher: matchers[event] }), hooks: [{ type: "command", command }] })
+          changes.push(`${event}: added`)
+        }
         else if (mine.command === command) changes.push(`${event}: already wired`)
         else if (rewrite) { mine.command = command; changes.push(`${event}: rewritten to the canonical form (--rewrite)`) }
         else if (!/SET_AGENT_ROOM=\S+/.test(mine.command)) {
@@ -890,7 +927,10 @@ try {
         for (const room of watched) {
           arm(room)                              // a room joined since the last check is new here
           const r = store.inbox({ room, agent: ME, advance: false })
-          const waking = r.messages.filter(m => m.wakes)
+          // ⚠ AN ENTRY THE SENDER ALREADY RANG IS NOT ANNOUNCED AGAIN (native-doorbell). The ring
+          // reached this session through its own inbox socket; a second announcement would be the
+          // `announced → blocked` duplicate of 2026-08-27 in a new costume.
+          const waking = r.messages.filter(m => m.wakes && !store.wasRung({ room, seat: ME, ts: m.ts }))
           const last = waking.at(-1)
           if (!last) { await net(room, r); continue }
 

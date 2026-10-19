@@ -173,10 +173,17 @@ test("REGRESSION: a new room edits ONLY the room list of a hand-tuned command", 
 
 test("an unchanged room list leaves a hand-tuned command byte-for-byte alone", () => {
   customFile("team")
-  const before = readFileSync(FILE, "utf8")
+  const before = JSON.parse(readFileSync(FILE, "utf8"))
   const r = install("team")
   assert.match(r.stdout, /already wired/)
-  assert.equal(readFileSync(FILE, "utf8"), before, "it rewrote a command whose rooms were already right")
+  // ⚠ Since 2026-10-19 a re-run also ADDS the watch guard (PreToolUse on Monitor, native-doorbell)
+  // to a project that predates it — the file grows by one hook. What may never happen is the point
+  // of this test: the three hand-tuned commands come out exactly as they went in.
+  const after = JSON.parse(readFileSync(FILE, "utf8"))
+  for (const event of ["SessionStart", "Stop", "PostToolUse"])
+    assert.deepEqual(after.hooks[event], before.hooks[event], `${event}: it rewrote a command whose rooms were already right`)
+  const guard = after.hooks.PreToolUse?.find(g => g.matcher === "Monitor")
+  assert.ok(guard?.hooks?.[0]?.command.includes("watch-guard.mjs"), "the watch guard was not added")
 })
 
 test("--rewrite restores the canonical command, and says so", () => {

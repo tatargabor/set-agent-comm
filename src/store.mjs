@@ -927,6 +927,10 @@ function lastWrote(writer, rooms) {
 
 export function agents() {
   const reg = readJson(REGISTRY, { agents: {} })
+  // Names ride along with each seat (docs/native-messaging.md): the Fleet label a window holds, and
+  // the aliases that resolve to it — so "which window is the Studio" is a lookup, not a question.
+  const fleet = fleetLabels()
+  const named = aliasesBySeat()
   return Object.values(reg.agents).map(a => {
     const ms = a.lastSeen ? Date.now() - new Date(a.lastSeen).getTime() : null
     // The seats are shown as a LIST, and the live ones separately: this is what tells another
@@ -953,6 +957,8 @@ export function agents() {
         lastWrote: lastWrote(writer, a.rooms || []),
         focus: getFocus(writer),
         ...(p.quiet && { quiet: true, quietUntil: p.until }),
+        ...(s.session && fleet[s.session] && { label: fleet[s.session].label }),
+        ...(named[writer] && { aliases: named[writer] }),
       }
     })
     return {
@@ -1014,6 +1020,9 @@ export function agentsReport() {
         lastWrote: s.lastWrote,
         quiet: !!s.quiet,
         quietUntil: s.quietUntil ?? null,
+        // Added 2026-10-19 (seat-aliases) — additive, so `sac.agents/1` stands.
+        label: s.label ?? null,
+        aliases: s.aliases || [],
         // The declaration, whole — `stale` travels WITH it rather than being applied here, so a
         // reader can show "they said this, four hours ago" instead of losing the only fact there is.
         focus: s.focus ? {
@@ -2747,4 +2756,373 @@ export function stats({ rooms: only = null, since = null } = {}) {
     records: recs.length,
     rooms: Object.values(perRoom).sort((a, b) => a.room.localeCompare(b.room)),
   }
+}
+
+// ── names: aliases and Fleet labels ───────────────────────────────────────────
+/**
+ * ⚠ A SEAT NAME DIES WITH ITS WINDOW, and so does Claude Code's own `<project>-<2 hex>` name.
+ * Measured 2026-10-09 → 10-19 (docs/native-messaging.md): 5 built-in sends failed with "No agent
+ * named … is reachable" because the window had been replaced, one 2-hex name collided, and the
+ * products of one umbrella project answered whichever of its four to five windows they had last
+ * heard from — one order arrived twice. The person running them wants to say "tell the Studio".
+ *
+ * Two sources of a stable name, both resolving to a SEAT before anything is written:
+ *   - the ALIAS BOOK (`aliases.json`) — declared, like `rooms.json`: written only by an explicit
+ *     `alias` call, read by everyone;
+ *   - set-core's FLEET LABELS (`fleet-roster.json`) — read, never written. A replacement window
+ *     inherits its predecessor's label, which is exactly the stable slot the other names lack.
+ *
+ * An existing seat or project name is NEVER reinterpreted (seat/project → alias → label), so
+ * nothing that addresses correctly today changes meaning.
+ */
+const ALIASES = join(ROOT, "aliases.json")
+const FLEET_ROSTER = join(homedir(), ".local", "share", "set-core", "fleet-roster.json")
+export const ALIAS_KINDS = ["label", "seat", "project"]
+
+/** Case, accents, whitespace and punctuation do not matter: "Átjáró" = "atjaro" = "ÁTJÁRÓ!". */
+export function aliasKey(name) {
+  return String(name ?? "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, "")
+}
+
+/**
+ * session id → { label, project, lastSeen }. Read on every call (small, and windows come and go);
+ * ANY failure is an empty map — Fleet is an optional neighbour, and its absence may cost labels,
+ * never an address that works without it.
+ */
+export function fleetLabels() {
+  const out = {}
+  try {
+    const d = JSON.parse(readFileSync(process.env.SET_AGENT_FLEET_ROSTER || FLEET_ROSTER, "utf8"))
+    for (const sessions of Object.values(d?.projects || {})) {
+      for (const [sid, s] of Object.entries(sessions || {})) {
+        if (!s || typeof s.label !== "string" || !s.label.trim()) continue
+        out[s.session_id || sid] = { label: s.label.trim(), project: s.project ?? null,
+                                     lastSeen: Number(s.last_seen) || 0 }
+      }
+    }
+  } catch { /* no Fleet on this machine, or a file mid-write: no labels */ }
+  return out
+}
+
+/** Every seat in the registry: [{ seat, agent, rec }]. */
+function allSeatRecords() {
+  const reg = readJson(REGISTRY, { agents: {} })
+  return Object.entries(reg.agents || {}).flatMap(([agent, a]) =>
+    Object.entries(a.seats || {}).map(([seat, rec]) => ({ seat, agent, rec })))
+}
+
+export function labelOf(seat, fleet = fleetLabels()) {
+  const rec = readJson(REGISTRY, { agents: {} }).agents?.[seatBase(seat)]?.seats?.[seat]
+  return (rec?.session && fleet[rec.session]?.label) || null
+}
+
+const readAliases = () => readJson(ALIASES, { aliases: {} }).aliases || {}
+
+/**
+ * The seats a target stands for, live ones first. `label` follows the label to whichever session
+ * holds it NOW — that is what makes an alias survive a replaced window.
+ */
+function targetSeats(kind, target, fleet, records = allSeatRecords()) {
+  let hits
+  if (kind === "seat") hits = records.filter(r => r.seat === target)
+  else if (kind === "project") hits = records.filter(r => r.agent === target)
+  else {
+    const want = String(target).toLowerCase()
+    hits = records.filter(r => r.rec.session && fleet[r.rec.session]?.label.toLowerCase() === want)
+  }
+  return hits.map(r => ({ seat: r.seat, live: seatState(r.rec), label: (r.rec.session && fleet[r.rec.session]?.label) || null,
+                          seen: Math.max(Date.parse(r.rec.lastSeen) || 0, (fleet[r.rec.session]?.lastSeen || 0) * 1000) }))
+}
+
+/**
+ * ONE seat for a target, or an error naming the candidates. Several LIVE windows behind one
+ * alias are refused rather than fanned out — fan-out is what `to: <project>` already means, and
+ * an alias exists precisely to avoid it. The one exception is a Fleet label briefly held twice
+ * (a window and its replacement): the more recently seen one wins, and the caller reports it.
+ */
+function pickSeat(asked, kind, target, fleet, records) {
+  const seats = targetSeats(kind, target, fleet, records)
+  if (!seats.length) return { asked, seat: null, state: "unresolved" }
+  const live = seats.filter(s => s.live !== false).sort((a, b) => b.seen - a.seen)
+  if (live.length === 1 || (live.length > 1 && kind === "label" && live[0].seen > live[1].seen))
+    return { asked, seat: live[0].seat, state: live[0].live === true ? "live" : "unknown" }
+  if (live.length > 1) {
+    const list = live.map(s => `${s.seat}${s.label ? ` (${s.label})` : ""}`).join(", ")
+    const err = new Error(`"${asked}" matches ${live.length} live windows: ${list} — address one of them ` +
+      `by its seat, or bind the alias to one window (\`alias\` with that window's seat as the target).`)
+    err.ambiguous = live.map(s => s.seat)
+    throw err
+  }
+  // Nobody live: the most recent seat, so the entry waits where that window will come back to.
+  const last = [...seats].sort((a, b) => b.seen - a.seen)[0]
+  return { asked, seat: last.seat, state: "dormant" }
+}
+
+/** The book, each alias with what it resolves to right now. */
+export function aliases() {
+  const fleet = fleetLabels()
+  const records = allSeatRecords()
+  return Object.values(readAliases()).map(a => {
+    let r
+    try { r = pickSeat(a.name, a.kind, a.target, fleet, records) }
+    catch (e) { r = { seat: null, state: "ambiguous", candidates: e.ambiguous } }
+    return { name: a.name, kind: a.kind, target: a.target, by: a.by ?? null, ts: a.ts,
+             seat: r.seat, state: r.state, ...(r.candidates && { candidates: r.candidates }) }
+  }).sort((x, y) => x.name.localeCompare(y.name))
+}
+
+export function setAlias({ name, kind, target, by = null }) {
+  const key = aliasKey(name)
+  if (!key) throw new Error("alias: give it a name with at least one letter or digit")
+  if (!ALIAS_KINDS.includes(kind)) throw new Error(`alias: unknown kind '${kind}' (${ALIAS_KINDS.join(" | ")})`)
+  if (!target) throw new Error("alias: a target is required")
+  // ⚠ AN ALIAS MAY NOT SHADOW A REAL ADDRESS. Resolution never reinterprets an existing name, so
+  // such an alias would be dead on arrival — and the person would be told it was bound.
+  const records = allSeatRecords()
+  const shadow = [...new Set([...records.map(r => r.agent), ...records.map(r => r.seat)])]
+    .find(n => aliasKey(n) === key)
+  if (shadow) throw new Error(`alias: "${name}" would shadow the existing address '${shadow}' — pick another name`)
+  const fleet = fleetLabels()
+  if (!targetSeats(kind, target, fleet, records).length) {
+    const what = kind === "label" ? "no window holds the Fleet label" : kind === "seat" ? "no seat is called" : "no project is called"
+    throw new Error(`alias: ${what} '${target}'`)
+  }
+  const all = readJson(ALIASES, { aliases: {} })
+  all.aliases ||= {}
+  const prev = all.aliases[key] || null
+  all.aliases[key] = { name: String(name).trim(), kind, target, by, ts: now() }
+  writeJson(ALIASES, all)
+  // Binding succeeds even when the target is ambiguous right now — windows come and go, and the
+  // refusal belongs to the SEND that would have to guess. Said here, so it is no surprise there.
+  let r
+  try { r = pickSeat(name, kind, target, fleet, records) }
+  catch (e) { r = { seat: null, state: "ambiguous", candidates: e.ambiguous } }
+  return { name: all.aliases[key].name, kind, target, seat: r.seat, state: r.state,
+           ...(r.candidates && { candidates: r.candidates }),
+           ...(prev && { replaced: { kind: prev.kind, target: prev.target } }) }
+}
+
+export function removeAlias(name) {
+  const key = aliasKey(name)
+  const all = readJson(ALIASES, { aliases: {} })
+  const prev = all.aliases?.[key]
+  if (!prev) throw new Error(`alias: there is no alias "${name}"` +
+    (Object.keys(all.aliases || {}).length ? ` — the book has: ${Object.values(all.aliases).map(a => a.name).join(", ")}` : ""))
+  delete all.aliases[key]
+  writeJson(ALIASES, all)
+  return { removed: prev.name, kind: prev.kind, target: prev.target }
+}
+
+/**
+ * Rewrite `to` so that every name in it is a seat or a project the core already understands.
+ * Order: an existing seat/project (or a remote `@device` form) passes untouched → an alias →
+ * a Fleet label → left as typed, so `send` refuses it with its usual list. Each rewrite is
+ * reported as `{ asked, seat, via, state }`; the caller hands that back to the sender, because a
+ * name that silently became another is the one thing an address book may not do.
+ */
+export function resolveAddressees(to) {
+  const names = parseTo(to)
+  if (!names.length) return { to: names, resolved: [] }
+  const records = allSeatRecords()
+  const known = new Set([...records.map(r => r.agent), ...records.map(r => r.seat)])
+  const book = readAliases()
+  let fleet = null
+  const resolved = []
+  const out = names.map(n => {
+    if (known.has(n) || n.includes("@") || n.includes("#")) return n
+    fleet ||= fleetLabels()
+    const a = book[aliasKey(n)]
+    if (a) {
+      const r = pickSeat(n, a.kind, a.target, fleet, records)
+      if (!r.seat) throw new Error(`"${n}" is an alias for ${a.kind} '${a.target}', and nothing holds it now — ` +
+        `re-bind it with \`alias\` (from the window it should mean, give just the name).`)
+      resolved.push({ asked: n, seat: r.seat, via: `alias→${a.kind}`, state: r.state })
+      return r.seat
+    }
+    const label = Object.values(fleet).find(f => f.label.toLowerCase() === n.toLowerCase())
+    if (label) {
+      const r = pickSeat(n, "label", label.label, fleet, records)
+      if (r.seat) { resolved.push({ asked: n, seat: r.seat, via: "label", state: r.state }); return r.seat }
+    }
+    return n
+  })
+  return { to: out, resolved }
+}
+
+/** seat → the alias names that currently resolve to it (for `agents`). */
+export function aliasesBySeat() {
+  const by = {}
+  for (const a of aliases()) if (a.seat) (by[a.seat] ||= []).push(a.name)
+  return by
+}
+
+// ── the doorbell: waking a seat through its session's own inbox socket ────────
+/**
+ * ⚠ THE WATCH WAS THE ONLY WAKE-UP, AND IT MOSTLY WOKE NOTHING. The harness caps a `Monitor` at 30
+ * minutes; since 2026-09-22 the inbox watch woke its session 328 times, 229 of them expiries (184
+ * with no event at all), each a re-read of the whole context — ~51M tokens in four weeks against
+ * 99 real messages (docs/native-messaging.md). And a session nobody armed a watch for was simply
+ * unreachable while idle: 69% of "wake" decisions in 21 days never reached a session.
+ *
+ * Claude Code binds an inbox socket per session (`CLAUDE_CODE_MESSAGING_SOCKET`). Measured live
+ * 2026-10-19 with real `claude -p` targets: a line posted by an UNRELATED process wakes an idle
+ * `default`/`auto` session in ~2 s, lands between tool calls in a busy one, and is labelled as
+ * coming from another session — never as the user. A bypass-permissions receiver HOLDS it (a
+ * dialog in somebody's window, then dropped at expiry) unless its `crossSessionInbound` is
+ * `accept`; a sender-asserted mode does not release that hold, and must not be tried.
+ *
+ * So every seat's hooks record where its doorbell is and whether ringing it would be delivered,
+ * and `send` rings only where it would. One file per seat, written only by that seat's hooks —
+ * the Stop hook fires every turn, and the shared registry is the lost-update race the heartbeat
+ * rate-limits against.
+ */
+const DOORBELLS = join(ROOT, "doorbells")
+const RUNG = join(ROOT, "rung")
+const RUNG_MAX_BYTES = 64 * 1024
+/** The modes whose default inbound policy DELIVERS a peer line (Claude Code's "prompting" class). */
+export const RINGABLE_MODES = ["default", "auto", "acceptEdits", "dontAsk"]
+const claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")
+const doorbellFile = seat => join(DOORBELLS, `${seat}.json`)
+
+export function doorbellOf(seat) { return seat ? readJson(doorbellFile(seat), null) : null }
+
+/** Merge into the seat's own record. Never throws, never prints: it runs inside hooks. */
+export function setDoorbell(seat, patch) {
+  try {
+    if (!seat || !seat.includes("#")) return null           // no session, no socket of its own
+    assertSafeWriter(seat)
+    const prev = readJson(doorbellFile(seat), {})
+    const next = { ...prev }
+    for (const [k, v] of Object.entries(patch || {})) if (v !== undefined) next[k] = v
+    next.at = now()
+    ensureDir(DOORBELLS)
+    writeJson(doorbellFile(seat), next)
+    return next
+  } catch { return null }
+}
+
+/**
+ * The `crossSessionInbound` that applies, from the files Claude Code reads. Approximated, and in
+ * the safe direction: any `refuse` wins, then `hold`, then an EXPLICIT `accept`. A wrong "accept"
+ * would cost a held dialog in somebody's window, so nothing short of the literal word counts; an
+ * unrecognised value is `hold`, as the harness itself treats it.
+ */
+export function inboundPolicy(cwd) {
+  const files = ["/etc/claude-code/managed-settings.json", join(claudeHome(), "settings.json"),
+                 ...(cwd ? [join(cwd, ".claude", "settings.json"), join(cwd, ".claude", "settings.local.json")] : [])]
+  const vals = files.map(f => readJson(f, null)?.crossSessionInbound).filter(v => v !== undefined && v !== null)
+  for (const v of ["refuse", "hold", "accept"]) if (vals.includes(v)) return v
+  return vals.length ? "hold" : null
+}
+
+/**
+ * The permission mode a session STARTED in — the hooks only learn the live one at the end of the
+ * first turn (`Stop` carries `permission_mode`, `SessionStart` does not, measured 2026-10-19), and
+ * a fresh window sits idle exactly until then. From the window's own command line first, then the
+ * `defaultMode` of the settings that apply; `null` when none of it can be read.
+ */
+export function initialMode(owner = ownerPid(), cwd = null) {
+  try {
+    const argv = owner ? readFileSync(`/proc/${owner}/cmdline`, "utf8").split("\0") : []
+    if (argv.includes("--dangerously-skip-permissions")) return "bypassPermissions"
+    const i = argv.indexOf("--permission-mode")
+    if (i !== -1 && argv[i + 1]) return argv[i + 1]
+  } catch { /* not Linux, or the window is gone */ }
+  const files = [...(cwd ? [join(cwd, ".claude", "settings.local.json"), join(cwd, ".claude", "settings.json")] : []),
+                 join(claudeHome(), "settings.json")]
+  for (const f of files) {
+    const m = readJson(f, null)?.permissions?.defaultMode
+    if (typeof m === "string") return m
+  }
+  return owner ? "default" : null
+}
+
+/**
+ * Would a line posted into this seat's socket be DELIVERED? Decided from what the seat recorded,
+ * never by trying: a try that lands as a hold is a dialog in somebody's window.
+ */
+export function ringable(seat) {
+  const d = doorbellOf(seat)
+  if (!d?.socket) return { ok: false, why: "no-socket" }
+  const base = { socket: d.socket, mode: d.mode ?? null, inbound: d.inbound ?? null }
+  if (!existsSync(d.socket)) return { ...base, ok: false, why: "stale" }
+  if (d.inbound === "refuse" || d.inbound === "hold") return { ...base, ok: false, why: `inbound-${d.inbound}` }
+  if (d.inbound === "accept") return { ...base, ok: true, why: "inbound-accept" }
+  if (RINGABLE_MODES.includes(d.mode)) return { ...base, ok: true, why: `mode-${d.mode}` }
+  return { ...base, ok: false, why: d.mode === "bypassPermissions" ? "bypass-mode" : d.mode ? `mode-${d.mode}` : "mode-unknown" }
+}
+
+/**
+ * Did someone type THIS seat's name, and nobody else's? The one rule for it — `triage.isDirect`
+ * re-exports this, so the letterbox, the busy hold in `sac wait` and the doorbell cannot drift.
+ */
+export const isDirectAddress = (entry, seat) =>
+  entry.to?.length === 1 && entry.to[0].includes("#") && addressForms(seat).has(entry.to[0])
+
+/**
+ * Who gets rung for an entry: the seats the RULE already woke, and of those only a direct address
+ * or the other side of a pair room. A broadcast QUESTION/REQUEST stays with the letterbox and the
+ * watch — ringing every seat of a room for one is the storm the letterbox exists to stop.
+ */
+export function ringPlan({ entry, room, woke }) {
+  const pair = !!pairOf(room)
+  return (woke || []).filter(s => s !== entry.from && (pair || isDirectAddress(entry, s)))
+    .map(seat => ({ seat, ...ringable(seat) }))
+}
+
+/**
+ * ⚠ RUNG MARKS LIVE IN THEIR OWN FILE, NOT IN THE LEDGER. `stats/<seat>.jsonl` has one writer —
+ * the seat's own processes — and a ring is written by the SENDER. So `rung/<seat>.jsonl` is the
+ * one append-only file here with several appenders: one short JSON line each, written with
+ * O_APPEND (atomic below PIPE_BUF on Linux), never rewritten except the half-trim below.
+ */
+export function markRung({ room, seat, ts, from }) {
+  try {
+    ensureDir(RUNG)
+    const path = join(RUNG, `${seat}.jsonl`)
+    try {
+      if (statSync(path).size > RUNG_MAX_BYTES) {
+        const lines = readFileSync(path, "utf8").split("\n").filter(Boolean)
+        writeFileSync(path, lines.slice(Math.floor(lines.length / 2)).join("\n") + "\n")
+      }
+    } catch { /* first ring */ }
+    appendFileSync(path, JSON.stringify({ at: now(), room, entry: ts, from }) + "\n")
+  } catch { /* a lost mark costs one duplicate announcement, never a message */ }
+}
+
+export function rungMarks(seat) {
+  try {
+    return readFileSync(join(RUNG, `${seat}.jsonl`), "utf8").split("\n").filter(Boolean)
+      .map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+  } catch { return [] }
+}
+
+export function wasRung({ room, seat, ts }) {
+  return rungMarks(seat).some(m => m.room === room && m.entry === ts)
+}
+
+/** The notice a rung seat reads. A pointer, not the message — the reply belongs on the bus. */
+export function ringText({ entry, room }) {
+  const label = labelOf(entry.from)
+  const first = String(entry.text || "").replace(/\s+/g, " ").trim()
+  const preview = first.length > 200 ? `${first.slice(0, 200)}…` : first
+  return `[set-agent-comm] ${entry.type} for you from ${entry.from}${label ? ` (${label})` : ""} ` +
+    `in room "${room}": "${preview}" — read it with the \`inbox\` tool (room "${room}") and answer ` +
+    `there with \`send\` to ${entry.from}. The reply belongs on the bus, not in a direct message.`
+}
+
+/** What to tell the SENDER about a seat that was not rung, so the gap is never silent. */
+export function ringFallback({ seat, why, socket }, from) {
+  if (why === "bypass-mode" && doorbellOf(from)?.mode === "bypassPermissions" && socket)
+    return `both windows run in bypass mode, so the built-in SendMessage to "uds:${socket}" is ` +
+      `delivered — send it a one-line pointer to this entry`
+  if (why === "bypass-mode" || why === "inbound-hold")
+    return `it would hold the line for approval; the Stop hook delivers it when that window next ` +
+      `works. "crossSessionInbound": "accept" in that project's .claude/settings.local.json makes ` +
+      `it ringable for good`
+  if (why === "mode-unknown") return "its mode is not on record yet; its Stop hook or watch delivers it"
+  if (why === "stale") return "its socket is gone — that window has closed; the entry waits in the room"
+  if (why === "no-socket") return "no doorbell on record (an older hook, or not on this machine); its watch or Stop hook delivers it"
+  return "its watch or Stop hook delivers it"
 }

@@ -24,7 +24,7 @@
 //     the agent's own `inbox` call, so a wrong "no" delays a message — it never swallows one.
 
 import { spawn } from "node:child_process"
-import { getFocus, seatBase, addressForms } from "./store.mjs"
+import { getFocus, seatBase, isDirectAddress } from "./store.mjs"
 
 /**
  * Did someone type THIS seat's name, and nobody else's? Exported because two layers now need the
@@ -37,8 +37,7 @@ import { getFocus, seatBase, addressForms } from "./store.mjs"
  * that neither layer is allowed to look at — the exact shape the wake-up rule exists to stop,
  * wearing the one costume that gets waved through.
  */
-export const isDirect = (entry, seat) =>
-  entry.to?.length === 1 && entry.to[0].includes("#") && addressForms(seat).has(entry.to[0])
+export const isDirect = isDirectAddress          // the one rule lives in the core since 2026-10-19 (the doorbell reads it too)
 
 /**
  * Is the sender a sibling session — same project, different session? A sibling is not a stranger:

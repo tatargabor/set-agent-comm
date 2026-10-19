@@ -33,6 +33,16 @@ const agent = process.env.SET_AGENT_NAME || basename(cwd)
 const session = process.env.CLAUDE_CODE_SESSION_ID || payload.session_id || null
 // LOOKUP, never a claim: a hook that merely looks may not create a session in the registry.
 const writer = store.seatOf({ agent, session })
+/**
+ * THE DOORBELL'S LIVE MODE (native-doorbell). `permission_mode` reaches the hooks here and not at
+ * SessionStart (measured 2026-10-19), and an idle session is precisely one whose last act was this
+ * hook — so the record a sender reads is always as fresh as the session's last turn. Before the
+ * headless exit below: a `claude -p` worker kept alive on stream-json is ringable too.
+ */
+store.setDoorbell(writer, {
+  mode: typeof payload.permission_mode === "string" ? payload.permission_mode : undefined,
+  socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET || undefined,
+})
 
 /**
  * A HEADLESS RUN IS NEVER BLOCKED (see `store.headless`). Blocking is how this hook says "go

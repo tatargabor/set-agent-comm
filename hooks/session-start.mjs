@@ -41,6 +41,18 @@ const agent = process.env.SET_AGENT_NAME || basename(cwd)
 const session = process.env.CLAUDE_CODE_SESSION_ID || payload.session_id || null
 const writer = store.claimSeat({ agent, session })
 /**
+ * THE DOORBELL (native-doorbell, 2026-10-19): where this session's own inbox socket is, and what
+ * would happen to a line posted into it. The live mode only reaches the hooks at the end of the
+ * first turn (`Stop` carries `permission_mode`, SessionStart does not — measured), so the mode the
+ * window STARTED in stands in until then. Never throws: `setDoorbell` swallows its own failures.
+ */
+store.setDoorbell(writer, {
+  socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET || null,
+  inbound: store.inboundPolicy(cwd),
+  mode: store.initialMode(store.ownerPid(), cwd),
+  session,
+})
+/**
  * SILENT JOIN — see `store.headless`. A `claude -p` run gets checked in and nothing else: no
  * imperative it would spend turns obeying, and no watching it could not act on.
  *
@@ -257,7 +269,23 @@ const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${S
 // reaching for the expensive one: the Stop hook reports unread mail at the end of every turn,
 // into a context that is already loaded — the same asymmetry `sac.mjs` measured on 2026-08-27
 // ("The second delivery is the cheap one").
-const monitor = rooms.length
+/**
+ * ⚠ NO WATCH WHERE THE DOORBELL WORKS (native-doorbell). A seat whose socket would deliver a line
+ * is rung by the sender itself, and a watch on top of it buys nothing but 30-minute expiries —
+ * the measured ~51M tokens of re-read context in four weeks. Relay rooms keep the watch: their
+ * entries only arrive through a pull, and the watch is what pulls.
+ */
+const bell = store.ringable(writer)
+let relayed = []
+try { const bridge = await import("../src/bridge.mjs"); relayed = rooms.filter(r => bridge.roomConfig(r)) } catch { }
+const doorbellNote = rooms.length && bell.ok && !relayed.length
+  ? ` You are woken through this session's own inbox socket (the sender rings it), so you do NOT ` +
+    `need an inbox watch — do not arm one; the Stop hook still reports unread mail at the end of ` +
+    `each turn. Only if this window is switched to bypass-permissions mode does that stop working; ` +
+    `then arm it once: Monitor({ command: "${waitCmd}", description: "agent-comm inbox", ` +
+    `timeout_ms: 1800000, persistent: true }).`
+  : ""
+const monitor = doorbellNote || !rooms.length ? doorbellNote : rooms.length
   ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
     `description: "agent-comm inbox", timeout_ms: 1800000, persistent: true }). Nothing else ` +
     `wakes you while you are idle at the prompt, so without it a message addressed to you ` +

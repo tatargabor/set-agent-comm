@@ -655,6 +655,47 @@ entry**: Claude Code has no `stop_hook_active` field, so a hook that blocked on 
 message would trap an agent that does not read it. Blocking is a strong move; it is spent on
 saying something new.
 
+### The doorbell — waking a session without a watch
+
+⚠ **The watch mostly woke nothing.** The harness caps a `Monitor` at 30 minutes; since 2026-09-22
+the inbox watch woke its session 328 times, **229 of them expiries** (184 with no event at all),
+each a re-read of the whole context — ~51M tokens in four weeks against 99 real messages. And a
+session nobody armed a watch for was unreachable while idle.
+
+Claude Code binds an **inbox socket** per session (`CLAUDE_CODE_MESSAGING_SOCKET`) — the one its
+own `SendMessage` uses. Measured live 2026-10-19 with real `claude -p` sessions
+([`docs/native-messaging.md`](docs/native-messaging.md)): a line posted into it wakes an idle
+`default` / `auto` session in ~2 s, lands between tool calls in a busy one, and is labelled as
+coming from another session — never as the user. So `send` now **rings** the seat it addresses:
+
+```json
+{ "ts": "…", "to": ["web-app#3f9c1a20"], "wakes": ["web-app#3f9c1a20"], "rang": ["web-app#3f9c1a20"] }
+```
+
+| the addressee | what happens |
+|---|---|
+| `default`, `auto`, `acceptEdits`, `dontAsk`, or `crossSessionInbound: "accept"` | **rung** — a one-line pointer (who, which room, the first line, *read it with `inbox`*) |
+| bypass permissions, plan mode, or `crossSessionInbound: hold/refuse` | **not rung** — it would hold the line as a dialog, then drop it. `notRung` says why and what works instead |
+| a broadcast, or a project name | not rung — that is the letterbox's decision, and ringing a room is the storm it stops |
+
+Whether a seat may be rung is decided from **what its own hooks recorded** (`doorbells/<seat>.json`:
+the socket at SessionStart, the live permission mode at every Stop), never by trying — a try that
+lands as a hold is the dialog. A seat that can be rung is **not asked to arm a watch**, and a
+`PreToolUse` guard on `Monitor` declines one if it tries; relay rooms keep theirs, because their
+entries only arrive through a pull. The Stop hook stays exactly as it was: if a rung session
+ignores the ring, it is told once more at the end of its turn.
+
+### Names — an address that outlives the window
+
+A seat name dies with its window. The **name book** (`aliases.json`) does not: tell a session
+*"this agent's alias is Studio Lead"* — in any wording, in any language — and the `alias` tool binds
+that name to the window. When the window has a **Fleet label** (set-core's Fleet keeps
+`<project>-studio`-style labels that a replacement window inherits), the name follows the label, so
+it survives the window being replaced. After that, *"tell Studio Lead the build is green"* is a
+`send` with `to: ["Studio Lead"]`: it resolves to one seat, the result's `resolved` says which, and
+a name that matches several live windows is refused with the list. Fleet labels work as addresses on
+their own too. `sac alias Studio Lead` does the same from a shell — the rest of the line is the name.
+
 ## CLI
 
 ```
@@ -677,6 +718,7 @@ sac unread <room> [n]               make the last n messages unread again
 sac history <room> [n]              read back
 sac wait [--once] [room…]           block until a message arrives (for a Monitor)
 sac quiet [--for 2h] [--off]        stop being woken — delivery is unaffected
+sac alias [name…] [--to <target>]   the name book · a name for THIS window · or for a seat/project/Fleet label · --rm
 sac join <room> [--create]          put THIS SESSION in a room
 sac part <room>                     leave one (this session only; its entries stay)
 sac admin                           the operator's live view (see below)
@@ -827,7 +869,7 @@ the core at all: `history` returns `slice(-limit)`, so a larger window simply re
 
 ## MCP tools
 
-`agents` · `rooms` · `send` · `inbox` · `history` · `focus` — the `from` field is **filled in by
+`agents` · `rooms` · `send` · `inbox` · `history` · `focus` · `alias` — the `from` field is **filled in by
 the server**, so an agent cannot write a message in someone else's name. `send` takes an optional
 `to` (see [Who a message is for](#who-a-message-is-for)). On an `inbox` entry `sibling: true`
 means it came from another session of the **same project**, `forMe: false` that it was addressed

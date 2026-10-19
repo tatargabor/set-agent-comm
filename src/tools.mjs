@@ -99,8 +99,10 @@ export const TOOL_DEFS = [
       to: {
         type: "array", items: { type: "string" },
         description:
-          "Who it is addressed to: a SEAT (`consumer-a-atlas#3f9c1a20`) or a project name " +
-          "(`consumer-a-atlas` — every session of it, on every machine). " +
+          "Who it is addressed to: a SEAT (`consumer-a-atlas#3f9c1a20`), a project name " +
+          "(`consumer-a-atlas` — every session of it, on every machine), or a NAME from the alias " +
+          "book or a Fleet label (`Studio Lead`, `consumer-a-studio`) — those resolve to one seat " +
+          "and the result's `resolved` says which. " +
           "PREFER THE SEAT: a project with four open sessions wakes all four, and three of them " +
           "will spend a turn working out it was not them. When you reply, the seat you want is " +
           "the `from` of the entry you are answering. " +
@@ -112,6 +114,24 @@ export const TOOL_DEFS = [
           "and the refusal names the rooms that DO reach it, so a seat name never sends you hunting.",
       },
     }, ["text"]),
+  },
+  {
+    name: "alias",
+    description:
+      "Names for windows, in plain words. Use it whenever the person says something like \"this " +
+      "agent's alias is X\", \"call this window X\", \"ez az ablak legyen az X\", \"az aliasod X\", " +
+      "\"nevezd el X-nek\", or \"sac alias X\" — however it is worded, the name is X. " +
+      "Give ONLY `name` to name THIS window: it is bound to the window's Fleet label when it has " +
+      "one (then a replacement window inherits it), otherwise to this seat. Give `name` and " +
+      "`target` to name another window or project (a seat, a project name, or a Fleet label). " +
+      "`remove: true` deletes a name. No arguments lists the book with what each name reaches now. " +
+      "Once bound, the name works in `send`'s `to` exactly like a seat — \"tell X …\" means " +
+      "`to: [\"X\"]`. Case, accents and punctuation are ignored.",
+    inputSchema: S({
+      name: { type: "string", description: "The name, as the person said it (\"Studio Lead\", \"Gateway\")" },
+      target: { type: "string", description: "Whom it names, when not this window: a seat, a project name, or a Fleet label" },
+      remove: { type: "boolean", description: "Delete this name from the book" },
+    }),
   },
   {
     name: "inbox",
@@ -195,6 +215,14 @@ export function createMcpServer(identify) {
     try {
       const { agent, room: defaultRoom, rooms: configured } = identify(req)
       const room = a.room || defaultRoom
+      // Names first (seat-aliases): an alias or a Fleet label becomes a seat BEFORE the room is
+      // inferred from it, so every rule downstream only ever sees addresses it already knows.
+      let resolved = []
+      if (req.params.name === "send" && a.to?.length) {
+        const r = store.resolveAddressees(a.to)
+        a.to = r.to
+        resolved = r.resolved
+      }
       // Set when the room was DERIVED from the addressee rather than given — reported back, so
       // the sender learns which room its entry is now public in. The rule itself lives in the
       // core (`store.resolveRoom`), where the CLI reads the same one.
@@ -222,6 +250,28 @@ export function createMcpServer(identify) {
             ? (store.getFocus(agent) || { agent, focus: null })
             : store.setFocus({ agent, text: a.text, files: a.files, phase: a.phase })
           break
+        case "alias": {
+          if (a.remove) { out = store.removeAlias(a.name); break }
+          if (!a.name) { out = { aliases: store.aliases() }; break }
+          if (a.target) {
+            // A target is a seat, a project, or a Fleet label — said by what it matches, so the
+            // person never has to say which kind it is.
+            const t = String(a.target).trim()
+            const kind = t.includes("#") ? "seat"
+              : store.agents().some(x => x.agent === t) ? "project" : "label"
+            out = store.setAlias({ name: a.name, kind, target: t, by: agent })
+            break
+          }
+          // THIS window: its Fleet label when it has one — a label outlives the window, a seat
+          // does not — and the result says which, because the two age differently.
+          const label = store.labelOf(agent)
+          out = store.setAlias({ name: a.name, kind: label ? "label" : "seat", target: label || agent, by: agent })
+          out.note = label
+            ? `Bound to this window's Fleet label '${label}': a window that replaces this one inherits the name.`
+            : `Bound to this seat (${agent}) — this window has no Fleet label, so a replacement window ` +
+              `has to claim the name again (just say it there).`
+          break
+        }
         case "rooms": {
           // Local AND invited: a room you hold a token for must be listed before its first
           // message too, or an agent cannot tell that it may speak there at all.
@@ -247,7 +297,10 @@ export function createMcpServer(identify) {
               `. A room is opened on purpose (\`sac install ${r}\`), never by writing into it.`)
           }
           out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to })
-          out = { ...out, ...(await (await bridge()).pushReport(r)) }
+          // The doorbell after the write, like the relay push: the entry is on disk first, and a
+          // ring that fails is reported per seat, never a failed send (native-doorbell).
+          const rung = await (await import("./doorbell.mjs")).ringReport({ room: r, out, text: a.text })
+          out = { ...out, ...(resolved.length && { resolved }), ...rung, ...(await (await bridge()).pushReport(r)) }
           // Say it, rather than let the room appear in the result and hope it is noticed: an
           // entry is readable by everyone in the room it landed in, so which room that is can
           // never be a silent decision taken on the sender's behalf.
