@@ -61,9 +61,10 @@ const USAGE = {
   rooms: "sac rooms [--archived] | --archive <room> [--force] | --restore <room>   the rooms, and how far each reaches",
   admin: "sac admin                           the operator's live view (Tab panes · ↵ open · / search · ? keys)",
   send: 'sac send [<room>] <type> "text" [--to <seat|project>[,…]] [--re <ts>]   (the room may be left out when --to names a seat)',
-  focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back',
-  inbox: "sac inbox <room>                    new messages from others (marks them read)",
-  peek: "sac peek <room>                     the same, without moving the cursor",
+  focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back · --files is shown to the others and the letterbox AS WRITTEN — a glob stays text, nothing matches against it',
+  inbox: "sac inbox <room> [--mine]           new messages from others (marks them read) · --mine: entries addressed elsewhere as one line each",
+  peek: "sac peek <room> [--mine]            the same, without moving the cursor",
+  dm: "sac dm <seat|name>                  a room of two with that seat — an alias or a Fleet label resolves to one",
   unread: "sac unread <room> [n]               make the last n messages unread again",
   history: "sac history <room> [n]              read back",
   install: "sac install <room>[,<room>…] [--dry-run] [--replace] [--rewrite]   · adds to the project's rooms; --replace cuts it down to what you name; only the room list of a wired hook is edited — --rewrite restores the canonical command",
@@ -396,8 +397,9 @@ try {
     }
     case "inbox":
     case "peek": {
-      const [room] = rest
-      if (!room) throw new Error(`usage: sac ${cmd} <room>`)
+      const mineOnly = rest.includes("--mine")
+      const [room] = rest.filter(a => a !== "--mine")
+      if (!room) throw new Error(`usage: ${USAGE[cmd]}`)
       const r = store.inbox({ room, agent: ME, advance: cmd === "inbox" })
       if (!r.unread) { console.log("(no new messages)"); break }
       // ⚠ The two commands truncate at opposite ends now (see `store.inbox`), so they cannot share
@@ -408,7 +410,19 @@ try {
         console.log(cmd === "inbox"
           ? `… ${r.truncated} more still unread — run \`sac inbox ${room}\` again\n`
           : `… ${r.truncated} older skipped\n`)
-      for (const m of r.messages) console.log(fmt(m))
+      // ⚠ `--mine` SHORTENS, IT NEVER HIDES — reported 2026-10-22 by a consumer project's session:
+      // in a busy room the entries addressed to somebody else, printed whole, buried the one that
+      // was for it. Every entry still appears (a header and its first line), because a reader who
+      // cannot see what the others agreed on is how two sessions do the same work twice
+      // (`store.inbox`); the cursor moves exactly as without the flag, and `history` has them whole.
+      let shortened = 0
+      for (const m of r.messages) {
+        if (!mineOnly || m.forMe !== false) { console.log(fmt(m)); continue }
+        shortened++
+        const first = m.text.split("\n").find(l => l.trim()) || ""
+        console.log(`${fmt({ ...m, text: "" }).trimEnd()}\n${first.length > 160 ? `${first.slice(0, 160)}…` : first}\n`)
+      }
+      if (shortened) console.log(`(${shortened} addressed to others, shown as one line — \`sac history ${room}\` has them whole)`)
       break
     }
     case "focus": {
@@ -1337,9 +1351,21 @@ try {
        * ⚠ IT REFUSES A PEER YOU DO NOT ALREADY SHARE A ROOM WITH. Enrolling somebody else in a
        * room is a real power; bounding it to seats you can already address means it changes the
        * AUDIENCE of a message you could already send, and nothing else.
+       * ↳ Corrected 2026-10-22: what the check below actually requires is that the peer is in SOME
+       * room this store knows (`roomsReaching`), not one shared with you — any such seat is one you
+       * could address after a `join`. The skill had repeated the stricter sentence, and a session
+       * joined an unrelated room to satisfy a rule that was not there.
        */
-      const [peer] = rest.filter(a => !a.startsWith("--"))
-      if (!peer) throw new Error("usage: sac dm <seat>            (a seat: `consumer-a-atlas#3f9c1a20`, not a project)")
+      const [asked] = rest.filter(a => !a.startsWith("--"))
+      if (!asked) throw new Error("usage: sac dm <seat|name>       (a seat: `consumer-a-atlas#3f9c1a20`, or an alias / Fleet label for one — not a project)")
+      // ⚠ A NAME IS RESOLVED FIRST, the same `resolveAddressees` `send` uses. Reported 2026-10-22
+      // by a consumer project's session: `sac dm <alias>` was refused as "a PROJECT" — the alias book
+      // was never asked, because this command looked for a `#` and nothing else. The one command
+      // where a name matters most (a room of two is opened to ONE window) was the one that could
+      // not take one.
+      const { to: [peer], resolved } = store.resolveAddressees([asked])
+      for (const r of resolved)
+        console.error(`sac: '${r.asked}' is ${r.seat} (${r.via}${r.state === "live" ? "" : `, ${r.state}`})`)
       if (peer === ME) throw new Error("dm: that is you")
       if (!peer.includes("#")) {
         const seats = (store.agents().find(a => a.agent === peer)?.seats || []).map(x => x.writer)
@@ -1425,15 +1451,19 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
        --restore <room> | --archived  …put it back, or see what has been retired
   sac join <room> [--create]          THIS SESSION enters a room — membership is per seat
   sac part <room>                     …and leaves it; it sticks, the hook will not put you back
-  sac dm <seat>                       a room of TWO: opens it, joins you, puts that seat in it
+  sac dm <seat|name>                  a room of TWO: opens it, joins you, puts that seat in it
+  sac alias <name…>                   name THIS window, so others can write to it by that name
+       [--to <seat|project|label>]    … or name another one · --rm <name…> · no args: the book
+  sac owner [--json]                  what waits on YOU, the human: entries to \`owner\` nobody answered
   sac http-token <agent> [--rotate]   a client token for the HTTP daemon [--revoke <a>] [--list]
   sac admin                           full-screen: channels, WHO IS BEHIND on reading, live flow
   sac send [<room>] <type> "text"     entry (${store.TYPES.join(" | ")}) — with --to, the room may be left out
        [--to <seat|project>[,…]]      … addressed: this is what claims someone's ATTENTION
   sac focus ["what you are on"]       declare your scope [--files a,b] — read it back with no args
        [--phase ${store.PHASES.join("|")}]   … and where you are in it, in one machine-readable word
-  sac inbox <room>                    new messages from others (marks them read)
-  sac peek <room>                     the same, without moving the cursor
+  sac inbox <room> [--mine]           new messages from others (marks them read) · --mine: the
+                                      ones addressed elsewhere as one line each
+  sac peek <room> [--mine]            the same, without moving the cursor
   sac unread <room> [n]               make the last n messages unread again
   sac history <room> [n]              read back
   sac install <room>[,…] [--dry-run]  hooks + skill into THIS PROJECT — the default rooms every

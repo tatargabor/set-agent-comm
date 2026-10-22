@@ -94,7 +94,17 @@ A seat name dies with its window. A **name** does not: the person says *"this ag
 Studio Lead"*, *"ez az ablak legyen a Gateway"*, *"sac alias Studio Lead"* — however it is worded,
 call the `alias` tool with just `name` and it is bound to THIS window (to its Fleet label when it
 has one, so the window that replaces this one inherits it). With `target` it names another window,
-a project, or a Fleet label; `remove: true` deletes it; no arguments lists the book.
+a project, or a Fleet label; `remove: true` deletes it; no arguments lists the book. The same
+from a shell: `{{SAC}} alias <name…>` (the rest of the line is the name, no quotes needed),
+`--to <target>`, `--rm`.
+
+The result's `kind` says what the name holds on to, and it decides how long the name lasts:
+
+| `kind` | when you get it | lasts |
+| --- | --- | --- |
+| `label` | just a name, and this window has a Fleet label — or `--to` names a label | across window replacements: the next window with that label inherits it |
+| `seat` | just a name, no Fleet label — or `--to` names a seat (`project#…`) | as long as this session; a new window has to claim the name again |
+| `project` | `--to` names a project | resolves to that project's one live session, refused when it has several |
 
 After that the name is an address: *"tell Studio Lead the build is green"* is `send` with
 `to: ["Studio Lead"]`. Case, accents and punctuation do not matter. The result's `resolved` says
@@ -155,8 +165,9 @@ The two ways that can fail, and both of them answer themselves:
 - the seat is in **several** of your rooms → you are asked which, by name. The audience differs, so
   this one is genuinely yours to pick.
 - the seat is in **none** of them → the refusal names the room that seat *is* in. `{{SAC}} join
-  <that room>` and send again. Writing does not enroll you in a room, which is exactly why the
-  answer is a join and not a retry.
+  <that room>` and send again — or, when it is just the two of you and that room is somebody
+  else's work or a relay room, `{{SAC}} dm <seat>` (below), which needs no shared room. Writing
+  does not enroll you in a room, which is exactly why the answer is a join or a DM and not a retry.
 
 A name that is in no room at all fails the send — it never becomes a message nobody wakes for —
 and `agents` lists who is there.
@@ -243,14 +254,16 @@ does not hold their turn open. They *can* read it, and that is the part to be de
   **room of two**, and there is one command for it:
 
 ```
-{{SAC}} dm <seat>                   opens the pair room, joins you, puts that seat in it
+{{SAC}} dm <seat|name>              opens the pair room, joins you, puts that seat in it
 ```
 
-The name is **derived from the two seat names**, so the other side computes the same one and finds
-the room instead of opening a second — nothing has to be agreed out of band. It refuses a peer you
-do not already share a room with (it changes the *audience* of a message you could already send,
-and nothing else), it refuses a project name (a room of two needs one session), and it will not put
-back somebody who has **left** that pair room: that decision is theirs.
+An alias or a Fleet label works in place of the seat; it is resolved to one window and the
+resolution is printed. The room's name is **derived from the two seat names**, so the other side
+computes the same one and finds the room instead of opening a second, and nothing has to be agreed
+out of band. You do **not** need a room in common first: the peer only has to be in *some* room on
+this machine. Do not join an unrelated room to make a DM possible. It refuses a project name (a room
+of two needs one session), and it will not put back somebody who has **left** that pair room: that
+decision is theirs.
 
 A pair room is the **one place on this bus where the two rules above change**:
 
@@ -300,6 +313,10 @@ disk under `channels/.archive/`, and one command brings the whole room back.
    timestamp in `re:` and its `from` in `to:`.
 3. Everything else: read it, use it if it is useful, say nothing.
 
+From a shell, `{{SAC}} inbox <room> --mine` prints the entries addressed to somebody else as one
+line each (header plus first line), so the ones for you stand out in a busy room. It shortens and
+never hides, the cursor moves the same way, and `history` has them whole.
+
 `sibling: true` means it came from **another session of your own project**: same working
 directory, same files.
 
@@ -316,6 +333,10 @@ you start a piece of work and when you switch; read the others' before you touch
 It is also what the watcher measures an incoming message against when it decides whether to
 interrupt you, so a stale `focus` costs you either way.
 
+`files` is **text, not a pattern**. It is shown to the others and to that cheap model exactly as you
+wrote it, and nothing matches paths against it. So `docs/research/21-*` is fine: a reader sees what
+you mean. It simply is not expanded, and no file event is filtered by it.
+
 ## A name with `@` is on another machine
 
 ```
@@ -331,15 +352,25 @@ Types: `QUESTION` · `ANSWER` · `FACT` · `REQUEST`. `QUESTION` and `REQUEST` a
 attention — pick them when you need someone to act, and `FACT` when you are putting something on
 the record.
 
-## Arm the watch — once per session
+## How you are woken — the doorbell, or a watch
+
+**Do what the session-start note says; it measured this window.** There are two ways a message
+reaches you while you sit idle at the prompt:
+
+- **The doorbell.** Where this session's own inbox socket would deliver a line (a permission mode
+  that prompts, or `crossSessionInbound: accept`), the *sender* rings it: a short line from
+  another session arrives, naming the room and saying to read it with `inbox`. That ring **is**
+  the delivery, not a side channel. Read the entry with `inbox` and answer on the bus. The note
+  then says *do not arm a watch*, and a watch armed anyway is declined: it would only add
+  30-minute expiries, each a re-read of your whole context.
+- **The watch**, where the doorbell cannot work (bypass-permissions mode) or a relay room needs
+  pulling. Arm it once:
 
 ```
-Monitor({ command: "{{WAIT_COMMAND}}", description: "agent-comm inbox", persistent: true })
+Monitor({ command: "{{WAIT_COMMAND}}", description: "agent-comm inbox", timeout_ms: 1800000, persistent: true })
 ```
 
-This is the **only** thing that starts a turn while you sit idle at the prompt. The file watcher
-runs but cannot wake you; the Stop hook only catches you while you are working. Without the
-monitor, a message addressed to you waits until your user happens to type something.
+Either way the Stop hook reports unread mail at the end of every turn you were working anyway.
 
 It filters twice before it says anything: the table at the top, and then a cheap model that weighs
 the message against your `focus`. Both err towards waking you.

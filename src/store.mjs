@@ -1597,11 +1597,17 @@ export function resolveRoom({ room, to, configured = [] }) {
     `\`${named}\` is in ${reaching.join(" and ")}, so this one cannot be guessed for you.`)
   if (want.length) {
     const elsewhere = roomsReaching(want)
+    // ⚠ ONE SEAT GETS THE ROOM OF TWO OFFERED NEXT TO THE JOIN — reported 2026-10-22 by
+    // a consumer project's session: the only rooms reaching the seat were relay rooms and a room of
+    // somebody else's work, and the one suggestion was to join one of them. `sac dm` needs no
+    // shared room, and for a single window it is usually the audience that was meant.
+    const seat = want.length === 1 && want[0].includes("#") ? want[0] : null
     throw new Error(
       `\`${named}\` is in no room you are in` +
       (elsewhere.length
         ? ` — that name is in ${elsewhere.join(", ")}. Join one first (\`sac join ${elsewhere[0]}\`), ` +
-          `then send there.`
+          `then send there` +
+          (seat ? ` — or, for just the two of you, open a room of two: \`sac dm ${seat}\`.` : `.`)
         : `, and no room on this machine has it. \`agents\` lists who is reachable.`) +
       (mine.length ? ` You are in: ${mine.join(", ")}.` : ``))
   }

@@ -17,7 +17,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, existsSync, readdirSync, chmodSync, watch } from "node:fs"
+import { mkdtempSync, existsSync, readdirSync, chmodSync, watch, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -68,6 +68,20 @@ test("`--help` works on every subcommand that has a usage line", () => {
     assert.match(r.stdout, new RegExp(`usage: sac ${cmd}`), `sac ${cmd} --help`)
     assert.equal(r.code, 0, `sac ${cmd} --help must exit 0`)
   }
+})
+
+test("REGRESSION: the plain help lists EVERY command that has a usage line", () => {
+  // Reported 2026-10-22 by a consumer project's session: told to "set the alias to hatter2", it ran
+  // `sac help`, found no `alias`, and grepped the source. The usage line had existed since the
+  // alias change — the hand-written list beside it was never told. The keys are read from the
+  // source, so the next command added to `USAGE` fails here until the list names it too.
+  const src = readFileSync(CLI, "utf8")
+  const block = src.slice(src.indexOf("const USAGE = {"), src.indexOf("\n}\n", src.indexOf("const USAGE = {")))
+  const cmds = [...block.matchAll(/^  "?([a-z][a-z-]*)"?: /gm)].map(m => m[1])
+  assert.ok(cmds.length > 20, `the USAGE block was not found (${cmds.length} keys)`)
+  const help = sac([]).stdout
+  const missing = cmds.filter(c => !new RegExp(`^\\s+sac ${c}\\b`, "m").test(help))
+  assert.deepEqual(missing, [], "commands with a usage line that `sac help` does not name")
 })
 
 test("REGRESSION: `sac rooms` does not show a project's whole roster as being in a room", () => {
@@ -135,6 +149,17 @@ test("…and an addressee in NONE of my rooms is refused with the room it IS in"
   assert.notEqual(r.code, 0, "it wrote into a room the addressee cannot read")
   assert.match(r.stderr, /is in no room you are in/)
   assert.match(r.stderr, /attic/, "the refusal did not say where that seat actually is")
+})
+
+test("REGRESSION: …and for ONE seat it offers the room of two next to the join", () => {
+  // Reported 2026-10-22 by a consumer project's session: the only rooms reaching the seat were
+  // relay rooms and somebody else's work, and the refusal's one suggestion was to join one. `dm`
+  // needs no shared room, and the refusal now says so — then the suggestion is taken at its word.
+  const { alpha } = twoAgents()
+  const r = sac(["send", "REQUEST", "are you there?", "--to", "archivist#cccc3333"], alpha)
+  assert.match(r.stderr, /sac dm archivist#cccc3333/, "the room of two is not offered")
+  const dm = sac(["dm", "archivist#cccc3333"], alpha)
+  assert.equal(dm.code, 0, `the offered command does not work: ${dm.stderr}`)
 })
 
 test("a room named in the room position still wins over the addressee's", () => {
@@ -301,6 +326,17 @@ test("a DM needs somebody you can already reach — and a seat, not a project", 
   assert.match(whole.stderr, /beta#bbbb2222/, "it does not say which session could have been meant")
 })
 
+test("REGRESSION: `sac dm` takes a NAME — an alias resolves to its seat, and says so", () => {
+  // Reported 2026-10-22 by a consumer project's session: `sac dm <alias>` was refused as "a PROJECT"
+  // because the command looked for a `#` and never asked the alias book.
+  const { alpha } = twoAgents()
+  assert.equal(sac(["alias", "Archive", "Keeper", "--to", "archivist#cccc3333"], alpha).code, 0)
+  const r = sac(["dm", "archive-keeper"], alpha)
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(JSON.parse(r.stdout).with, "archivist#cccc3333", "the room of two is not with the named window")
+  assert.match(r.stderr, /'archive-keeper' is archivist#cccc3333 \(alias→seat/, "the name became a seat silently")
+})
+
 test("a seat that LEFT the pair room is not put back by the other side", () => {
   const { alpha, beta } = twoAgents()
   const { room } = JSON.parse(sac(["dm", "beta#bbbb2222"], alpha).stdout)
@@ -337,6 +373,22 @@ const threeAgents = () => {
   sac(["register", "team"], gamma)
   return { ...t, gamma }
 }
+
+test("`inbox --mine` shortens the entries addressed elsewhere to one line — it never hides them", () => {
+  // Reported 2026-10-22 by a consumer project's session: the others' traffic, printed whole, buried
+  // the one entry that was for it. Every entry must still be there, and the cursor must move.
+  const { alpha, beta, gamma } = threeAgents()
+  const long = "first line of gamma's errand\n" + "detail ".repeat(60)
+  sac(["send", "team", "REQUEST", long, "--to", "gamma#dddd4444"], beta)
+  sac(["send", "team", "QUESTION", "alpha, is the gross rounded?", "--to", "alpha#aaaa1111"], beta)
+  const r = sac(["inbox", "team", "--mine"], alpha)
+  assert.equal(r.code, 0, r.stderr)
+  assert.match(r.stdout, /alpha, is the gross rounded\?/, "the entry for me is missing")
+  assert.match(r.stdout, /→ gamma#dddd4444 .*\(not for you\)\nfirst line of gamma's errand\n/, "the other one is not one line")
+  assert.ok(!r.stdout.includes("detail detail"), "the entry addressed elsewhere was printed whole")
+  assert.match(r.stdout, /1 addressed to others/)
+  assert.equal(sac(["inbox", "team"], alpha).stdout.trim(), "(no new messages)", "--mine did not move the cursor")
+})
 
 test("in a pair room every entry wakes the other side — no addressing, no type to pick", () => {
   const { alpha } = threeAgents()
