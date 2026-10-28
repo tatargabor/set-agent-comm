@@ -202,7 +202,7 @@ function busEntries() {
   // reach the other machine at all" is the whole question a remote scenario is asking.
   const seen = new Map()
   for (const e of out.map(e => ({ ...e, text: e.lines.join("\n").trim() }))) {
-    const k = `${e.from} ${e.ts}`
+    const k = `${e.from}\u0000${e.ts}`
     const prev = seen.get(k)
     seen.set(k, prev ? { ...prev, crossed: prev.crossed || prev.remote || e.remote } : { ...e, crossed: e.remote })
   }

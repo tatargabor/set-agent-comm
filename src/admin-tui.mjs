@@ -145,6 +145,9 @@ function snapshot({ window = DEFAULT_WINDOW } = {}) {
     const registered = agents.flatMap(a =>
       (a.rooms || []).includes(room) ? (a.seats || []).map(s => s.writer) : [])
     const members = [...new Set([...writers, ...registered])].sort()
+    // Who is reachable here — what decides whether a project name still means one seat (see
+    // `store.wakes`). Unknown counts, as everywhere on this screen.
+    const liveHere = members.filter(s => seats.get(s) && seats.get(s).live !== false)
 
     const subs = members.map(seat => {
       const cur = cursors[`${room}::${seat}`] || {}
@@ -165,7 +168,7 @@ function snapshot({ window = DEFAULT_WINDOW } = {}) {
         if (at && m.ts <= at) continue
         behind++
         perWriter[m.from] = (perWriter[m.from] || 0) + 1
-        if (!isQuiet && wakesSeat(m, seat)) waking++
+        if (!isQuiet && wakesSeat(m, seat, liveHere)) waking++
       }
       const reg = seats.get(seat)
       return {
@@ -218,18 +221,29 @@ const bySeatUrgency = (a, b) =>
 /** Could this seat still read? `undefined`/`null` counts — unknown is not dead. */
 const reachable = s => s.live !== false
 
-/** Would this entry interrupt that seat? The bus's whole cost model, in one predicate. */
-function wakesSeat(m, seat) {
+/**
+ * Would this entry interrupt that seat? The bus's whole cost model, in one predicate. `live` is
+ * the room's reachable seats: with another session of the project among them, a bare project name
+ * no longer wakes this one for a FACT / ANSWER (`store.wakes`, 2026-10-28). Without it, the old
+ * answer.
+ */
+function wakesSeat(m, seat, live) {
   const to = m.to || []
+  const ask = m.type === "QUESTION" || m.type === "REQUEST"
   if (to.length) {
-    return to.some(t => t === seat || t === store.seatBase(seat) || t === store.seatBase(seat).split("@")[0])
+    if (!to.some(t => t === seat || t === store.seatBase(seat) || t === store.seatBase(seat).split("@")[0]))
+      return false
+    return ask || store.namesSeat(m, seat) || !store.siblingLive(seat, live, m.from)
   }
-  return m.type === "QUESTION" || m.type === "REQUEST"
+  return ask
 }
 
 /** Does this entry interrupt ANYBODY in the room? What the `waking` filter selects on. */
-const wakesAnyone = (m, subs) =>
-  (m.to || []).length ? subs.some(s => wakesSeat(m, s.seat)) : (m.type === "QUESTION" || m.type === "REQUEST")
+const wakesAnyone = (m, subs) => {
+  if (!(m.to || []).length) return m.type === "QUESTION" || m.type === "REQUEST"
+  const live = subs.filter(reachable).map(x => x.seat)
+  return subs.some(s => wakesSeat(m, s.seat, live))
+}
 
 // ── formatting ────────────────────────────────────────────────────────────────
 

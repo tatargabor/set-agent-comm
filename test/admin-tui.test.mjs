@@ -55,6 +55,13 @@ test("an addressed entry wakes exactly its addressee — by seat, by project, an
   const toProject = { type: "FACT", from: "api#9", to: ["web-app"] }
   assert.equal(wakesSeat(toProject, "web-app#1111"), true)
   assert.equal(wakesSeat(toProject, "web-app#2222"), true)
+
+  // …until a sibling is live in the room: then a FACT to the project interrupts none of them, and a
+  // QUESTION still interrupts all (`store.wakes`, 2026-10-28). The screen counts what the bus does.
+  const live = ["web-app#1111", "web-app#2222", "api#9"]
+  assert.equal(wakesSeat(toProject, "web-app#1111", live), false)
+  assert.equal(wakesSeat({ ...toProject, type: "QUESTION" }, "web-app#1111", live), true)
+  assert.equal(wakesSeat({ ...toProject, to: ["web-app#1111"] }, "web-app#1111", live), true)
 })
 
 test("a broadcast wakes the room only when it asks for something", () => {

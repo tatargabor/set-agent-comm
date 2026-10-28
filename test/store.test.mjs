@@ -465,6 +465,86 @@ test("an ANSWER wakes the one who ASKED, and nobody else", () => {
     "someone else's answer started a turn — this is the ack storm")
 })
 
+// ── a project name with several sessions behind it (2026-10-28) ───────────────
+// Measured over 2026-10-20…27: half of all Stop-hook blocks on the bus were on an entry addressed
+// to a PROJECT, and one FACT of that kind blocked three parallel sessions of it, the last one 21
+// hours later, to read "nothing in it is mine". See the comment on `store.wakes`.
+
+const lane = s => store.claimSeat({ agent: "lanes", session: s })
+const [inboxLane, videoLane, researchLane] = ["11111111", "22222222", "33333333"].map(lane)
+for (const s of ["11111111", "22222222", "33333333"])
+  store.register({ agent: "lanes", session: s, room: "crowd" })
+store.register({ agent: "studio", room: "crowd" })
+
+test("REGRESSION: a FACT to a project with several live sessions wakes none of them", () => {
+  const t = "tools main: merged lane/pacing again"
+  const r = store.send({ room: "crowd", from: "studio", type: "FACT", text: t, to: "lanes" })
+  assert.deepEqual(r.wakes, [], "every session of the project was interrupted by one fact")
+  for (const s of [inboxLane, videoLane, researchLane]) {
+    const m = seenBy("crowd", s, t)
+    assert.equal(m?.forMe, true, `${s} no longer RECEIVES it — delivery may not change`)
+    assert.equal(m.wakes, false, `${s} would be blocked by the Stop hook on a fact for the project`)
+  }
+})
+
+test("…and the writer is told which seats it could have named instead", () => {
+  const r = store.send({ room: "crowd", from: "studio", type: "ANSWER", text: "done, see 4cad83e", to: "lanes" })
+  const said = r.notice?.join(" ") || ""
+  assert.match(said, /'lanes' has 3 live sessions/, "the sender believes the project was told")
+  for (const s of [inboxLane, videoLane, researchLane]) assert.ok(said.includes(s), `${s} is not offered`)
+  assert.doesNotMatch(said, /wakes NOBODY/, "two notices saying the same thing")
+})
+
+test("a QUESTION or REQUEST to the project still wakes every session — someone has to answer", () => {
+  for (const type of ["QUESTION", "REQUEST"]) {
+    const t = `owner inbox: please batch this ${type}`
+    const r = store.send({ room: "crowd", from: "studio", type, text: t, to: "lanes" })
+    assert.deepEqual([...r.wakes].sort(), [inboxLane, videoLane, researchLane].sort())
+    assert.equal(seenBy("crowd", researchLane, t).wakes, true)
+  }
+})
+
+test("naming the SEAT still wakes that session, whatever the type", () => {
+  const t = "disk full, deleted your old cuts"
+  const r = store.send({ room: "crowd", from: "studio", type: "FACT", text: t, to: videoLane })
+  assert.deepEqual(r.wakes, [videoLane])
+  assert.equal(seenBy("crowd", videoLane, t).wakes, true)
+  assert.equal(seenBy("crowd", researchLane, t).wakes, false)
+})
+
+test("a project-addressed reply to MY entry still wakes me — the `re:` rule is untouched", () => {
+  const q = store.send({ room: "crowd", from: videoLane, type: "FACT", text: "pushed 57ca0ac" })
+  const t = "merged on top of your 57ca0ac"
+  store.send({ room: "crowd", from: "studio", type: "FACT", text: t, to: "lanes", re: q.ts })
+  assert.equal(seenBy("crowd", videoLane, t).wakes, true, "a reply to my own entry did not reach me")
+  assert.equal(seenBy("crowd", inboxLane, t).wakes, false)
+})
+
+test("with ONE live session the project name still means that session", () => {
+  store.register({ agent: "solo", session: "44444444", room: "crowd" })
+  const only = store.seatOf({ agent: "solo", session: "44444444" })
+  const t = "your build is green"
+  const r = store.send({ room: "crowd", from: "studio", type: "FACT", text: t, to: "solo" })
+  assert.deepEqual(r.wakes, [only])
+  assert.equal(seenBy("crowd", only, t).wakes, true)
+})
+
+test("a session writing to its OWN project with one sibling open wakes that sibling", () => {
+  store.register({ agent: "duo", session: "55555555", room: "crowd" })
+  store.register({ agent: "duo", session: "66666666", room: "crowd" })
+  const [a, b] = ["55555555", "66666666"].map(s => store.seatOf({ agent: "duo", session: s }))
+  const t = "I took the migration, leave it"
+  const r = store.send({ room: "crowd", from: a, type: "FACT", text: t, to: "duo" })
+  assert.deepEqual(r.wakes, [b], "the writer counted itself as the crowd")
+  assert.equal(seenBy("crowd", b, t).wakes, true)
+})
+
+test("a caller that does not pass the roster keeps the old answer — wake", () => {
+  const e = { type: "FACT", from: "studio", to: ["lanes"] }
+  assert.equal(store.wakes(e, researchLane, new Set(), false, false), true)
+  assert.equal(store.wakes(e, researchLane, new Set(), false, false, [inboxLane, researchLane]), false)
+})
+
 // ── what the writer is told at the moment of writing ──────────────────────────
 // ⚠ Both of these were measured, and both were invisible to the sender. In a six-session run all
 // five entries were broadcast FACTs — one of them renaming an id two other projects had to follow

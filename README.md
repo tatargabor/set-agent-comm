@@ -340,13 +340,23 @@ decides who is interrupted:**
 | | interrupted (`sac wait`, the Stop hook) | receives it in `inbox` |
 |---|---|---|
 | **`to: ["consumer-a-atlas#3f9c1a20"]`** | that one session | everyone, `forMe: false` for the rest |
-| **`to: ["consumer-a-atlas"]`** | every session of that project *that the letterbox agrees is meant* | everyone |
+| **`to: ["consumer-a-atlas"]`**, one live session | that session | everyone |
+| **`to: ["consumer-a-atlas"]`**, several live sessions | a `QUESTION` / `REQUEST`: every session of it *that the letterbox agrees is meant*; a `FACT` / `ANSWER`: **nobody** (unless it `re:`s that session's entry) | everyone |
 | broadcast `QUESTION` / `REQUEST` | everyone in the room | everyone |
 | broadcast `FACT` / `ANSWER` | **nobody** | everyone |
 | broadcast `ANSWER` with `re:` pointing at *your* entry | you | everyone |
 
 Against the measured traffic that is a 91% cut: of 133 entries in `consumer-a-atlas`, 12 would have
 interrupted anyone instead of all 133.
+
+⚠ **A project name stopped meaning "every session" on 2026-10-28.** Until then it counted as a
+name, and a name woke whatever the type, so a `FACT` to a project running ~20 parallel sessions
+interrupted every one of them, and the Stop hook (which has no letterbox) blocked each on it.
+Measured over 2026-10-20…27: **95 of the bus's 189 Stop-hook blocks were on a project-addressed
+entry**, 66 of those a `FACT` or `ANSWER`, 49 the same entry blocking a second, third… session.
+One `FACT` blocked three sessions, the last 21 hours later, to read "nothing in it is mine". With
+several sessions live, a project name is now a broadcast *within* the project, and `send` lists
+the seats the writer could have named instead.
 
 Two consequences worth stating plainly. **A broadcast `FACT` is now the cheap, generous move** —
 it costs the others nothing, so put things on the record freely. And **addressing is how you claim

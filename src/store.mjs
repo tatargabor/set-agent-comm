@@ -199,10 +199,32 @@ export const isOwner = name => name === OWNER || String(name).startsWith(`${OWNE
  *
  * A sender's choice of type may not decide whether the person they are replying to hears them.
  *
+ * ⚠ A PROJECT NAME IS NOT A SEAT NAME once the project has several live sessions in the room
+ * (2026-10-28). `to: ["consumer-a"]` used to fall under "named in `to` → wakes", so it woke EVERY
+ * session of the project, whatever the type, and the Stop hook — which has no letterbox — blocked
+ * each of them on it. Measured over 2026-10-20…27: 95 of the bus's 189 Stop-hook blocks (50%) were
+ * on a project-addressed entry, 85 of them in one project running ~20 parallel sessions; 66 of the
+ * 95 were a FACT or an ANSWER, and 49 were the SAME entry blocking a second, third… session. One
+ * FACT ("merged lane X again") blocked three sessions, at 10:22, 18:14 and 23:28 the next day;
+ * the last one read it and reported "nothing in it is mine". A rule of "a sibling already answered
+ * it" would have caught none of the 95: the answers did not carry `re:`.
+ *
+ * So with siblings around, a project name is a broadcast WITHIN the project and follows the
+ * broadcast rule: a QUESTION / REQUEST still wakes them all (somebody has to answer, and `sac
+ * wait`'s letterbox picks by focus), a FACT / ANSWER wakes nobody unless it `re:`s this seat's own
+ * entry. With ONE live session of the project the name can only mean that session, and it wakes as
+ * before. Naming the seat (`consumer-a#968f89d7`) always wakes it. `send` says so to the writer.
+ *
  * @param mine  the timestamps THIS seat has written in the room (see `ownTimestamps`) — without
  *              it the `re:` rule is off, and a reply reaches nobody by that route.
+ * @param live  the room's live seats, read once by the caller (`liveSeats`). They decide whether a
+ *              project name still means this seat: it does unless ANOTHER session of the project,
+ *              other than the writer, is live there — a session addressing its own project with
+ *              one sibling open is talking to that sibling. `undefined` (a caller that did not
+ *              look) keeps the old answer, wake: a needless turn costs one, a missed message is
+ *              the failure this project exists to prevent.
  */
-export function wakes(entry, me, mine, quiet = undefined, pair = false) {
+export function wakes(entry, me, mine, quiet = undefined, pair = false, live = undefined) {
   if (!isForMe(entry, me)) return false
   // ⚠ A DECLARED quiet is applied HERE and nowhere else, because this function is the single
   // rule the Stop hook, `sac wait` and `inbox` all read. Delivery is untouched: a quiet seat
@@ -216,10 +238,23 @@ export function wakes(entry, me, mine, quiet = undefined, pair = false) {
   // to honour, because there is exactly one other seat that could be interrupted.
   // `quiet` still wins: somebody chose that, and it is the one thing above this line for a reason.
   if (pair) return true
-  if (entry.to?.length) return true
+  if (entry.to?.length && (namesSeat(entry, me) || !siblingLive(me, live, entry.from))) return true
   if (entry.re && mine?.has(entry.re)) return true
   return entry.type === "QUESTION" || entry.type === "REQUEST"
 }
+
+/** Does `to` name THIS seat itself — not just the project behind it? */
+export const namesSeat = (entry, me) => {
+  const forms = addressForms(me)
+  return (entry.to || []).some(n => n.includes("#") && forms.has(n))
+}
+
+/** The project a seat belongs to, on any machine — the widest name that addresses it. */
+const projectOf = seat => seatBase(seat).split("@")[0]
+
+/** Is another session of `me`'s project — not `me`, not the writer — live in this roster? */
+export const siblingLive = (me, live, from) =>
+  !!live?.some(s => s !== me && s !== from && projectOf(s) === projectOf(me))
 
 /** The timestamps this seat has written in the room — what someone else's `re:` can point at. */
 export function ownTimestamps(room, agent) {
@@ -1224,7 +1259,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   const woke = live.filter(s => {
     if (s === from) return false
     const quiet = seatPresence(s).quiet
-    const w = wakes(entry, s, ownTimestamps(room, s), quiet, isPair)
+    const w = wakes(entry, s, ownTimestamps(room, s), quiet, isPair, live)
     recordDecision({ room, seat: s, entry: ts, by: quiet && isForMe(entry, s) ? "quiet" : "rule", woke: w })
     return w
   })
@@ -1302,11 +1337,22 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       return `'${s}'${p.until ? ` until ${p.until}` : ""}`
     }).join(", ")} — the entry is delivered and read, but interrupts nobody there.`)
   }
+  // ⚠ A PROJECT NAME WITH SEVERAL SESSIONS BEHIND IT woke none of them for a FACT / ANSWER (see
+  // `wakes`, 2026-10-28). The sender typed a name and may well believe it reached someone, so the
+  // receipt names the seats it could have used instead.
+  const spread = addressed.filter(n => !isOwner(n) && !n.includes("#"))
+    .map(n => ({ n, seats: live.filter(s => s !== from && isForMe({ to: [n] }, s)) }))
+    .filter(x => x.seats.length > 1 && !x.seats.some(s => woke.includes(s)))
+  for (const { n, seats } of spread)
+    notice.push(`'${n}' has ${seats.length} live sessions in '${room}', so a ${type} addressed to ` +
+      `the project interrupts none of them — each reads it at its next \`inbox\`. If one of them ` +
+      `has to act on it, address that seat (${seats.map(s => `'${s}'`).join(", ")}), or send a ` +
+      `QUESTION / REQUEST.`)
   const ownerOnly = addressed.length && addressed.every(isOwner)
   if (ownerOnly)
     notice.push(`Addressed to the owner — the person, not a session: no seat is woken. It is listed ` +
       `by \`sac owner\` until an entry in this room answers it with re: ${ts}.`)
-  else if (!woke.length && others)
+  else if (!woke.length && others && !spread.length)
     notice.push(`This wakes NOBODY — ${others} live seat(s) will read it when they next look. ` +
       `That is right for a fact nobody must act on. If someone has to DO something because of ` +
       `this, it needs \`to\` (one seat), or the QUESTION / REQUEST type.`)
@@ -1724,7 +1770,7 @@ function parse(path, agent) {
   const seen = new Set()
   return entries
     .filter(e => {
-      const key = `${e.ts} ${e.type} ${e.to.join(",")} ${e.re || ""} ${e.text}`
+      const key = `${e.ts}\u0000${e.type}\u0000${e.to.join(",")}\u0000${e.re || ""}\u0000${e.text}`
       return seen.has(key) ? false : (seen.add(key), true)
     })
 }
@@ -1846,6 +1892,8 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
   // same argument applies to the seat's declared presence, so it is read here and passed down.
   const mine = ownTimestamps(room, agent)
   const quiet = respectQuiet && seatPresence(agent).quiet
+  // Whether a project name still means THIS seat (see `wakes`): one registry read per call.
+  const live = liveSeats(room)
   // A seat with no cursor of its own (nobody registered it) falls back to the base seat's —
   // erring towards "unread" rather than swallowing the first message.
   const seen = cursors[key] || (agent === base ? {} : { ...(cursors[`${room}::${base}`] || {}) })
@@ -1856,7 +1904,7 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine, quiet, isPair),
+        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine, quiet, isPair, live),
                      ...(seatBase(writer) === base && { sibling: true }) })
     }
   }

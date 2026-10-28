@@ -172,7 +172,7 @@ test("⚠ the wildcard tail REJECTS a path-traversal ask", () => {
 })
 
 test("an unsafe key matches nothing at all, `*` included", () => {
-  for (const bad of ["a/b", "a\\b", "..", "status:..", "x y", "élet", "a".repeat(201)])
+  for (const bad of ["a/b", "a\\b", "..", "status:..", "x\u0000y", "élet", "a".repeat(201)])
     assert.equal(keyMatches("*", bad), false, `"${bad}" matched the catch-all`)
   assert.equal(safeKey("status:db-1.2_x"), true, "a perfectly ordinary key was rejected")
 })
