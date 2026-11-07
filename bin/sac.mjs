@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto"
 import { watch, existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs"
 import { lstatSync, realpathSync, chmodSync, rmSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
+import { spawnSync } from "node:child_process"
 import * as store from "../src/store.mjs"
 
 const HOOKS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "hooks")
@@ -968,10 +969,18 @@ try {
       } catch { /* absent */ }
       if (!ours && !force) throw new Error(`setup: ${target} exists and is not this launcher — not ` +
         `replacing someone else's \`sac\`. Look at it, then \`sac setup --force\` if it should go.`)
+      // ⚠ THE STABLE NAME of the interpreter where there is one: `process.execPath` is resolved, so
+      // under Homebrew it is `…/Cellar/node/25.6.1/bin/node`, which the next `brew upgrade` deletes.
+      // The PATH's `node`, when it is the same binary, survives the upgrade.
+      let nodeBin = process.execPath
+      try {
+        const found = spawnSync("/bin/sh", ["-c", "command -v node"], { encoding: "utf8" }).stdout.trim()
+        if (found && realpathSync(found) === realpathSync(process.execPath)) nodeBin = found
+      } catch { /* the resolved path still works until the next upgrade */ }
       const body = `#!/bin/sh\n${MARK}, written by \`sac setup\` on this machine.\n` +
         `# It names this machine's node and checkout, which is why it lives here and in no project:\n` +
         `# the hook line a project tracks finds \`sac\` and nothing else.\n` +
-        `exec "${process.execPath}" "${me}" "$@"\n`
+        `exec "${nodeBin}" "${me}" "$@"\n`
       const current = was === "file" && readFileSync(target, "utf8") === body
       if (!current) {
         store.ensureDir(bin)
@@ -981,7 +990,7 @@ try {
       }
       const onPath = (process.env.PATH || "").split(":").includes(bin)
       json({ launcher: target, state: current ? "already current" : was === "absent" ? "installed" : `replaced (was a ${was})`,
-        node: process.execPath, checkout: dirname(dirname(me)), onPath,
+        node: nodeBin, checkout: dirname(dirname(me)), onPath,
         ...(onPath ? {} : { note: `${bin} is not on this shell's PATH — the hook line falls back to it by name, ` +
           `so hooks work; for your own shell add it to the PATH.` }) })
       break
