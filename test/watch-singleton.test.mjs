@@ -126,12 +126,37 @@ test("⚠ TWO watches armed in the same instant: exactly one survives", async ()
   assert.equal(left.length, 1, `${left.length} watches survived — one seat, one watch`)
 })
 
+test("a watch that re-executes in place keeps its pid, its pipe and its silence", async () => {
+  // 2026-11-07: every edit of the checkout stopped every session's watch on the machine, and each
+  // stop was a stdout line — a whole turn — only to re-arm the same command. `execve` keeps the
+  // process (pid, parent, stdout) and swaps the code. The age cap is the trigger here because it is
+  // the one a test can pull without editing the sources under every other test's feet.
+  const env = { ...process.env, SET_AGENT_COMM_DIR: ROOT, SET_AGENT_NAME: "re-exec",
+                SET_AGENT_ROOM: "reexec-room", SET_AGENT_OWNER_PID: String(process.pid),
+                SET_AGENT_TRIAGE: "off", SET_AGENT_WATCH_MAX_HOURS: "0.0005" }
+  delete env.SET_AGENT_WATCH_REEXEC
+  store.createRoom("reexec-room", "test")
+  const w = spawn(process.execPath, [SAC, "wait"], { stdio: ["ignore", "pipe", "pipe"], env })
+  let out = "", err = ""
+  w.stdout.on("data", d => { out += d }); w.stderr.on("data", d => { err += d })
+  if (typeof process.execve !== "function") { w.kill("SIGKILL"); return }   // the fallback is the test below
+  await settle(() => /re-executing in place/.test(err), 15000)
+  await sleep(500)
+  const stillThere = alive(w.pid)
+  w.kill("SIGKILL")
+  assert.match(err, new RegExp(`re-executing in place \\(pid ${w.pid}\\)`), `it did not re-exec: ${err}`)
+  assert.ok(stillThere, "the watch is gone — the Monitor would have ended")
+  assert.equal(out, "", "it spoke on stdout — that is a notification, i.e. a whole turn, for nothing")
+})
+
 test("a watch that outlives its age cap exits, so the Monitor starts a fresh one", async () => {
   // 0.0005 h = 1.8 s. The cap is in hours because that is the unit anyone would set it in; the
   // guard's own tick follows it down, which is what makes this observable in a test at all.
+  // ⚠ Since 2026-11-07 this is the FALLBACK path (no `process.execve`, or new code that does not
+  // load) — forced here with SET_AGENT_WATCH_REEXEC=0; the test above covers the default.
   const env = { ...process.env, SET_AGENT_COMM_DIR: ROOT, SET_AGENT_NAME: "short-lived",
                 SET_AGENT_ROOM: "cap-room", SET_AGENT_OWNER_PID: String(process.pid),
-                SET_AGENT_TRIAGE: "off", SET_AGENT_WATCH_MAX_HOURS: "0.0005" }
+                SET_AGENT_TRIAGE: "off", SET_AGENT_WATCH_MAX_HOURS: "0.0005", SET_AGENT_WATCH_REEXEC: "0" }
   store.createRoom("cap-room", "test")
   const w = spawn(process.execPath, [SAC, "wait"], { stdio: ["ignore", "pipe", "pipe"], env })
   let out = "", err = ""

@@ -102,8 +102,12 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   live argv before any signal — a pid is a reusable number, and the alternative is SIGTERM to a
   stranger.
 - **A watch may not outlive its own code.** `sac wait` records `store.sourceStamp()` at start-up
-  and exits when the sources move (once the edit has SETTLED for 30 s, or a restart storm follows
-  a `git checkout`); `persistent: true` on the Monitor starts a fresh one. This is the rule under
+  and, when the sources move (once the edit has SETTLED for 30 s, or a restart storm follows
+  a `git checkout`), RE-EXECUTES IN PLACE (`process.execve`, 2026-11-07): same pid, same parent,
+  same stdout, new code, nothing printed — every edit used to stop every session's watch on the
+  machine, each stop a whole turn spent re-arming it. Only where `execve` is missing or the new
+  code does not load does it fall back to the old exit with an actionable re-arm line
+  (`SET_AGENT_WATCH_REEXEC=0` forces that; `persistent: true` was measured NOT to re-arm). This is the rule under
   "restart what polls" below, made mechanical, because the cost of forgetting it is not a stale
   feature but a corrupt append-only log. There is a 12-hour age cap too
   (`SET_AGENT_WATCH_MAX_HOURS`, `0` = off): a watcher drifts from ~50 MB to 161-195 MB over 20

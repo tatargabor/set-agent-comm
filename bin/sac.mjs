@@ -1501,7 +1501,48 @@ try {
       const rearm = (process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : "") +
         `SET_AGENT_NAME=${store.seatBase(ME)} SET_AGENT_ROOM=${watched.join(",")} ` +
         `${process.execPath} ${fileURLToPath(import.meta.url)} wait`
-      const restart = why => {
+      /**
+       * ⚠ RE-EXEC IN PLACE, where the runtime can (2026-11-07, `process.execve`, Node ≥ 23.11). Reported
+       * by a consumer session the evening a feature landed: every edit of this checkout stopped
+       * EVERY session's watch on the machine ("mine stopped twice in a few minutes"), and each stop
+       * is a stdout line, i.e. a whole turn in that session, re-reading its whole context, only to
+       * re-arm the same command. A session that did not re-arm sat unwatched.
+       *
+       * `execve` replaces the program and keeps the PROCESS: the same pid (so the watch claim stays
+       * this one's), the same parent (so the "die with the session" guard above still fires — the
+       * reason a `while` wrapper was reverted on 2026-09-12), and the same stdout (so the Monitor goes
+       * on reading this very pipe). The new image loads the new code and starts at its new size,
+       * which is everything the exit was for — and says nothing, because there is nothing to do.
+       *
+       * The new code is LOADED ONCE in a child first: an edit that does not parse would otherwise
+       * replace a working watch with a crash, and a crash ends the Monitor with no re-arm line. If
+       * the check fails, or the runtime has no `execve` (older Node, Windows), it is the old path:
+       * the actionable line and exit 0. `SET_AGENT_WATCH_REEXEC=0` forces that path.
+       */
+      let restarting = false
+      const newCodeLoads = () => {
+        const here = fileURLToPath(import.meta.url)
+        const src = join(dirname(here), "..", "src")
+        const syntax = spawnSync(process.execPath, ["--check", here], { timeout: 10_000 })
+        if (syntax.status !== 0) return false
+        const load = spawnSync(process.execPath, ["--input-type=module", "-e",
+          ["store.mjs", "triage.mjs", "bridge.mjs"].map(f => `await import(${JSON.stringify(join(src, f))})`).join(";")],
+          { timeout: 10_000, env: process.env })
+        return load.status === 0
+      }
+      const restart = async why => {
+        if (restarting) return
+        restarting = true
+        if (typeof process.execve === "function" && process.env.SET_AGENT_WATCH_REEXEC !== "0" && newCodeLoads()) {
+          try {
+            // stderr, not stdout: stdout is the notification channel, and this is not news.
+            console.error(`[set-agent-comm] ${why} — re-executing in place (pid ${process.pid}), still watching`)
+            await new Promise(r => process.stdout.write("", () => r()))
+            process.execve(process.execPath, [process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)], process.env)
+          } catch (e) {
+            console.error(`[set-agent-comm] re-exec failed (${e?.message || e}) — stopping instead`)
+          }
+        }
         // ⚠ The `timeout_ms` is carried here too, for the same reason the session-start hook
         // states it (see the comment above `monitor` there): the tool's default is 5 minutes,
         // and this line is read at the END of a watch's life — precisely when an agent re-arms
@@ -1519,9 +1560,9 @@ try {
       setInterval(() => {
         const newest = store.sourceStamp()
         if (newest > CODE_AT_START && Date.now() - newest > SETTLED_MS)
-          restart("the set-agent-comm code under this watch changed since it started")
-        if (Date.now() - STARTED_AT > MAX_AGE_MS)
-          restart(`this watch has been running for over ${capHours}h`)
+          void restart("the set-agent-comm code under this watch changed since it started")
+        else if (Date.now() - STARTED_AT > MAX_AGE_MS)
+          void restart(`this watch has been running for over ${capHours}h`)
       }, TICK).unref()
 
       // THE REMOTE LEG rides on this same watcher: for rooms that have a relay we long-poll it

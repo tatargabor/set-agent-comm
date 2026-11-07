@@ -1146,7 +1146,7 @@ Two processes are long-running, and both of them pull:
 
 | | |
 |---|---|
-| **the watch** (`sac wait`) | the primary puller — it holds the long poll, so it is normally the one that ingests. Stop it and start it again |
+| **the watch** (`sac wait`) | the primary puller — it holds the long poll, so it is normally the one that ingests. It does this ITSELF: once the sources have settled it re-executes in place (`process.execve`, same pid and pipe, nothing printed), and only where that is impossible does it stop with a re-arm line |
 | **the MCP server** | pulls too, on every `inbox` call. Claude Code owns the process, so it takes `/mcp reconnect` or a new session |
 
 Everything else — the hooks, every `sac` command — is a fresh process and picks the new code up
