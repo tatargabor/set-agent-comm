@@ -89,8 +89,13 @@ test("it installs the skill too, with the commands baked in", () => {
   assert.match(skill, /^---\nname: agent-comm$/m, "the frontmatter is not what Claude Code reads")
 })
 
+// 2026-11-08: the backup lives in the bus's store, not beside the file — a `.bak` in the work tree
+// showed up in that project's `git status` and was one `git add -A` from being committed.
+const backups = () => { try { return readdirSync(join(STORE, "backups")) } catch { return [] } }
+
 test("it takes a backup before writing — this file is not reconstructible", () => {
-  assert.ok(readdirSync(join(PROJ, ".claude")).some(f => f.startsWith("settings.json.bak.")))
+  assert.ok(backups().some(f => f.includes(".claude__settings.json.")), "no backup in the store")
+  assert.ok(!readdirSync(join(PROJ, ".claude")).some(f => f.includes(".bak.")), "a backup was left in the repo")
 })
 
 test("running it again changes nothing — no second copy", () => {
@@ -252,7 +257,8 @@ test("a hook left in settings.local.json is taken OUT — one line per hook, nev
   assert.deepEqual(commands(local, "PostToolUse"), ["echo someone-elses-local-hook"], "it took someone else's hook")
   assert.match(ourLine(settings(), "Stop", "stop"), /SET_AGENT_ROOM=promo /, "the local line's rooms were lost")
   assert.match(r.stdout, /removed from settings\.local\.json/)
-  assert.ok(readdirSync(join(PROJ, ".claude")).some(f => f.startsWith("settings.local.json.bak.")), "no backup")
+  assert.ok(backups().some(f => f.includes(".claude__settings.local.json.")), "no backup")
+  assert.ok(!readdirSync(join(PROJ, ".claude")).some(f => f.includes(".bak.")), "a backup was left in the repo")
   rmSync(LOCAL)
 })
 

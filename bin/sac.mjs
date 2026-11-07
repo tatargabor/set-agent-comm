@@ -180,6 +180,21 @@ const takeFlag = (argv, name) => {
   return { value: argv[i + 1], rest: [...argv.slice(0, i), ...argv.slice(i + 2)] }
 }
 
+/**
+ * A backup of a file we are about to rewrite in SOMEONE ELSE'S repo, kept in the bus's own store,
+ * never beside the file. Measured 2026-11-08, rolling four projects over to the plugin: every
+ * `sac uninstall` left a `settings.local.json.bak.<ts>` in the work tree — untracked, so it showed
+ * in that project's `git status` and was one `git add -A` away from being committed, machine data
+ * and all. The store is outside every repo, and the path printed says where it went.
+ */
+function backupOf(file) {
+  const rel = file.startsWith(homedir()) ? file.slice(homedir().length) : file
+  const to = join(store.ROOT, "backups", `${rel.replace(/^\/+/, "").replace(/\//g, "__")}.${store.now().replace(/[:.]/g, "-")}`)
+  store.ensureDir(dirname(to))
+  copyFileSync(file, to)
+  return to
+}
+
 try {
   switch (cmd) {
     case "admin": {
@@ -917,18 +932,14 @@ try {
       const hooksChanged = changes.some(c => !c.startsWith("skill:") && !c.endsWith("already wired") &&
         !c.includes("⚠ hand-tuned") && !c.includes("removed from settings.local.json"))
       if (localDrop.length) {
-        const bak = `${localFile}.bak.${store.now().replace(/[:.]/g, "-")}`
-        copyFileSync(localFile, bak)
-        console.log(`  backup: ${bak}`)
+        console.log(`  backup: ${backupOf(localFile)}`)
         writeFileSync(localFile, JSON.stringify(local, null, 2) + "\n")
       }
       if (hooksChanged) {
         store.ensureDir(dirname(file))
         // A backup before every write. This file is not ours, and it is not reconstructible.
         if (existsSync(file)) {
-          const bak = `${file}.bak.${store.now().replace(/[:.]/g, "-")}`
-          copyFileSync(file, bak)
-          console.log(`  backup: ${bak}`)
+          console.log(`  backup: ${backupOf(file)}`)
         }
         writeFileSync(file, JSON.stringify(settings, null, 2) + "\n")
       }
@@ -937,7 +948,7 @@ try {
         store.ensureDir(dirname(skillTo))
         // The skill file is ours end to end, so it is overwritten — but a hand-edited copy is
         // still someone's work, so it is backed up first.
-        if (skillState === "updated") copyFileSync(skillTo, `${skillTo}.bak.${store.now().replace(/[:.]/g, "-")}`)
+        if (skillState === "updated") backupOf(skillTo)
         writeFileSync(skillTo, skill)
       }
 
@@ -1027,7 +1038,7 @@ try {
         if (!events.length) continue
         done.push(`${name}: removed ${[...new Set(events)].join(", ")}`)
         if (dry) continue
-        copyFileSync(f, `${f}.bak.${store.now().replace(/[:.]/g, "-")}`)
+        done.push(`  backup: ${backupOf(f)}`)
         writeFileSync(f, JSON.stringify(cfg, null, 2) + "\n")
       }
       const skill = join(process.cwd(), ".claude", "skills", "agent-comm", "SKILL.md")
