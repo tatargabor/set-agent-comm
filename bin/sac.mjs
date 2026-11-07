@@ -18,6 +18,8 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { randomUUID } from "node:crypto"
 import { watch, existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs"
+import { lstatSync, realpathSync, chmodSync, rmSync, readdirSync } from "node:fs"
+import { homedir } from "node:os"
 import * as store from "../src/store.mjs"
 
 const HOOKS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "hooks")
@@ -33,6 +35,43 @@ const relayPush = async room => (await import("../src/bridge.mjs")).pushReport(r
 const AGENT = process.env.SET_AGENT_NAME || basename(process.cwd())
 const SESSION = process.env.CLAUDE_CODE_SESSION_ID || null
 const [cmd, ...rest] = process.argv.slice(2)
+
+/**
+ * `sac hook <name>` — THE PATH-FREE WAY TO RUN A HOOK (2026-11-07). A settings file a project
+ * tracks can now say `sac hook stop` instead of `<this machine's node> <this machine's checkout>/
+ * hooks/stop.mjs`, so the same line works on every machine and a commit gate has nothing to find.
+ *
+ * ⚠ Measured the day it was built, on one workstation: 5 of 10 projects of one family had NO hook at
+ * all. One of them (2026-09-17) had moved its hooks out of the tracked file because the other
+ * machine's node path broke every Stop hook there — into a local file that was then never written
+ * on this machine. Every project that fixed the path leak lost its hooks; the leak and the silence
+ * were one bug. A request from the same family asked for exactly this (2026-11-01).
+ *
+ * Dispatched BEFORE anything else in this file runs: a hook must not claim a seat, print a
+ * warning, or do any of the CLI's work — it imports the hook script and lets it be what it is.
+ *
+ * `--from-plugin` marks a hook shipped by a plugin. Such a hook STANDS DOWN when the project's own
+ * settings already wire the same hook: the project's line carries its rooms, and two copies of the
+ * Stop hook would nudge twice and two heartbeats would race on the registry.
+ */
+if (cmd === "hook") {
+  const name = String(rest.find(a => !a.startsWith("--")) || "").replace(/\.mjs$/, "")
+  const known = ["session-start", "stop", "heartbeat", "watch-guard"]
+  try {
+    if (!known.includes(name)) {
+      console.error(`sac hook: unknown hook '${name}' (${known.join(" | ")})`)
+    } else if (!(rest.includes("--from-plugin") && store.projectWiresHook(process.env.CLAUDE_PROJECT_DIR || process.cwd(), name))) {
+      await import(join(HOOKS, `${name}.mjs`))
+    }
+  } catch (e) {
+    // A hook never fails a turn (the scripts hold that rule themselves, and so does this), but a
+    // swallowed crash is a hook that silently never works — so it is said, on stderr, exit 0.
+    console.error(`sac hook ${name}: ${e?.message || e}`)
+  }
+  // Let what the hook wrote reach the pipe before leaving: stdout to a pipe is asynchronous.
+  await new Promise(r => process.stdout.write("", () => r()))
+  process.exit(0)
+}
 
 /**
  * ⚠ AN UNRECOGNISED `SET_AGENT_COMM_*` VARIABLE IS SAID OUT LOUD. Measured 2026-08-10: an agent
@@ -67,7 +106,12 @@ const USAGE = {
   dm: "sac dm <seat|name|project>          a room of two with that seat — or, for a project, the room between the two projects",
   unread: "sac unread <room> [n]               make the last n messages unread again",
   history: "sac history <room> [n]              read back",
-  install: "sac install <room>[,<room>…] [--dry-run] [--replace] [--rewrite]   · adds to the project's rooms; --replace cuts it down to what you name; only the room list of a wired hook is edited — --rewrite restores the canonical command",
+  install: "sac install [<room>[,<room>…]] [--dry-run] [--replace] [--rewrite]   · portable hooks (no machine path) into .claude/settings.json; adds to the project's rooms; --replace cuts it down to what you name; only the room list of a hand-tuned hook is edited — --rewrite restores the canonical command",
+  uninstall: "sac uninstall [--dry-run] [--keep-skill]   take this project's own bus hooks out of .claude/settings*.json (and the skill copy) — for a project whose plugin ships them",
+  setup: "sac setup [--force]                 this MACHINE: the `sac` launcher in ~/.local/bin that the portable hook line finds",
+  hook: "sac hook <session-start|stop|heartbeat|watch-guard> [--from-plugin]   run a hook (what the portable line in settings.json calls)",
+  "plugin-files": "sac plugin-files <plugin-dir> [--dry-run]   write the hook lines + the agent-comm skill a plugin ships, with no machine path",
+  doctor: "sac doctor [--project <glob>] [--json]   per project: hooks wired (where, which form), live seats, rooms, last read, unread for it, ringable",
   wait: "sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)",
   prune: "sac prune [--days N] [--dry-run]    forget dead seats, and retire DM rooms nobody is left in",
   "watch-paths": "sac watch-paths <room>              the files to watch (for the hook)",
@@ -678,7 +722,8 @@ try {
       const rewrite = rest.includes("--rewrite")
       const asked = rest.filter(a => !a.startsWith("--")).flatMap(store.parseRooms)
       const want = asked.length ? asked : store.parseRooms(process.env.SET_AGENT_ROOM)
-      if (!want.length) throw new Error("usage: sac install <room>[,<room>…] [--dry-run] [--replace] [--rewrite]")
+      // No room at all is a valid install now: a project's rooms with the projects it talks to are
+      // derived (`store.projectRoom`), so its hooks need no list — the form a plugin ships.
 
       // ⚠ THE PROJECT GETS AN ADDRESS ROOM, whether or not anyone asked. Measured 2026-08-04: an
       // agent INFERRED a room name from a naming convention and then spent a whole entry asking
@@ -710,10 +755,23 @@ try {
        * (`--replace`) and is then said out loud. The rooms already there are read back out of
        * the hook commands in the file — that is where this command wrote them.
        */
-      const already = Object.values(settings.hooks || {}).filter(Array.isArray).flat()
+      // ⚠ THE OTHER FILE TOO. A project that moved its hooks into the git-ignored
+      // `settings.local.json` (the workaround for the path leak, 2026-09-17 onwards) keeps them there
+      // on the machine it was done on; with a line in BOTH files every hook fires twice — two
+      // nudges, two heartbeats racing on the registry. So their rooms are read here, and the lines
+      // are taken out of the local file once the portable ones are in the tracked one.
+      const localFile = join(process.cwd(), ".claude", "settings.local.json")
+      let local = null
+      if (existsSync(localFile)) {
+        try { local = JSON.parse(readFileSync(localFile, "utf8")) } catch (e) {
+          throw new Error(`${localFile} is not valid JSON (${e.message}) — not touching it`)
+        }
+      }
+      const ourLines = cfg => Object.values(cfg?.hooks || {}).filter(Array.isArray).flat()
         .flatMap(g => g?.hooks || [])
         .map(h => String(h?.command || ""))
-        .filter(c => c.includes("set-agent-comm"))
+        .filter(c => store.hookOf(c) && !c.includes("--from-plugin"))
+      const already = [...ourLines(settings), ...ourLines(local)]
         .flatMap(c => store.parseRooms(c.match(/SET_AGENT_ROOM=(\S+)/)?.[1]))
       const kept = [...new Set(already)].filter(r => !want.includes(r))
       const rooms = replace ? want : [...kept, ...want]
@@ -726,11 +784,13 @@ try {
         }
       }
 
-      // ⚠ The INTERPRETER IS SPELLED OUT (`process.execPath`), never a bare `node`. Measured on
-      // a Mac mini: node lived in `~/.local/node/bin`, which reaches the PATH from `~/.zshrc` —
-      // and hooks do not run in an interactive shell. A bare `node` would have failed there
-      // with "command not found", which from the outside is a hook that simply never fires.
-      const env = `SET_AGENT_NAME=${AGENT} SET_AGENT_ROOM=${rooms.join(",")}`
+      // ⚠ NO MACHINE PATH GOES INTO THE FILE (2026-11-07, `store.portableHook`). This file is
+      // TRACKED; the old line spelled out `process.execPath` and this checkout's `hooks/…`, which a
+      // commit gate refuses (17 blocks on one fresh repo, reported 2026-11-01) and which broke every
+      // Stop hook on the other machine (2026-09-17). Every project that fixed the leak by hand lost
+      // its hooks — measured: 5 of 10 projects of one family with no hook at all. The line now finds
+      // `sac` at run time and says so out loud at session start where it is missing.
+      //
       // PostToolUse carries the SIGN OF LIFE: the registry's liveness field only ever got
       // written at session start, so a working seat looked silent (measured: 86 minutes).
       // It is fed by the machine because an agent-sent heartbeat costs a whole turn, and rate-
@@ -738,20 +798,20 @@ try {
       // PreToolUse on `Monitor` is the WATCH GUARD (native-doorbell, 2026-10-19): it declines an
       // inbox watch for a seat the doorbell reaches, because there the watch only buys 30-minute
       // expiries — measured ~51M tokens of re-read context in four weeks.
-      const scripts = { SessionStart: "session-start.mjs", Stop: "stop.mjs", PostToolUse: "heartbeat.mjs",
-                        PreToolUse: "watch-guard.mjs" }
+      const scripts = { SessionStart: "session-start", Stop: "stop", PostToolUse: "heartbeat",
+                        PreToolUse: "watch-guard" }
       const matchers = { PreToolUse: "Monitor" }
       const wanted = Object.fromEntries(Object.entries(scripts)
-        .map(([event, script]) => [event, `${env} ${process.execPath} ${join(HOOKS, script)}`]))
+        .map(([event, name]) => [event, store.portableHook(name, { agent: AGENT, rooms })]))
       const changes = []
       settings.hooks ||= {}
       for (const [event, command] of Object.entries(wanted)) {
         const groups = (settings.hooks[event] ||= [])
-        // Recognised by the SCRIPT NAME, not the full path — measured on the live `consumer-a`
-        // project, where the hook was already wired in as `$HOME/code2/…`, and matching on the
-        // absolute path did not see it. A re-run would then have added a second copy next to it.
-        const ours = h => (h.command || "").includes("set-agent-comm") &&
-          (h.command || "").includes(scripts[event])
+        // Recognised by the HOOK, in either form, never by the full path — measured on the live
+        // `consumer-a` project, where the hook was already wired in as `$HOME/code2/…`, and
+        // matching on the absolute path did not see it. A plugin's line is not the project's.
+        const ours = h => store.hookOf(h.command)?.hook === scripts[event] &&
+          !String(h.command || "").includes("--from-plugin")
         const mine = groups.flatMap(g => g.hooks || []).find(ours)
         if (!mine) {
           groups.push({ ...(matchers[event] && { matcher: matchers[event] }), hooks: [{ type: "command", command }] })
@@ -759,6 +819,12 @@ try {
         }
         else if (mine.command === command) changes.push(`${event}: already wired`)
         else if (rewrite) { mine.command = command; changes.push(`${event}: rewritten to the canonical form (--rewrite)`) }
+        else if (store.isPlainLegacyHook(mine.command)) {
+          // The old line exactly as an earlier `sac install` wrote it: nothing in it is anybody's
+          // decision but the machine path, which is the thing being removed.
+          mine.command = command
+          changes.push(`${event}: converted to the portable form — no machine path left in it`)
+        }
         else if (!/SET_AGENT_ROOM=\S+/.test(mine.command)) {
           mine.command = command
           changes.push(`${event}: replaced — the wired command had no SET_AGENT_ROOM to update`)
@@ -769,26 +835,46 @@ try {
           // children off the bus. A whole-command swap took both, silently. Everything outside
           // the two variables is someone's decision; `--rewrite` is the explicit way back.
           const edited = mine.command
-            .replace(/SET_AGENT_ROOM=\S+/, `SET_AGENT_ROOM=${rooms.join(",")}`)
+            .replace(/SET_AGENT_ROOM=\S+ ?/, rooms.length ? `SET_AGENT_ROOM=${rooms.join(",")} ` : "")
             .replace(/SET_AGENT_NAME=\S+/, `SET_AGENT_NAME=${AGENT}`)
           if (edited === mine.command) changes.push(`${event}: already wired`)
           else { mine.command = edited; changes.push(`${event}: rooms updated (the rest of the command kept as written)`) }
+          if (store.hookOf(mine.command)?.form === "path")
+            changes.push(`${event}: ⚠ hand-tuned, and it still names a path of THIS checkout — \`--rewrite\` converts it`)
         }
         wanted[event] = mine ? mine.command : command
+      }
+      // Out of the local file, now that the tracked one carries them (see `localFile` above).
+      const localDrop = []
+      if (local?.hooks) {
+        for (const [event, groups] of Object.entries(local.hooks)) {
+          if (!Array.isArray(groups)) continue
+          for (const g of groups) {
+            const before = (g.hooks || []).length
+            g.hooks = (g.hooks || []).filter(h => !(store.hookOf(h.command) && !String(h.command || "").includes("--from-plugin")))
+            if (g.hooks.length !== before) localDrop.push(event)
+          }
+          local.hooks[event] = groups.filter(g => (g.hooks || []).length || !("hooks" in g))
+          if (!local.hooks[event].length) delete local.hooks[event]
+        }
+        if (!Object.keys(local.hooks).length) delete local.hooks
+        for (const e of [...new Set(localDrop)])
+          changes.push(`${e}: removed from settings.local.json — it would have fired twice`)
       }
 
       // The SKILL is the third piece, next to the two hooks: the hooks make sure a message is
       // NOTICED, the skill says what to do with it. The tools (`send`, `inbox`) are a capability
       // and need no skill; the protocol around them — answer even when it is not for you, agree
       // before touching shared files, arm the monitor — does not fit into a hook's one-liner.
-      const sac = join(HOOKS, "..", "bin", "sac.mjs")
       const skillFrom = join(HOOKS, "..", "skills", "agent-comm", "SKILL.md")
       const skillTo = join(process.cwd(), ".claude", "skills", "agent-comm", "SKILL.md")
       // The commands are baked in at install time: the skill is a static file, and an agent
       // guessing at a path is an agent that silently does not watch.
       const skill = readFileSync(skillFrom, "utf8")
-        .replaceAll("{{ROOMS}}", rooms.join(", "))
-        .replaceAll("{{SAC}}", `${process.execPath} ${sac}`)
+        .replaceAll("{{ROOMS}}", rooms.length ? rooms.join(", ") : "none configured — only the rooms between this project and the others it talks to")
+        // ⚠ `sac`, NOT this machine's interpreter and checkout (2026-11-07): this copy is TRACKED,
+        // and the old one carried 17 home-directory paths into every project that installed it.
+        .replaceAll("{{SAC}}", "sac")
         // ⚠ THE SAME THREE CORRECTIONS THE SessionStart NOTE CARRIES — this copy had drifted from
         // it in all three, and the whole point of the note is that the two commands agree.
         // (1) The rooms go in the ENVIRONMENT, not the argument list: argued, they mean "watch
@@ -803,13 +889,13 @@ try {
         // between the Monitor and node, and the "die with the session" guard dies with it.
         .replaceAll("{{WAIT_COMMAND}}",
           (process.env.SET_AGENT_COMM_DIR ? `SET_AGENT_COMM_DIR=${process.env.SET_AGENT_COMM_DIR} ` : "") +
-          `SET_AGENT_NAME=${AGENT} SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${sac} wait`)
+          `SET_AGENT_NAME=${AGENT}${rooms.length ? ` SET_AGENT_ROOM=${rooms.join(",")}` : ""} sac wait`)
       const skillState = !existsSync(skillTo) ? "installed"
         : readFileSync(skillTo, "utf8") === skill ? "already current" : "updated"
       changes.push(`skill: ${skillState}`)
 
       console.log(`${dry ? "[dry run] " : ""}${file}`)
-      console.log(`  rooms: ${rooms.join(", ")}` +
+      console.log(`  rooms: ${rooms.join(", ") || "(none configured — the rooms between this project and others are derived)"}` +
         (kept.length && !replace ? `   (${kept.join(", ")} was already there and stays)` : ""))
       // Loud, and it names them: this is the one thing the command can take away.
       if (dropped.length) console.log(`  ⚠ REMOVED: ${dropped.join(", ")} — every session of this ` +
@@ -818,7 +904,8 @@ try {
       if (opened.length) console.log(`  rooms opened: ${opened.join(", ")}` +
         (opened.includes(AGENT) ? `   (${AGENT} is this project's own address — anyone can write to it)` : ""))
       for (const c of changes) console.log(`  ${c}`)
-      for (const [e, c] of Object.entries(wanted)) console.log(`  ${e} → ${c}`)
+      for (const [e, c] of Object.entries(wanted))
+        console.log(`  ${e} → ${store.hookOf(c)?.form === "portable" ? `sac hook ${store.hookOf(c).hook}` : c}`)
       console.log(`  skill  → ${skillTo}`)
       if (dry) break
       if (changes.every(c => c.endsWith("already wired") || c.endsWith("already current"))) break
@@ -826,7 +913,14 @@ try {
       // ⚠ settings.json is written ONLY when a hook changed. A skill-only update used to
       // re-serialise the whole file too (measured 2026-09-11: byte diff with no hook change) —
       // in a tracked, shared file that is a diff nobody asked for.
-      const hooksChanged = changes.some(c => !c.startsWith("skill:") && !c.endsWith("already wired"))
+      const hooksChanged = changes.some(c => !c.startsWith("skill:") && !c.endsWith("already wired") &&
+        !c.includes("⚠ hand-tuned") && !c.includes("removed from settings.local.json"))
+      if (localDrop.length) {
+        const bak = `${localFile}.bak.${store.now().replace(/[:.]/g, "-")}`
+        copyFileSync(localFile, bak)
+        console.log(`  backup: ${bak}`)
+        writeFileSync(localFile, JSON.stringify(local, null, 2) + "\n")
+      }
       if (hooksChanged) {
         store.ensureDir(dirname(file))
         // A backup before every write. This file is not ours, and it is not reconstructible.
@@ -849,6 +943,208 @@ try {
       console.log(`\nRestart (or resume) the session for it to take effect.\n` +
         `The MCP server, separately:  claude mcp add agent-comm -e SET_AGENT_ROOM=${rooms.join(",")} -- ` +
         `${process.execPath} ${join(HOOKS, "..", "src", "stdio.mjs")}`)
+      break
+    }
+    case "setup": {
+      /**
+       * THE MACHINE HALF of the portable hook line (2026-11-07). The line a project tracks finds
+       * `sac` on the PATH or in ~/.local/bin; this puts it there, as a two-line launcher that names
+       * THIS machine's interpreter and checkout — the two facts the tracked line may no longer carry.
+       * A symlink to sac.mjs would leave the interpreter to `#!/usr/bin/env node`, i.e. to the PATH
+       * of a non-interactive shell, which is the measured Mac-mini failure the old line spelled the
+       * interpreter out for. One machine, one file, outside every repository.
+       */
+      const force = rest.includes("--force")
+      const bin = join(process.env.HOME || homedir(), ".local", "bin")
+      const target = join(bin, "sac")
+      const me = resolve(HOOKS, "..", "bin", "sac.mjs")
+      const MARK = "# set-agent-comm launcher"
+      let ours = !existsSync(target)
+      let was = "absent"
+      try {
+        const st = lstatSync(target)
+        if (st.isSymbolicLink()) { was = "symlink"; ours = realpathSync(target) === realpathSync(me) }
+        else { was = "file"; ours = readFileSync(target, "utf8").includes(MARK) }
+      } catch { /* absent */ }
+      if (!ours && !force) throw new Error(`setup: ${target} exists and is not this launcher — not ` +
+        `replacing someone else's \`sac\`. Look at it, then \`sac setup --force\` if it should go.`)
+      const body = `#!/bin/sh\n${MARK}, written by \`sac setup\` on this machine.\n` +
+        `# It names this machine's node and checkout, which is why it lives here and in no project:\n` +
+        `# the hook line a project tracks finds \`sac\` and nothing else.\n` +
+        `exec "${process.execPath}" "${me}" "$@"\n`
+      const current = was === "file" && readFileSync(target, "utf8") === body
+      if (!current) {
+        store.ensureDir(bin)
+        if (was === "symlink") rmSync(target)
+        writeFileSync(target, body)
+        chmodSync(target, 0o755)
+      }
+      const onPath = (process.env.PATH || "").split(":").includes(bin)
+      json({ launcher: target, state: current ? "already current" : was === "absent" ? "installed" : `replaced (was a ${was})`,
+        node: process.execPath, checkout: dirname(dirname(me)), onPath,
+        ...(onPath ? {} : { note: `${bin} is not on this shell's PATH — the hook line falls back to it by name, ` +
+          `so hooks work; for your own shell add it to the PATH.` }) })
+      break
+    }
+    case "uninstall": {
+      /**
+       * Take THIS project's own bus hooks out — both settings files — and the skill copy. For a project
+       * whose plugin ships the same hooks (`--from-plugin` lines stand down while a project line
+       * exists, so the plugin only takes over once these are gone). Everything else in the files is
+       * left exactly as it is; each file is backed up before it is written.
+       */
+      const dry = rest.includes("--dry-run")
+      const keepSkill = rest.includes("--keep-skill")
+      const done = []
+      for (const name of ["settings.json", "settings.local.json"]) {
+        const f = join(process.cwd(), ".claude", name)
+        if (!existsSync(f)) continue
+        let cfg
+        try { cfg = JSON.parse(readFileSync(f, "utf8")) } catch (e) {
+          throw new Error(`${f} is not valid JSON (${e.message}) — not touching it`)
+        }
+        const events = []
+        for (const [event, groups] of Object.entries(cfg.hooks || {})) {
+          if (!Array.isArray(groups)) continue
+          for (const g of groups) {
+            const before = (g.hooks || []).length
+            g.hooks = (g.hooks || []).filter(h => !(store.hookOf(h.command) && !String(h.command || "").includes("--from-plugin")))
+            if (g.hooks.length !== before) events.push(event)
+          }
+          cfg.hooks[event] = groups.filter(g => (g.hooks || []).length || !("hooks" in g))
+          if (!cfg.hooks[event].length) delete cfg.hooks[event]
+        }
+        if (cfg.hooks && !Object.keys(cfg.hooks).length) delete cfg.hooks
+        if (!events.length) continue
+        done.push(`${name}: removed ${[...new Set(events)].join(", ")}`)
+        if (dry) continue
+        copyFileSync(f, `${f}.bak.${store.now().replace(/[:.]/g, "-")}`)
+        writeFileSync(f, JSON.stringify(cfg, null, 2) + "\n")
+      }
+      const skill = join(process.cwd(), ".claude", "skills", "agent-comm", "SKILL.md")
+      if (!keepSkill && existsSync(skill)) {
+        done.push(`skill: removed ${skill}`)
+        if (!dry) {
+          rmSync(skill)
+          // The skill folder goes too once nothing of ours is left in it (a hand-made .bak stays).
+          try { if (!readdirSync(dirname(skill)).length) rmSync(dirname(skill), { recursive: true }) } catch { }
+        }
+      }
+      console.log(`${dry ? "[dry run] " : ""}${process.cwd()}`)
+      for (const d of done.length ? done : ["nothing of set-agent-comm's is wired here"]) console.log(`  ${d}`)
+      break
+    }
+    case "plugin-files": {
+      /**
+       * WHAT A PLUGIN SHIPS to put every project it is installed in on the bus (2026-11-07, asked for
+       * by a family of projects whose shared plugin is in all of them): the four hook lines, marked
+       * `--from-plugin`, and the agent-comm skill, both with no path of any machine. No room is
+       * configured — a project's rooms with the projects it talks to are derived (`projectRoom`).
+       * An existing hooks.json is MERGED: its other hooks stay, only our lines are replaced.
+       */
+      const dry = rest.includes("--dry-run")
+      const [dir] = rest.filter(a => !a.startsWith("--"))
+      if (!dir) throw new Error("usage: sac plugin-files <plugin-dir> [--dry-run]")
+      const hooksFile = join(resolve(dir), "hooks", "hooks.json")
+      let cfg = {}
+      if (existsSync(hooksFile)) {
+        try { cfg = JSON.parse(readFileSync(hooksFile, "utf8")) } catch (e) {
+          throw new Error(`${hooksFile} is not valid JSON (${e.message}) — not touching it`)
+        }
+      }
+      cfg.hooks ||= {}
+      const lines = { SessionStart: "session-start", Stop: "stop", PostToolUse: "heartbeat", PreToolUse: "watch-guard" }
+      for (const [event, name] of Object.entries(lines)) {
+        const groups = (cfg.hooks[event] || []).map(g => ({ ...g,
+          hooks: (g.hooks || []).filter(h => store.hookOf(h.command)?.hook !== name) }))
+          .filter(g => g.hooks.length)
+        groups.push({ ...(event === "PreToolUse" && { matcher: "Monitor" }),
+          hooks: [{ type: "command", command: store.portableHook(name, { plugin: true }) }] })
+        cfg.hooks[event] = groups
+      }
+      const skillTo = join(resolve(dir), "skills", "agent-comm", "SKILL.md")
+      const skill = readFileSync(join(HOOKS, "..", "skills", "agent-comm", "SKILL.md"), "utf8")
+        .replaceAll("{{ROOMS}}", "the rooms between this project and the others it talks to")
+        .replaceAll("{{SAC}}", "sac")
+        .replaceAll("{{WAIT_COMMAND}}", "sac wait")
+      if (!dry) {
+        store.ensureDir(dirname(hooksFile)); writeFileSync(hooksFile, JSON.stringify(cfg, null, 2) + "\n")
+        store.ensureDir(dirname(skillTo)); writeFileSync(skillTo, skill)
+      }
+      json({ dry, hooks: hooksFile, skill: skillTo,
+        lines: Object.fromEntries(Object.entries(lines).map(([e, n]) => [e, store.portableHook(n, { plugin: true })])),
+        note: "A project that still wires its own hooks keeps them, and the plugin's copy stands down there " +
+          "(no double firing). `sac uninstall` in such a project hands it over to the plugin." })
+      break
+    }
+    case "doctor": {
+      /**
+       * IS EACH PROJECT ACTUALLY ON THE BUS — answered from the files, per project (2026-11-07). The
+       * question a family's daily check asks, and the one that took a whole evening to answer by hand
+       * on this machine: which projects have hooks at all (5 of 10 had none), in which file and which
+       * form, whether a session is alive, how far it has read, what is waiting for it, and whether a
+       * sender can ring it. `beat` is the newest heartbeat any seat sent — hooks that run leave one,
+       * so a plugin's hooks (which no project file shows) are visible there.
+       */
+      const { value: glob, rest: r1 } = takeFlag(rest, "--project")
+      const asJson = r1.includes("--json")
+      const re = glob ? new RegExp(`^${glob.split("*").map(x => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`) : null
+      const reg = JSON.parse(readFileSync(join(store.ROOT, "registry.json"), "utf8"))
+      // A project that only ever reached the bus through the CLI or MCP has no path on record; set-core's
+      // project list (optional, read-only — like the Fleet roster) can still say where it lives.
+      let known = {}
+      try { known = JSON.parse(readFileSync(join(process.env.HOME || homedir(), ".config", "set-core", "projects.json"), "utf8")).projects || {} } catch { }
+      const report = []
+      for (const a0 of Object.values(reg.agents || {})) {
+        if (!a0?.agent || a0.agent.includes("@")) continue
+        if (re && !re.test(a0.agent)) continue
+        const a = { ...a0, project: a0.project || known[a0.agent]?.path || null }
+        if (!a.project) { report.push({ project: a.agent, path: null, hooks: Object.fromEntries(store.HOOK_NAMES.map(n => [n, []])),
+          beat: null, live: [], rooms: [], lastRead: {}, waiting: {}, ringable: {}, verdict: "off",
+          problems: ["no path on record — its settings cannot be checked"] }); continue }
+        const wiring = [...store.hookWiring(a.project), ...store.pluginHookWiring(a.project)]
+        const by = name => wiring.filter(w => w.hook === name)
+        const seats = store.agents().find(x => x.agent === a.agent)?.seats || []
+        const live = seats.filter(x => x.live !== false)
+        // The newest sign of life any seat gave — a heartbeat, a check-in or a CLI call; not proof of hooks.
+        const beat = seats.map(x => x.lastSeen).filter(Boolean).sort().at(-1) || null
+        const configured = [...new Set(wiring.flatMap(w => store.parseRooms(w.command.match(/SET_AGENT_ROOM=(\S+)/)?.[1])))]
+        const rooms = [...new Set([...configured, ...store.projectRoomsOf(a.agent)])].sort()
+        const reads = store.lastReads(a.agent)
+        const waiting = {}
+        for (const s of live) for (const room of store.wakingRooms(s.writer, configured)) {
+          try {
+            const r = store.inbox({ room, agent: s.writer, advance: false, limit: 1 })
+            if (r.unreadWaking) waiting[room] = Math.max(waiting[room] || 0, r.unreadWaking)
+          } catch { /* a room it may not read is not one it is waiting in */ }
+        }
+        const problems = []
+        if (!wiring.length) problems.push("no bus hook — not in .claude/settings*.json, not in an installed plugin: OFF the bus")
+        for (const n of store.HOOK_NAMES) {
+          const w = by(n).filter(x => !x.plugin)
+          if (w.length > 1) problems.push(`${n} wired ${w.length}× (${w.map(x => x.file).join(", ")}) — fires twice`)
+        }
+        if (wiring.some(w => w.form === "path" && w.file === "settings.json")) problems.push("a machine path in the TRACKED settings.json — `sac install` converts it")
+        if (wiring.length && !by("stop").length) problems.push("no Stop hook — unread mail is never caught at the end of a turn")
+        report.push({ project: a.agent, path: a.project,
+          hooks: Object.fromEntries(store.HOOK_NAMES.map(n => [n, by(n).map(w => `${w.file}:${w.form}${w.plugin ? ":plugin" : ""}`)])),
+          beat, live: live.map(x => x.writer), rooms, lastRead: reads,
+          waiting, ringable: Object.fromEntries(live.map(x => [x.writer, store.ringable(x.writer).why])),
+          verdict: !wiring.length ? "off" : problems.length ? "warn" : "ok", problems })
+      }
+      report.sort((x, y) => x.project.localeCompare(y.project))
+      if (asJson) { json({ schema: "sac.doctor/1", projects: report }); break }
+      for (const p of report) {
+        const mark = p.verdict === "ok" ? "✔" : p.verdict === "off" ? "✖" : "⚠"
+        console.log(`${mark} ${p.project}   ${p.path}`)
+        console.log(`    hooks: ${store.HOOK_NAMES.map(n => `${n}=${p.hooks[n].join("+") || "—"}`).join("  ")}`)
+        console.log(`    last seen: ${p.beat || "never"}   live: ${p.live.join(", ") || "none"}`)
+        console.log(`    rooms: ${p.rooms.map(r => `${r} (read ${p.lastRead[r] || "never"})`).join(", ") || "none"}`)
+        if (Object.keys(p.waiting).length) console.log(`    waiting for it: ${Object.entries(p.waiting).map(([r, n]) => `${n} in ${r}`).join(", ")}`)
+        if (p.live.length) console.log(`    ringable: ${Object.entries(p.ringable).map(([s, w]) => `${s}=${w}`).join(", ")}`)
+        for (const x of p.problems) console.log(`    ⚠ ${x}`)
+      }
+      if (!report.length) console.log(`(no local project${glob ? ` matches '${glob}'` : ""})`)
       break
     }
     case "sync": {
@@ -1461,6 +1757,8 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac join <room> [--create]          THIS SESSION enters a room — membership is per seat
   sac part <room>                     …and leaves it; it sticks, the hook will not put you back
   sac dm <seat|name>                  a room of TWO: opens it, joins you, puts that seat in it
+  sac dm <project>                    …or the room between YOUR project and that one: every session
+                                      of both, today's and tomorrow's (a --to <project> opens it too)
   sac alias <name…>                   name THIS window, so others can write to it by that name
        [--to <seat|project|label>]    … or name another one · --rm <name…> · no args: the book
   sac owner [--json]                  what waits on YOU, the human: entries to \`owner\` nobody answered
@@ -1475,8 +1773,13 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac peek <room> [--mine]            the same, without moving the cursor
   sac unread <room> [n]               make the last n messages unread again
   sac history <room> [n]              read back
-  sac install <room>[,…] [--dry-run]  hooks + skill into THIS PROJECT — the default rooms every
-                                      session of it starts in (adds; --replace to cut it down)
+  sac install [<room>,…] [--dry-run]  hooks + skill into THIS PROJECT, with no machine path in them —
+                                      the default rooms every session of it starts in (adds; --replace)
+  sac uninstall [--dry-run]           …takes them out again (both settings files, and the skill copy)
+  sac setup                           THIS MACHINE: the \`sac\` launcher the portable hook line finds
+  sac hook <name> [--from-plugin]     run a hook — what the line in settings.json calls
+  sac plugin-files <dir>              the hook lines + skill a PLUGIN ships, path-free
+  sac doctor [--project <glob>]       is each project on the bus: hooks, seats, rooms, reads, waiting
   sac quiet [--for 2h] [--off]        stop being woken; delivery is unaffected
   sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)
   sac watch-paths <room>              the files to watch (for the hook)

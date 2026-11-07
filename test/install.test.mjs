@@ -28,6 +28,9 @@ const install = (...args) => spawnSync(process.execPath, [SAC, "install", ...arg
 })
 const settings = () => JSON.parse(readFileSync(FILE, "utf8"))
 const commands = (s, event) => (s.hooks?.[event] || []).flatMap(g => g.hooks || []).map(h => h.command)
+// Our line for a hook, in either form: the portable `sac hook <name>` (2026-11-07) or the old path.
+const isOurs = (c, name) => new RegExp(`\\bhook ${name}\\b|hooks/${name}\\.mjs`).test(c)
+const ourLine = (s, event, name) => commands(s, event).find(c => isOurs(c, name))
 
 writeFileSync(FILE, JSON.stringify({
   hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo someone-elses-hook" }] }] },
@@ -40,16 +43,40 @@ test("it adds all three hooks and leaves everything else alone", () => {
   const s = settings()
   assert.ok(commands(s, "SessionStart").includes("echo someone-elses-hook"), "it dropped another hook")
   assert.deepEqual(s.env, { FOO: "bar" }, "it touched a part of the file that is none of its business")
-  assert.equal(commands(s, "SessionStart").filter(c => c.includes("session-start.mjs")).length, 1)
-  assert.equal(commands(s, "Stop").filter(c => c.includes("stop.mjs")).length, 1)
+  assert.equal(commands(s, "SessionStart").filter(c => isOurs(c, "session-start")).length, 1)
+  assert.equal(commands(s, "Stop").filter(c => isOurs(c, "stop")).length, 1)
   // The third one is the sign of life. Without it the registry's liveness field is written
   // once, at session start, and a seat that works for an hour reads as silent for an hour.
-  assert.equal(commands(s, "PostToolUse").filter(c => c.includes("heartbeat.mjs")).length, 1)
-  // The interpreter is an absolute path, not a bare `node`: hooks run in a non-interactive
-  // shell, and on macOS node commonly lives under the home directory, reaching PATH only from
-  // an interactive profile. A bare `node` there is a hook that silently never fires.
-  for (const c of [...commands(s, "SessionStart"), ...commands(s, "Stop"), ...commands(s, "PostToolUse")].filter(c => c.includes(".mjs")))
-    assert.match(c, /\s\/\S*node\S*\s/, `the hook command relies on PATH: ${c}`)
+  assert.equal(commands(s, "PostToolUse").filter(c => isOurs(c, "heartbeat")).length, 1)
+  // ⚠ NO MACHINE PATH IN THE LINE (2026-11-07). The file is tracked: the old line spelled out this
+  // machine's node and checkout, a commit gate refused it, and the other machine's Stop hook broke.
+  // Nor a bare `node`: hooks run in a non-interactive shell where node may not be on the PATH (a
+  // Mac mini, measured) — so the line finds `sac`, falling back to ~/.local/bin, and the launcher
+  // carries the interpreter.
+  for (const [event, name] of [["SessionStart", "session-start"], ["Stop", "stop"], ["PostToolUse", "heartbeat"]]) {
+    const c = ourLine(s, event, name)
+    assert.ok(!c.includes(process.execPath), `${event} names this machine's node: ${c}`)
+    assert.ok(!c.includes(SAC.replace(/bin\/sac\.mjs$/, "")), `${event} names this checkout: ${c}`)
+    assert.doesNotMatch(c, /(^|\s)node\s/, `${event} relies on node being on the PATH: ${c}`)
+    assert.match(c, /\$HOME\/\.local\/bin\/sac/, `${event} has no fallback for a PATH without ~/.local/bin`)
+  }
+})
+
+test("the tracked files it writes carry NO path of this machine — the commit-gate acceptance", () => {
+  // Asked for 2026-11-01 (a family of projects, measured: 17 home-path blocks from `set-leakscan
+  // --staged` on one fresh repo after `sac install`). Acceptance: nothing under .claude/ names the
+  // interpreter or the checkout. Read back from the disk, not from what install says it wrote.
+  const leaks = []
+  const walk = d => { for (const f of readdirSync(d, { withFileTypes: true })) {
+    const p = join(d, f.name)
+    if (f.isDirectory()) walk(p)
+    else if (!f.name.includes(".bak.")) {
+      const t = readFileSync(p, "utf8")
+      if (t.includes(process.execPath) || t.includes(dirname(dirname(SAC)))) leaks.push(p)
+    }
+  } }
+  walk(join(PROJ, ".claude"))
+  assert.deepEqual(leaks, [], "a machine path reached a tracked file")
 })
 
 test("it installs the skill too, with the commands baked in", () => {
@@ -58,7 +85,7 @@ test("it installs the skill too, with the commands baked in", () => {
   // a path is an agent that silently does not watch.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   assert.doesNotMatch(skill, /\{\{/, "a placeholder was left in the installed skill")
-  assert.match(skill, /Monitor\(\{ command: ".*sac\.mjs wait"/, "the watch command is not spelled out")
+  assert.match(skill, /Monitor\(\{ command: "[^"]*\bsac wait"/, "the watch command is not spelled out")
   assert.match(skill, /^---\nname: agent-comm$/m, "the frontmatter is not what Claude Code reads")
 })
 
@@ -75,7 +102,7 @@ test("running it again changes nothing — no second copy", () => {
 
 test("a changed room UPDATES the command instead of adding another one", () => {
   install("team,design")
-  const cmds = commands(settings(), "SessionStart").filter(c => c.includes("session-start.mjs"))
+  const cmds = commands(settings(), "SessionStart").filter(c => isOurs(c, "session-start"))
   assert.equal(cmds.length, 1, "the old command was left in place next to the new one")
   assert.match(cmds[0], /SET_AGENT_ROOM=team,design/)
 })
@@ -91,7 +118,7 @@ test("REGRESSION: it recognises an entry written with $HOME, not just an absolut
     }] }] },
   }, null, 2))
   install("team")
-  assert.equal(commands(settings(), "SessionStart").filter(c => c.includes("session-start.mjs")).length, 1,
+  assert.equal(commands(settings(), "SessionStart").filter(c => isOurs(c, "session-start")).length, 1,
     "the same hook ended up in the file twice")
 })
 
@@ -110,8 +137,8 @@ test("a new room is ADDED to the project's rooms — it does not replace them", 
   const r = install("bugfix")
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /rooms: team, design, bugfix/, "the resulting list is not stated")
-  for (const event of ["SessionStart", "Stop", "PostToolUse"]) {
-    const c = commands(settings(), event).find(c => c.includes("set-agent-comm") || c.includes(".mjs"))
+  for (const [event, name] of [["SessionStart", "session-start"], ["Stop", "stop"], ["PostToolUse", "heartbeat"]]) {
+    const c = ourLine(settings(), event, name)
     assert.match(c, /SET_AGENT_ROOM=team,design,bugfix /, `${event} lost a room`)
   }
 })
@@ -120,7 +147,7 @@ test("--replace does cut it down, and says out loud which rooms it took", () => 
   const r = install("bugfix", "--replace")
   assert.match(r.stdout, /REMOVED: team, design/, "it took two rooms away without naming them")
   assert.match(r.stdout, /sac part/, "…and without pointing at the per-session way to leave one")
-  const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
+  const c = ourLine(settings(), "SessionStart", "session-start")
   assert.match(c, /SET_AGENT_ROOM=bugfix /)
 })
 
@@ -183,26 +210,58 @@ test("an unchanged room list leaves a hand-tuned command byte-for-byte alone", (
   for (const event of ["SessionStart", "Stop", "PostToolUse"])
     assert.deepEqual(after.hooks[event], before.hooks[event], `${event}: it rewrote a command whose rooms were already right`)
   const guard = after.hooks.PreToolUse?.find(g => g.matcher === "Monitor")
-  assert.ok(guard?.hooks?.[0]?.command.includes("watch-guard.mjs"), "the watch guard was not added")
+  assert.ok(isOurs(guard?.hooks?.[0]?.command || "", "watch-guard"), "the watch guard was not added")
 })
 
 test("--rewrite restores the canonical command, and says so", () => {
   customFile("team")
   const r = install("team", "--rewrite")
-  const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
+  const c = ourLine(settings(), "SessionStart", "session-start")
   assert.doesNotMatch(c, /APPLY_CYCLE_CHILD|sh -c/, "--rewrite kept the hand-tuned form")
-  assert.match(c, /\s\/\S*node\S*\s/)
+  assert.match(c, /"\$S" hook session-start/, "--rewrite did not write the portable form")
   assert.match(r.stdout, /rewritten/, "a full rewrite happened without being named")
 })
 
-test("a command with no SET_AGENT_ROOM in it is replaced — out loud", () => {
+test("an old line exactly as install wrote it is CONVERTED to the portable form — out loud", () => {
   writeFileSync(FILE, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{
     type: "command", command: "node $HOME/set-agent-comm/hooks/session-start.mjs",
   }] }] } }, null, 2))
   const r = install("team")
-  const c = commands(settings(), "SessionStart").find(c => c.includes("session-start.mjs"))
+  const c = ourLine(settings(), "SessionStart", "session-start")
   assert.match(c, /SET_AGENT_ROOM=team /)
-  assert.match(r.stdout, /no SET_AGENT_ROOM/, "the replacement was silent")
+  assert.doesNotMatch(c, /hooks\/session-start\.mjs/, "the machine path survived")
+  assert.match(r.stdout, /converted to the portable form/, "the conversion was silent")
+})
+
+test("a hook left in settings.local.json is taken OUT — one line per hook, never two", () => {
+  // The workaround for the path leak moved the hooks into the git-ignored local file (measured on a
+  // consumer project, 2026-09-17). With the portable line in the tracked file too, every hook would
+  // fire twice: two nudges, two heartbeats racing on the shared registry.
+  const LOCAL = join(PROJ, ".claude", "settings.local.json")
+  writeFileSync(FILE, "{}")
+  writeFileSync(LOCAL, JSON.stringify({ permissions: { allow: ["Bash(ls)"] }, hooks: {
+    Stop: [{ hooks: [{ type: "command",
+      command: `SET_AGENT_NAME=proj SET_AGENT_ROOM=promo ${process.execPath} /x/set-agent-comm/hooks/stop.mjs` }] }],
+    PostToolUse: [{ hooks: [{ type: "command", command: "echo someone-elses-local-hook" }] }],
+  } }, null, 2))
+  const r = install()
+  assert.equal(r.status, 0, r.stderr)
+  const local = JSON.parse(readFileSync(LOCAL, "utf8"))
+  assert.equal(local.hooks?.Stop, undefined, "the old line stayed next to the new one")
+  assert.deepEqual(local.permissions, { allow: ["Bash(ls)"] }, "it touched what is none of its business")
+  assert.deepEqual(commands(local, "PostToolUse"), ["echo someone-elses-local-hook"], "it took someone else's hook")
+  assert.match(ourLine(settings(), "Stop", "stop"), /SET_AGENT_ROOM=promo /, "the local line's rooms were lost")
+  assert.match(r.stdout, /removed from settings\.local\.json/)
+  assert.ok(readdirSync(join(PROJ, ".claude")).some(f => f.startsWith("settings.local.json.bak.")), "no backup")
+  rmSync(LOCAL)
+})
+
+test("no room at all is a valid install — the line carries no SET_AGENT_ROOM", () => {
+  writeFileSync(FILE, "{}")
+  const r = install()
+  assert.equal(r.status, 0, r.stderr)
+  assert.doesNotMatch(ourLine(settings(), "Stop", "stop"), /SET_AGENT_ROOM/)
+  install("team")                  // the skill tests below read the file this suite leaves behind
 })
 
 // ── the watch command the skill hands the agent ─────────────────────────────────────────────
@@ -227,7 +286,7 @@ test("the skill's watch command SEEDS the rooms in the environment, never as arg
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
   assert.match(line, /SET_AGENT_ROOM=team/, "the room list is not in the environment")
-  assert.match(line, /sac\.mjs wait"/, "a room was argued to `wait` — it pins the list")
+  assert.match(line, /\bsac wait"/, "a room was argued to `wait` — it pins the list")
 })
 
 test("…and it carries SET_AGENT_COMM_DIR, so the watch is on the store the hook uses", () => {

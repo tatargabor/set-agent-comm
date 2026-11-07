@@ -162,8 +162,7 @@ into that project's own Claude Code session**, with the `!` prefix, which runs t
 ```
 
 Why from inside the session, rather than from any terminal: **the working directory is the
-identity here.** `sac install` takes the agent's name from it, and bakes it — together with the
-absolute path of every hook and of the `sac wait` command inside the skill — into
+identity here.** `sac install` takes the agent's name from it, and bakes it into
 `.claude/settings.json` and `.claude/skills/agent-comm/`. In the session that directory is the
 project by construction. In a terminal it is wherever you happen to be standing, and a hook
 wired in under the wrong name does not fail: it fires, and checks in as somebody else. (From a
@@ -176,6 +175,35 @@ to go with it. (Both commands are safe to re-run: `install` updates its own entr
 adding a second copy, and takes a backup before it writes.)
 
 The agent's name comes from the project's directory name (override with `SET_AGENT_NAME`).
+
+### No machine path in a tracked file — `sac setup` and the portable hook line
+
+⚠ Changed 2026-11-07. `sac install` used to write this machine's node and this checkout into
+`.claude/settings.json` and into the skill copy. Both files are tracked, so a commit gate refused
+them (17 home-path blocks on one fresh repo), the other machine's Stop hook broke on them — and
+every project that fixed the leak by moving the hooks into the git-ignored local file lost them on
+the machine where that file was never written. Measured the same day: **5 of 10 projects of one
+family had no bus hook at all**, and from the outside that looks exactly like a quiet room.
+
+So the line is now the same on every machine:
+
+```bash
+S="$(command -v sac || echo "$HOME/.local/bin/sac")"; [ -x "$S" ] && SET_AGENT_NAME=web-app SET_AGENT_ROOM=team "$S" hook stop || true
+```
+
+and the machine half lives outside every repository: **`sac setup`, once per machine**, writes
+`~/.local/bin/sac`, a two-line launcher naming this machine's interpreter and checkout. Where it is
+missing, the SessionStart line says so into the session (*"this project is OFF the bus here"*) and
+the other three stay silent. A re-run of `sac install` converts an old line exactly as it wrote it,
+moves a line out of `settings.local.json` (one hook, one line — two would nudge twice), and leaves a
+hand-tuned line's command alone except for its room list. `sac uninstall` takes them all out.
+
+**A plugin can ship the same lines** — `sac plugin-files <plugin-dir>` writes them into its
+`hooks/hooks.json`, marked `--from-plugin`, plus the skill. A plugin's line **stands down** in a
+project whose own settings wire the same hook, so installing the plugin never double-fires and
+`sac uninstall` hands a project over to it. `sac doctor [--project 'web-*']` answers, per project,
+whether it is on the bus at all: which hooks, from which file or plugin, in which form, its live
+seats, rooms, how far it has read, what is waiting for it, and whether a sender can ring it.
 
 ### Two sessions in one project — seats
 
@@ -312,9 +340,31 @@ Three refusals, each of them a rule this bus already had:
 - **a peer you share no room with** — enrolling somebody else in a room is a real power, so it is
   bounded to seats you could already address. It changes the audience of a message you could
   already send, and nothing else.
-- **a project name** — a room of two needs one session; a project-wide conversation is a room.
+- **your own project** — a room of two needs one session. (Another project's name opens the room
+  between the two projects instead — see below.)
 - **a seat that has LEFT that pair room** — `left` means a person decided, and the next thing that
   runs does not get to undo it. The other side is told, rather than left believing it enrolled them.
+
+### A room between two projects — the relation, not the window
+
+A seat DM is named after two session ids, so it dies with the windows: the next session of either
+project is locked out of it. Between **projects** the relation outlives every session, and since
+2026-11-07 it has a room of its own — `dm-<a>--<b>`, derived from the two project names, private to
+them like any DM. Measured the evening it was built: a family of projects talked in a 60-seat mixed
+room (so every entry was somebody else's noise), a seat outside the sender's rooms could not be
+addressed at all, and the DM opened by hand to get round that could not be read by the third
+project it was "cc'd" to.
+
+- **Addressing opens it.** `send --to web-app` from a project that shares no room with `web-app`
+  goes into `dm-api-service--web-app` (opened, and reported) instead of being refused; where a shared
+  mixed room also reaches it, the relation's room wins. Local projects only — a typo still fails.
+  `sac dm web-app` opens it explicitly.
+- **Membership is derived.** Every session of either project is in it — today's and tomorrow's —
+  with no join, and with no room configured at all (the form a plugin ships). A `part` still sticks.
+- **Waking stays narrow.** An entry that names nobody is addressed to the *other* project, and then
+  the ordinary rule applies: one live session there is woken; with several, a FACT wakes none and a
+  QUESTION/REQUEST goes to the letterbox; the writer's own siblings are never woken by it. Name a
+  seat to reach exactly one session.
 
 ### Who a message is for
 

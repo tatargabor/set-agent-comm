@@ -3219,6 +3219,129 @@ export function setDoorbell(seat, patch) {
 }
 
 /**
+ * WHERE A PROJECT WIRES THE BUS — read from its own settings files, never from a guess.
+ *
+ * Every hook line this bus has ever written is recognised: the old form (`…/set-agent-comm/hooks/
+ * stop.mjs`, an absolute machine path) and the portable one (`sac hook stop`, 2026-11-07). `form`
+ * says which, because the old one in a TRACKED file is the leak a commit gate refuses, and in a
+ * local file it is merely this machine's. A line carrying `--from-plugin` is the plugin's, not the
+ * project's, and is reported apart.
+ */
+export const HOOK_NAMES = ["session-start", "stop", "heartbeat", "watch-guard"]
+
+/** Which of our hooks a command line runs, in either form — or `null`. */
+export function hookOf(command) {
+  const c = String(command || "")
+  const portable = c.match(/\bsac\b.*\bhook (session-start|stop|heartbeat|watch-guard)\b/)
+  if (portable) return { hook: portable[1], form: "portable" }
+  const legacy = c.includes("set-agent-comm") && c.match(/hooks\/([a-z-]+)\.mjs/)
+  if (legacy && HOOK_NAMES.includes(legacy[1])) return { hook: legacy[1], form: "path" }
+  return null
+}
+
+/**
+ * THE PORTABLE HOOK LINE — what `sac install` writes and what a plugin ships (2026-11-07). No path
+ * of any machine is in it: `sac` is found on the PATH, or in `~/.local/bin` (where `sac setup` puts
+ * it) for a shell that did not get the interactive PATH — the reason the old form spelled out the
+ * interpreter (measured on a Mac mini: node reached PATH only from `~/.zshrc`).
+ *
+ * ⚠ A MACHINE WITHOUT `sac` IS SAID OUT LOUD, ONCE, AT SESSION START — into the model's context,
+ * where it can be acted on — and the other three stay silent (`|| true`): a hook that errors on
+ * every tool call is noise that teaches people to ignore hook errors. The failure being prevented is
+ * the measured one: a project quietly off the bus, looking exactly like a quiet room.
+ */
+export const MISSING_SAC_NOTE = JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart",
+  additionalContext: "[set-agent-comm] ⚠ `sac` is not installed on this machine (not on PATH, not in " +
+    "~/.local/bin), so this project is OFF the bus here: no wake-ups, no unread-mail check, no heartbeat. " +
+    "Fix: run `bin/sac.mjs setup` from a set-agent-comm checkout on this machine, then restart the session." } })
+export function portableHook(name, { agent = null, rooms = [], plugin = false } = {}) {
+  if (!HOOK_NAMES.includes(name)) throw new Error(`portableHook: unknown hook '${name}'`)
+  const env = [agent && `SET_AGENT_NAME=${agent}`, rooms.length && `SET_AGENT_ROOM=${rooms.join(",")}`]
+    .filter(Boolean).join(" ")
+  const find = `S="$(command -v sac || echo "$HOME/.local/bin/sac")"`
+  const run = `${env ? `${env} ` : ""}"$S" hook ${name}${plugin ? " --from-plugin" : ""}`
+  return name === "session-start"
+    ? `${find}; if [ -x "$S" ]; then ${run}; else echo '${MISSING_SAC_NOTE}'; fi`
+    : `${find}; [ -x "$S" ] && ${run} || true`
+}
+
+/**
+ * Is this an UNEDITED line of the old form — env, an interpreter, our script, nothing else? Only such
+ * a line is converted to the portable one without being asked; anything with more in it (a guard, a
+ * `sh -c` that finds node itself — measured 2026-09-11 on a consumer project) is somebody's work.
+ */
+export const isPlainLegacyHook = command =>
+  /^(?:[A-Z_]+=\S+ )*\S*node\S* \S*set-agent-comm\/hooks\/[a-z-]+\.mjs$/.test(String(command || "").trim())
+
+export function hookWiring(dir) {
+  const out = []
+  for (const file of ["settings.json", "settings.local.json"]) {
+    const path = join(dir || ".", ".claude", file)
+    const hooks = readJson(path, null)?.hooks
+    if (!hooks || typeof hooks !== "object") continue
+    for (const [event, groups] of Object.entries(hooks)) {
+      for (const g of Array.isArray(groups) ? groups : []) {
+        for (const h of g?.hooks || []) {
+          const c = String(h?.command || "")
+          const of = hookOf(c)
+          if (!of) continue
+          out.push({ file, event, ...of, plugin: c.includes("--from-plugin"), command: c })
+        }
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * How far a PROJECT has read, per room — the furthest cursor any of its seats holds, as the time of
+ * the newest entry it has taken in. For `sac doctor`: a read cursor is per SESSION (`room::seat`),
+ * so a reader who looks at one seat's cursor sees "never" for a project that read yesterday.
+ */
+export function lastReads(project) {
+  const out = {}
+  for (const [key, seen] of Object.entries(readJson(CURSORS, {}))) {
+    const i = key.indexOf("::")
+    if (i < 0 || projectOf(key.slice(i + 2)) !== project) continue
+    const room = key.slice(0, i)
+    for (const ts of Object.values(seen || {})) if (!out[room] || t(ts) > t(out[room])) out[room] = ts
+  }
+  return out
+}
+
+/**
+ * The bus hooks a PLUGIN brings into this project — read from Claude Code's own record of what is
+ * installed where (`plugins/installed_plugins.json`: user scope, or local/project scope at this
+ * path) and each plugin's `hooks/hooks.json`. No project file shows these, which is why `sac doctor`
+ * reads them here instead of guessing from a heartbeat.
+ */
+export function pluginHookWiring(dir) {
+  const out = []
+  const installed = readJson(join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+    "plugins", "installed_plugins.json"), null)?.plugins || {}
+  const here = dir ? resolve(dir) : null
+  for (const [plugin, entries] of Object.entries(installed)) {
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (e?.scope !== "user" && (!e?.projectPath || resolve(e.projectPath) !== here)) continue
+      const hooks = readJson(join(e.installPath || "", "hooks", "hooks.json"), null)?.hooks || {}
+      for (const [event, groups] of Object.entries(hooks)) {
+        for (const g of Array.isArray(groups) ? groups : []) {
+          for (const h of g?.hooks || []) {
+            const of = hookOf(h?.command)
+            if (of) out.push({ file: `plugin ${plugin.split("@")[0]}@${e.version || "?"}`, event, ...of, plugin: true,
+                               command: String(h.command) })
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
+/** Does the PROJECT itself (not a plugin) wire this hook? A plugin's copy stands down if so. */
+export const projectWiresHook = (dir, name) => hookWiring(dir).some(w => w.hook === name && !w.plugin)
+
+/**
  * The `crossSessionInbound` that applies, from the files Claude Code reads. Approximated, and in
  * the safe direction: any `refuse` wins, then `hold`, then an EXPLICIT `accept`. A wrong "accept"
  * would cost a held dialog in somebody's window, so nothing short of the literal word counts; an

@@ -142,8 +142,17 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   (`sac owner`, schema `sac.owner/1`, the only thing set-core's Fleet reads). A close is written AS
   `owner` and must not `register` it, or the person becomes a seat that collects wake decisions.
   The bridge sends a bare `owner` as `owner@<namespace>` — on the other machine `owner` is THEIR person.
-- **Interpreters are spelled out** (`process.execPath`), never a bare `node`, in anything written
-  into a settings file or a skill — hooks do not run in an interactive shell.
+- **No machine path in a TRACKED file** (`store.portableHook`, 2026-11-07). `sac install` writes a line
+  that finds `sac` at run time (PATH, then `~/.local/bin`); the interpreter and the checkout are
+  named only in the machine's own launcher (`sac setup`). The old line spelled out `process.execPath`,
+  and every project that removed it from a tracked file lost its hooks — 5 of 10 in one family. Still
+  never a bare `node` anywhere: hooks do not run in an interactive shell.
+- **A plugin's hook stands down where the project wires its own** (`--from-plugin`,
+  `store.projectWiresHook`). Two copies of one hook nudge twice and race on the registry.
+- **A room between two projects** (`store.projectRoom`, `dm-<a>--<b>`, `pair` + `projects: true`):
+  membership DERIVED from the project, never enrolled; an unaddressed entry is addressed to the
+  other project (`addressedIn`) and then takes the ordinary rule — not the seat-pair "everything
+  wakes". `resolveRoom` opens it for a one-project address no room reaches; local projects only.
 - **Names from the network become file names.** `assertSafeWriter` / `assertSafeTs` are enforced
   by the relay *and*, independently, by the receiver.
 
