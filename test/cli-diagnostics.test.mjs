@@ -143,21 +143,31 @@ test("a seat name is a complete address — the room follows from it, and is REP
   assert.match(addressed.stderr, /only reachable in 'team'/)
 })
 
-test("…and an addressee in NONE of my rooms is refused with the room it IS in", () => {
+test("…and an addressee in NONE of my rooms gets the room between our two PROJECTS", () => {
+  // ⚠ Changed 2026-11-07 (`store.projectRoom`): this used to be refused with the room the seat IS
+  // in, and on the live bus that refusal is what made the umbrella hand-open a seat DM — whose
+  // name carried two session ids, so the next session of either side was locked out of it.
   const { alpha } = twoAgents()
   const r = sac(["send", "REQUEST", "are you there?", "--to", "archivist#cccc3333"], alpha)
-  assert.notEqual(r.code, 0, "it wrote into a room the addressee cannot read")
-  assert.match(r.stderr, /is in no room you are in/)
-  assert.match(r.stderr, /attic/, "the refusal did not say where that seat actually is")
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(JSON.parse(r.stdout).room, "dm-alpha--archivist", "it did not land in the relation's room")
+  assert.match(r.stderr, /dm-alpha--archivist/, "the room chosen for it was not reported")
 })
 
-test("REGRESSION: …and for ONE seat it offers the room of two next to the join", () => {
-  // Reported 2026-10-22 by a consumer project's session: the only rooms reaching the seat were
-  // relay rooms and somebody else's work, and the refusal's one suggestion was to join one. `dm`
-  // needs no shared room, and the refusal now says so — then the suggestion is taken at its word.
+test("…but a name no project on this machine has is refused, never given a room", () => {
+  // The relation room is opened only towards a project this store knows LOCALLY: minting a room
+  // for a typo would turn the one loud failure (`send` refusing a name) into a silent one.
+  const { alpha, root } = twoAgents()
+  const r = sac(["send", "REQUEST", "are you there?", "--to", "ghost#eeee5555"], alpha)
+  assert.notEqual(r.code, 0, "a room was minted for a name nobody has")
+  assert.match(r.stderr, /is in no room you are in/)
+  assert.ok(!existsSync(join(root, "channels", "dm-alpha--ghost")), "the room was created anyway")
+})
+
+test("REGRESSION: `sac dm <seat>` still opens a room of two with one window", () => {
+  // Reported 2026-10-22 by a consumer project's session: the refusal offered `sac dm`, and the
+  // offered command has to work when taken at its word.
   const { alpha } = twoAgents()
-  const r = sac(["send", "REQUEST", "are you there?", "--to", "archivist#cccc3333"], alpha)
-  assert.match(r.stderr, /sac dm archivist#cccc3333/, "the room of two is not offered")
   const dm = sac(["dm", "archivist#cccc3333"], alpha)
   assert.equal(dm.code, 0, `the offered command does not work: ${dm.stderr}`)
 })
@@ -314,16 +324,23 @@ test("…and with the DM open, an unrouted addressed send ASKS instead of pickin
   assert.match(r.stderr, new RegExp(room), "the refusal does not even name the room of two")
 })
 
-test("a DM needs somebody you can already reach — and a seat, not a project", () => {
+test("a DM needs somebody you can already reach — and a PROJECT gets the room between the projects", () => {
   const { alpha } = twoAgents()
   const stranger = sac(["dm", "nobody#deadbeef"], alpha)
   assert.notEqual(stranger.code, 0)
   assert.match(stranger.stderr, /is in no room this store knows/)
 
+  // ⚠ Changed 2026-11-07 (`store.projectRoom`): a project name used to be refused here as "a
+  // PROJECT, and a room of two needs one session". The relation between two projects is exactly
+  // what the AI+ family needed, and its room carries no session id, so it outlives both windows.
   const whole = sac(["dm", "beta"], alpha)
-  assert.notEqual(whole.code, 0, "a project name opened a 'room of two' with every session of it")
-  assert.match(whole.stderr, /is a PROJECT/)
-  assert.match(whole.stderr, /beta#bbbb2222/, "it does not say which session could have been meant")
+  assert.equal(whole.code, 0, whole.stderr)
+  const out = JSON.parse(whole.stdout)
+  assert.equal(out.room, "dm-alpha--beta")
+  assert.deepEqual(out.projects, ["alpha", "beta"])
+
+  const self = sac(["dm", "alpha"], alpha)
+  assert.notEqual(self.code, 0, "a project opened a relation room with itself")
 })
 
 test("REGRESSION: `sac dm` takes a NAME — an alias resolves to its seat, and says so", () => {

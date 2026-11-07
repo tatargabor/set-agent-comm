@@ -225,6 +225,9 @@ export const isOwner = name => name === OWNER || String(name).startsWith(`${OWNE
  *              the failure this project exists to prevent.
  */
 export function wakes(entry, me, mine, quiet = undefined, pair = false, live = undefined) {
+  // A room between two PROJECTS: an entry that names nobody is addressed to the other side, and
+  // from here on it follows the ordinary rules for a project-addressed entry — see `projectRoom`.
+  if (Array.isArray(pair)) { entry = addressedIn(entry, pair); pair = false }
   if (!isForMe(entry, me)) return false
   // ⚠ A DECLARED quiet is applied HERE and nowhere else, because this function is the single
   // rule the Stop hook, `sac wait` and `inbox` all read. Delivery is untouched: a quiet seat
@@ -250,7 +253,7 @@ export const namesSeat = (entry, me) => {
 }
 
 /** The project a seat belongs to, on any machine — the widest name that addresses it. */
-const projectOf = seat => seatBase(seat).split("@")[0]
+export const projectOf = seat => seatBase(seat).split("@")[0]
 
 /** Is another session of `me`'s project — not `me`, not the writer — live in this roster? */
 export const siblingLive = (me, live, from) =>
@@ -1255,12 +1258,12 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   // one place it is computed for everybody at once. Doing it in `inbox` instead would re-record
   // the same entries on every read; doing it in the watcher would miss every seat that has no
   // watcher armed — which is precisely the number worth having.
-  const isPair = !!pairOf(room)
+  const isPair = pairArg(room)
   const woke = live.filter(s => {
     if (s === from) return false
     const quiet = seatPresence(s).quiet
     const w = wakes(entry, s, ownTimestamps(room, s), quiet, isPair, live)
-    recordDecision({ room, seat: s, entry: ts, by: quiet && isForMe(entry, s) ? "quiet" : "rule", woke: w })
+    recordDecision({ room, seat: s, entry: ts, by: quiet && isForMe(addressedIn(entry, isPair), s) ? "quiet" : "rule", woke: w })
     return w
   })
   const others = live.filter(s => s !== from).length
@@ -1390,12 +1393,34 @@ export function send({ room, from, type = "FACT", text, re, to }) {
  * going to be woken anyway.
  */
 export function liveSeats(room) {
+  const pp = projectPairOf(room)
+  if (pp) return projectRoomSeats(room, pp).filter(([, s]) => seatState(s) !== false).map(([w]) => w)
   const reg = readJson(REGISTRY, { agents: {} })
   const out = []
   for (const a of Object.values(reg.agents)) {
     for (const [w, s] of Object.entries(a.seats || {})) {
       if (!(s.rooms || []).includes(room)) continue
       if (seatState(s) !== false) out.push(w)
+    }
+  }
+  return out
+}
+
+/**
+ * The seats of a PROJECT room: every local session of either project, minus one that `part`ed it.
+ * Derived, not enrolled (see `projectRoom`) — a session that opened after the room did, or that the
+ * room was opened to mid-session, is in it without a join. Remote seats are left out: a DM does
+ * not cross machines, so a seat over there cannot read this room.
+ */
+function projectRoomSeats(room, pair) {
+  const reg = readJson(REGISTRY, { agents: {} })
+  const book = readJson(MEMBERS, {})
+  const out = []
+  for (const project of pair) {
+    for (const [w, s] of Object.entries(reg.agents[project]?.seats || {})) {
+      if (s?.remote || w.includes("@")) continue
+      if ((book[w]?.left || []).includes(room)) continue
+      out.push([w, s])
     }
   }
   return out
@@ -1520,6 +1545,8 @@ export function reapGhosts({ dry = false } = {}) {
  */
 export function roomSeats(room) {
   const names = new Set()
+  const pp = projectPairOf(room)
+  if (pp) for (const [w] of projectRoomSeats(room, pp)) names.add(w)
   for (const p of busFiles(room)) names.add(writerOf(p))
   const reg = readJson(REGISTRY, { agents: {} })
   for (const a of Object.values(reg.agents)) {
@@ -1530,6 +1557,10 @@ export function roomSeats(room) {
 
 export function participants(room) {
   const names = new Set()
+  // A project room's two projects are addressable in it whatever their sessions are doing.
+  const pp = projectPairOf(room)
+  if (pp) for (const p of pp) names.add(p)
+  if (pp) for (const [w] of projectRoomSeats(room, pp)) { names.add(w); names.add(seatBase(w)) }
   for (const p of busFiles(room)) { const w = writerOf(p); names.add(w); names.add(seatBase(w)) }
   const reg = readJson(REGISTRY, { agents: {} })
   for (const a of Object.values(reg.agents)) {
@@ -1630,13 +1661,29 @@ function reachingRooms(to, { archived = false }) {
  * @returns { room, inferred } — `inferred` is true when it was derived from `to`, which the
  *   caller must report: everyone in that room can read the entry.
  */
-export function resolveRoom({ room, to, configured = [] }) {
+export function resolveRoom({ room, to, configured = [], from = null }) {
   if (room) return { room, inferred: false }
   // The owner is in every room of this machine, so naming them says nothing about WHICH room.
   const want = parseTo(to).filter(n => !isOwner(n))
   const mine = configured.filter(Boolean)
   const reaching = want.length ? mine.filter(r => participants(r).some(p => want.includes(p))) : []
   if (reaching.length === 1) return { room: reaching[0], inferred: true }
+  // ⚠ ONE PROJECT ADDRESSED FROM ANOTHER → THEIR ROOM (`projectRoom`, 2026-11-07). The relation's
+  // own room wins over any shared mixed room — that is how the traffic leaves the 60-seat room it
+  // was measured in — and where no room reaches the addressee at all, the relation's room is
+  // OPENED instead of refusing: the umbrella had to hand-open a seat DM to reach one block, and
+  // the platform it meant to include could not read it. Local projects only; a seat name keeps
+  // its address inside the room, so it still reaches exactly that one session.
+  const target = want.length === 1 ? projectOf(want[0]) : null
+  if (target && from && !isOwner(from) && !String(from).includes("@") &&
+      projectOf(from) !== target && isLocalProject(target)) {
+    const own = reaching.filter(r => projectPairOf(r)?.includes(target))
+    if (own.length === 1) return { room: own[0], inferred: true }
+    if (!reaching.length) {
+      const opened = openProjectRoom(from, target)
+      return { room: opened.room, inferred: true, opened: opened.created }
+    }
+  }
   const named = want.join(", ")
   if (reaching.length > 1) throw new Error(
     `You are in several rooms (${mine.join(", ")}), so \`room\` is required — ` +
@@ -1883,7 +1930,7 @@ function clip(e) {
  */
 export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = true }) {
   assertMayRead(room, agent)
-  const isPair = !!pairOf(room)
+  const isPair = pairArg(room)
   const cursors = readJson(CURSORS, {})
   const key = `${room}::${agent}`
   const base = seatBase(agent)
@@ -1904,7 +1951,7 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push({ ...e, forMe: isForMe(e, agent), wakes: wakes(e, agent, mine, quiet, isPair, live),
+        fresh.push({ ...e, forMe: isForMe(addressedIn(e, isPair), agent), wakes: wakes(e, agent, mine, quiet, isPair, live),
                      ...(seatBase(writer) === base && { sibling: true }) })
     }
   }
@@ -2491,6 +2538,8 @@ export function archiveDeadPairRooms({ dry = false } = {}) {
   const swept = []
   for (const [room, rec] of Object.entries(all)) {
     if (!Array.isArray(rec?.pair) || rec.pair.length !== 2) continue
+    // A project never has "both seats gone" — its next session is in the room by derivation.
+    if (rec.projects === true) continue
     if (liveSeats(room).length) continue
     swept.push(room)
     if (dry) continue
@@ -2564,7 +2613,10 @@ export function setMembers(seat, list, left = null) {
 export function wakingRooms(seat, configured = parseRooms(process.env.SET_AGENT_ROOM)) {
   const left = seat ? leftRooms(seat) : []
   const declared = (seat && members(seat)) || []
-  return [...new Set([...(configured || []), ...declared])]
+  // …and every project room of its project (see `projectRoom`): derived, so a relation opened by
+  // the other side while this session runs is watched from the next check on, with no join.
+  const related = seat && !String(seat).includes("@") ? projectRoomsOf(projectOf(seat)) : []
+  return [...new Set([...(configured || []), ...declared, ...related])]
     .filter(r => r && !left.includes(r))
     .sort()
 }
@@ -2626,6 +2678,95 @@ export function dmRoom(a, b) {
   const room = `dm-${x}-${y}`
   assertSafeRoom(room)
   return room
+}
+
+/**
+ * ⚠ A ROOM BETWEEN TWO PROJECTS — the relation, not the window (2026-11-07, the owner's AI+
+ * family: "every block has to talk to the platform and to the umbrella, and those two to each
+ * other"). Measured the same evening on this machine, three ways the existing rooms failed it:
+ *
+ *   · the family talked in a 60-seat mixed room (`copilot-promo`), so every entry of theirs was
+ *     somebody else's noise and the other way round;
+ *   · a seat outside the sender's rooms could not be addressed at all — the umbrella had to open a
+ *     seat DM by hand (`resolveRoom` refused, by design);
+ *   · and that DM was named after two SESSION ids (`dm-<project>-<id>-<project>-<id>`), so the
+ *     next session of either project is locked out of it by `assertMayRead`, and the platform the
+ *     message was "cc'd" to could not read it at all.
+ *
+ * The relation between two projects outlives every session on both sides, so its room is named
+ * after the projects: `dm-<a>--<b>`, sorted, the double dash keeping it apart from a seat DM and
+ * readable where a project name itself has dashes. Same tricks as `dmRoom`: derived, so both sides
+ * compute it without agreeing first; declared (`pair` + `projects: true`), so it is private to the
+ * two projects (`inPair` matches a project name through `addressForms`); no registry of pairs.
+ *
+ * What makes it different from a seat DM, and why:
+ *   · MEMBERSHIP IS DERIVED from the project, not enrolled per seat — every local session of
+ *     either project is in it (`liveSeats`, `wakingRooms`), minus a seat that `part`ed it. A
+ *     session that starts tomorrow is in it without anybody running anything.
+ *   · AN ENTRY WITH NO `to` IS ADDRESSED TO THE OTHER PROJECT (`addressedIn`), and then the
+ *     ordinary rule applies, not the seat-pair "everything wakes" rule: with one live session
+ *     there it wakes that one; with several, a FACT/ANSWER wakes none of them and a QUESTION /
+ *     REQUEST goes to the letterbox — the measured 2026-10-28 storm (`wakes`) stays fixed here too.
+ *     The owner's line for this, verbatim: „feleslegesen ne keltsen senki fel másikat ha nem
+ *     direkt van”. The writer's own siblings are never woken by it: it is not addressed to them.
+ *   · It is never swept as dead (`archiveDeadPairRooms`): a project has no "both seats gone".
+ *   · Local only, like every DM (docs/not-built-yet.md §2): a remote project has no room here.
+ */
+export function projectRoom(a, b) {
+  const [x, y] = [a, b].map(n => roomSlug(projectOf(n))).sort()
+  if (!x || !y || x === y) throw new Error(`project room: two different projects are needed (got '${a}' and '${b}')`)
+  const room = `dm-${x}--${y}`
+  assertSafeRoom(room)
+  return room
+}
+
+/** What kind of pair a room is, from ONE read: `true` for two seats, the two projects, or false. */
+export function pairArg(room) {
+  const rec = readJson(ROOMS_FILE, {})[room]
+  if (!Array.isArray(rec?.pair) || rec.pair.length !== 2) return false
+  return rec.projects === true ? rec.pair : true
+}
+
+/** The two projects of a project room, or `null`. */
+export function projectPairOf(room) {
+  const p = pairArg(room)
+  return Array.isArray(p) ? p : null
+}
+
+/** Every live (not archived) project room this project is a party to. */
+export function projectRoomsOf(project) {
+  if (!project) return []
+  return Object.entries(readJson(ROOMS_FILE, {}))
+    .filter(([, r]) => r?.projects === true && Array.isArray(r.pair) && r.pair.includes(project))
+    .map(([room]) => room).sort()
+}
+
+/** Is this a project of THIS machine — registered here under its own, device-free name? */
+export function isLocalProject(name) {
+  if (!name || isOwner(name) || String(name).includes("@")) return false
+  return !!readJson(REGISTRY, { agents: {} }).agents[projectOf(name)]
+}
+
+/**
+ * Open (or reopen) the room between the projects of `from` and `to`. Idempotent; an archived one
+ * is restored by `createRoom`, history included, because it is the same relation resuming.
+ */
+export function openProjectRoom(from, to) {
+  const pair = [projectOf(from), projectOf(to)].sort()
+  const room = projectRoom(...pair)
+  const made = createRoom(room, from, { pair, projects: true })
+  return { room, pair, created: made.created }
+}
+
+/**
+ * The entry as the rules should read it in a project room: with no `to`, it is addressed to the
+ * OTHER project. An entry that names somebody keeps its address — naming a seat is still the way
+ * to reach exactly one session, and naming nobody must not reach the writer's own siblings.
+ */
+export function addressedIn(entry, pair) {
+  if (entry.to?.length || !Array.isArray(pair)) return entry
+  const other = pair.filter(p => p !== projectOf(entry.from || ""))
+  return other.length === 1 ? { ...entry, to: other } : entry
 }
 
 /**
@@ -3141,8 +3282,12 @@ export const isDirectAddress = (entry, seat) =>
  * watch — ringing every seat of a room for one is the storm the letterbox exists to stop.
  */
 export function ringPlan({ entry, room, woke }) {
-  const pair = !!pairOf(room)
-  return (woke || []).filter(s => s !== entry.from && (pair || isDirectAddress(entry, s)))
+  // A project room rings only when the rule woke ONE session there — that one is the relation's
+  // addressee as surely as a typed seat name. Several woken siblings are the letterbox's to sort.
+  const pair = pairArg(room)
+  const others = (woke || []).filter(s => s !== entry.from)
+  return others.filter(s => pair === true || isDirectAddress(entry, s) ||
+      (Array.isArray(pair) && others.length === 1))
     .map(seat => ({ seat, ...ringable(seat) }))
 }
 

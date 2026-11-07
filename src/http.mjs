@@ -111,7 +111,8 @@ const server = createServer(async (req, res) => {
         const configured = store.parseRooms(url.searchParams.get("room") || process.env.SET_AGENT_ROOM)
         await createMcpServer(() => {
           const mine = store.wakingRooms(agent, configured)
-          return { agent, room: mine.length === 1 ? mine[0] : room, rooms: mine }
+          const plain = mine.filter(r => !store.projectPairOf(r))   // see stdio.mjs
+          return { agent, room: plain.length === 1 ? plain[0] : room, rooms: mine }
         }).connect(created)
         transport = created
       }

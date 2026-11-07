@@ -231,7 +231,7 @@ export function createMcpServer(identify) {
       // core (`store.resolveRoom`), where the CLI reads the same one.
       let inferred = null
       const needRoom = () => {
-        const r = store.resolveRoom({ room, to: a.to, configured })
+        const r = store.resolveRoom({ room, to: a.to, configured, from: agent })
         if (r.inferred) inferred = r.room
         return r.room
       }

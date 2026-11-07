@@ -64,7 +64,7 @@ const USAGE = {
   focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back · --files is shown to the others and the letterbox AS WRITTEN — a glob stays text, nothing matches against it',
   inbox: "sac inbox <room> [--mine]           new messages from others (marks them read) · --mine: entries addressed elsewhere as one line each",
   peek: "sac peek <room> [--mine]            the same, without moving the cursor",
-  dm: "sac dm <seat|name>                  a room of two with that seat — an alias or a Fleet label resolves to one",
+  dm: "sac dm <seat|name|project>          a room of two with that seat — or, for a project, the room between the two projects",
   unread: "sac unread <room> [n]               make the last n messages unread again",
   history: "sac history <room> [n]              read back",
   install: "sac install <room>[,<room>…] [--dry-run] [--replace] [--rewrite]   · adds to the project's rooms; --replace cuts it down to what you name; only the room list of a wired hook is edited — --rewrite restores the canonical command",
@@ -326,7 +326,7 @@ try {
       let [room, type, ...text] = args
       let inferred = false
       if (to && room && store.TYPES.includes(store.normalizeType(room))) {
-        const r = store.resolveRoom({ to, configured: store.wakingRooms(ME) })
+        const r = store.resolveRoom({ to, configured: store.wakingRooms(ME), from: ME })
         ;[room, type, text] = [r.room, args[0], args.slice(1)]
         inferred = r.inferred
       }
@@ -1357,7 +1357,7 @@ try {
        * joined an unrelated room to satisfy a rule that was not there.
        */
       const [asked] = rest.filter(a => !a.startsWith("--"))
-      if (!asked) throw new Error("usage: sac dm <seat|name>       (a seat: `consumer-a-atlas#3f9c1a20`, or an alias / Fleet label for one — not a project)")
+      if (!asked) throw new Error("usage: sac dm <seat|name|project>   (a seat: `consumer-a-atlas#3f9c1a20`, an alias / Fleet label for one, or a project — its relation room)")
       // ⚠ A NAME IS RESOLVED FIRST, the same `resolveAddressees` `send` uses. Reported 2026-10-22
       // by a consumer project's session: `sac dm <alias>` was refused as "a PROJECT" — the alias book
       // was never asked, because this command looked for a `#` and nothing else. The one command
@@ -1367,6 +1367,15 @@ try {
       for (const r of resolved)
         console.error(`sac: '${r.asked}' is ${r.seat} (${r.via}${r.state === "live" ? "" : `, ${r.state}`})`)
       if (peer === ME) throw new Error("dm: that is you")
+      // A PROJECT gets the room between the two projects (`store.projectRoom`, 2026-11-07): the
+      // relation outlives every session on both sides, so no session id goes into its name.
+      if (!peer.includes("#") && store.isLocalProject(peer) && store.projectOf(peer) !== store.projectOf(ME)) {
+        const made = store.openProjectRoom(ME, peer)
+        json({ room: made.room, with: peer, projects: made.pair, created: made.created,
+          note: `every session of both projects is in it, today's and tomorrow's — no join needed. ` +
+            `An entry naming nobody is addressed to ${store.projectOf(peer)}; name a seat to reach one session.` })
+        break
+      }
       if (!peer.includes("#")) {
         const seats = (store.agents().find(a => a.agent === peer)?.seats || []).map(x => x.writer)
         throw new Error(`dm: '${peer}' is a PROJECT, and a room of two needs one session — ` +

@@ -65,7 +65,13 @@ const silent = store.headless()
 // `SET_AGENT_ROOM` may name several rooms, comma-separated — ALL of them are set up here.
 // Registering only the first one would leave the second room's messages unwatched, which
 // from the outside is indistinguishable from "nobody wrote anything".
-const rooms = store.parseRooms(process.env.SET_AGENT_ROOM)
+const configured = store.parseRooms(process.env.SET_AGENT_ROOM)
+// …and the rooms between this project and another (`store.projectRoom`, 2026-11-07): derived from
+// the project, so a hook with NO room configured — the form a plugin ships — still joins every
+// relation the project has, and a project room is never the default room of `send`.
+const related = (() => { try { return store.projectRoomsOf(agent) } catch { return [] } })()
+const rooms = [...new Set([...configured, ...related])]
+const plainRooms = rooms.filter(r => !related.includes(r))
 
 const SAC = join(HERE, "..", "bin", "sac.mjs")
 /**
@@ -305,7 +311,7 @@ if (notices.length || backlog.length || siblings || monitor) {
       : "") +
     (backlog.length ? ` Unread but not urgent: ${backlog.join(", ")}.` : "") +
     siblings +
-    (rooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "") +
+    (plainRooms.length > 1 ? ` You are in several rooms, so \`send\` requires an explicit \`room\`.` : "") +
     monitor +
     // The habit is cheap to start and expensive to retrofit: an undeclared focus is what makes
     // both the letterbox and every other session guess at what this window is doing.

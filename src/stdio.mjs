@@ -17,7 +17,7 @@
 import { basename } from "node:path"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createMcpServer } from "./tools.mjs"
-import { parseRooms, claimSeat, register, wakingRooms } from "./store.mjs"
+import { parseRooms, claimSeat, register, wakingRooms, projectPairOf } from "./store.mjs"
 
 const agent = process.env.SET_AGENT_NAME || basename(process.cwd())
 const rooms = parseRooms(process.env.SET_AGENT_ROOM)
@@ -54,6 +54,9 @@ else register({ agent, project: process.cwd(), session, writer })
 // in front of everybody. See `store.wakingRooms`.
 const server = createMcpServer(() => {
   const mine = wakingRooms(writer, rooms)
-  return { agent: writer, room: mine.length === 1 ? mine[0] : null, rooms: mine }
+  // A project room is never the DEFAULT one: it is reached by addressing the other project, and a
+  // seat in one ordinary room must not lose its default because a relation was opened to it.
+  const plain = mine.filter(r => !projectPairOf(r))
+  return { agent: writer, room: plain.length === 1 ? plain[0] : null, rooms: mine }
 })
 await server.connect(new StdioServerTransport())
