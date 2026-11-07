@@ -125,6 +125,16 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   quiet), and a DIRECT address (`triage.isDirect`) is never held — someone typed that seat name,
   and there a delay is the expensive mistake. It is bounded by the beat itself: ~90 s after the
   last tool call the seat is announced to normally.
+- **A watch is re-armed only for something the seat is waiting on** (`hooks/watch-guard.mjs`,
+  `store.awaitingReply`, 2026-11-08). The first watch of a session goes through; after that, only
+  while the seat has an unanswered QUESTION/REQUEST of its own, or a relay room. Measured the day
+  before: 23 inbox-watch expiries in 24 h, 13 with no event, each a re-read of the whole context —
+  the reflex on the harness's expiry notice. Mail meanwhile is delivered by the Stop hook.
+- **What the configuration put a seat in, the configuration takes it out of** (`store.dropUnconfigured`,
+  `members.json` `seeded`, 2026-11-08). Only rooms a hook registered FROM CONFIG are dropped when the
+  configuration stops naming them — never a hand join, an invite or a relation room, and never onto
+  `left`. A record from before `seeded` loses nothing (a guess would be a lost join); `sac doctor`
+  shows such leftovers instead.
 - **The doorbell decides from the RECORD, never by trying** (`store.ringable`, 2026-10-19,
   `docs/native-messaging.md`). A line posted into a bypass-mode session's socket is HELD — a dialog
   in somebody's window, then dropped — so a seat is rung only when what its own hooks recorded says
@@ -156,7 +166,8 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
 - **A room between two projects** (`store.projectRoom`, `dm-<a>--<b>`, `pair` + `projects: true`):
   membership DERIVED from the project, never enrolled; an unaddressed entry is addressed to the
   other project (`addressedIn`) and then takes the ordinary rule — not the seat-pair "everything
-  wakes". `resolveRoom` opens it for a one-project address no room reaches; local projects only.
+  wakes". `resolveRoom` sends a one-project (or one-seat) address there whenever no room is named — even where a
+  mixed room reaches the addressee (2026-11-08) — except toward a seat DM the sender opened; local projects only.
 - **Names from the network become file names.** `assertSafeWriter` / `assertSafeTs` are enforced
   by the relay *and*, independently, by the receiver.
 

@@ -43,7 +43,11 @@ try {
 
   // Without a session there is no seat to keep alive (cron, a bare terminal): the registry's
   // per-seat liveness is the thing being fed, and a bare project name has none.
-  if (session && rooms.length) {
+  // ⚠ Not only where rooms are configured (2026-11-08): the plugin's line configures NONE, so
+  // with `&& rooms.length` here every plugin-wired seat had no heartbeat at all — its liveness
+  // stuck at the session start, and with it `seatBusy`, the rule that keeps the watch from
+  // announcing to a seat that is mid-turn. That is a duplicate wake per entry, measured before.
+  if (session) {
     const store = await import("../src/store.mjs")
     const stamp = join(store.ROOT, "beats", `${agent}#${session}`)
 
@@ -67,7 +71,12 @@ try {
       // seat still resolved to "we do not know". A liveness ping that records a dead pid is a
       // liveness ping that reports the exact thing it exists to correct.
       const pid = store.ownerPid() || process.pid
-      for (const room of rooms) store.register({ agent, project: cwd, session, room, pid })
+      let seat = null
+      for (const room of rooms) seat = store.register({ agent, project: cwd, session, room, pid, fromConfig: true }).writer
+      if (!rooms.length) seat = store.register({ agent, project: cwd, session, pid }).writer
+      // …and the configuration that stopped naming a room takes the seat out of it, within a
+      // minute rather than at the next session (see `store.dropUnconfigured`).
+      store.dropUnconfigured(seat, rooms)
     }
   }
 } catch { /* a sign of life must never be able to break the turn it is a sign of */ }

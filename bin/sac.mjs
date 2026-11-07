@@ -1146,11 +1146,22 @@ try {
         }
         if (wiring.some(w => w.form === "path" && w.file === "settings.json")) problems.push("a machine path in the TRACKED settings.json — `sac install` converts it")
         if (wiring.length && !by("stop").length) problems.push("no Stop hook — unread mail is never caught at the end of a turn")
+        // ⚠ A LIVE seat still in a room its project no longer configures (2026-11-08): membership is
+        // per seat, so a configuration change reaches only new sessions — and those since this date,
+        // whose configured rooms are recorded (`store.dropUnconfigured`) and dropped by the hooks.
+        // A room joined by hand is shown too, because from the files the two look the same — which is
+        // why this is a NOTE and does not change the verdict.
+        const notes = []
+        for (const s of live) {
+          const extra = (store.members(s.writer) || []).filter(r => !configured.includes(r) && !store.projectPairOf(r))
+          if (extra.length) notes.push(`${s.writer} is in ${extra.join(", ")}, which the project does not configure — ` +
+            `woken from there; fine if joined on purpose, else \`sac part <room>\` in that session (or it ends with the session)`)
+        }
         report.push({ project: a.agent, path: a.project,
           hooks: Object.fromEntries(store.HOOK_NAMES.map(n => [n, by(n).map(w => `${w.file}:${w.form}${w.plugin ? ":plugin" : ""}`)])),
           beat, live: live.map(x => x.writer), rooms, lastRead: reads,
           waiting, ringable: Object.fromEntries(live.map(x => [x.writer, store.ringable(x.writer).why])),
-          verdict: !wiring.length ? "off" : problems.length ? "warn" : "ok", problems })
+          verdict: !wiring.length ? "off" : problems.length ? "warn" : "ok", problems, notes })
       }
       report.sort((x, y) => x.project.localeCompare(y.project))
       if (asJson) { json({ schema: "sac.doctor/1", projects: report }); break }
@@ -1163,6 +1174,7 @@ try {
         if (Object.keys(p.waiting).length) console.log(`    waiting for it: ${Object.entries(p.waiting).map(([r, n]) => `${n} in ${r}`).join(", ")}`)
         if (p.live.length) console.log(`    ringable: ${Object.entries(p.ringable).map(([s, w]) => `${s}=${w}`).join(", ")}`)
         for (const x of p.problems) console.log(`    ⚠ ${x}`)
+        for (const x of p.notes || []) console.log(`    · ${x}`)
       }
       if (!report.length) console.log(`(no local project${glob ? ` matches '${glob}'` : ""})`)
       break

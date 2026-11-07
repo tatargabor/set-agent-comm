@@ -585,6 +585,34 @@ export function claimWatch({ seat, rooms = [], pid = process.pid, owner = ownerP
   return { superseded, lost, heldBy: lost ? held.pid : null }
 }
 
+/** Whether this seat has armed a watch before — its claim outlives the process (see `pruneWatches`). */
+export function hadWatch(seat) {
+  try { assertSafeWriter(seat) } catch { return false }
+  return existsSync(join(WATCHES, `${seat}.json`))
+}
+
+/**
+ * The QUESTIONs and REQUESTs this seat sent that nobody has answered yet — what it is actually
+ * WAITING on, which is the one good reason to keep a watch armed (see `hooks/watch-guard.mjs`).
+ * Answered means: an entry by someone else in the same room with `re:` pointing at it — the rule
+ * `ownerOpen` uses. Bounded to `hours`, because a question nobody answered in a day is not
+ * something a watch will fix, and every re-arm for it is another expiry.
+ */
+export function awaitingReply(seat, { hours = 24, rooms = wakingRooms(seat) } = {}) {
+  const since = Date.now() - hours * 3600_000
+  const open = []
+  for (const room of rooms) {
+    let msgs
+    try { msgs = history({ room, limit: 1_000_000 }).messages } catch { continue }
+    const answered = new Set(msgs.filter(m => m.from !== seat).map(m => m.re).filter(Boolean))
+    for (const m of msgs)
+      if (m.from === seat && (m.type === "QUESTION" || m.type === "REQUEST") &&
+          (Date.parse(m.ts) || 0) >= since && !answered.has(m.ts))
+        open.push({ room, ts: m.ts, type: m.type, to: m.to || [] })
+  }
+  return open
+}
+
 /**
  * The newest mtime of the code this process is running, in ms. The watcher compares it against
  * what it saw at start-up and exits when it moves — see the block on it in `bin/sac.mjs`.
@@ -878,7 +906,7 @@ export function registeredAgent(session) {
  * a seat that is already known — `send` uses that, so writing a message never reshuffles seats.
  */
 export function register({ agent, project, session, room, pid = process.pid, writer,
-                           owner = ownerPid() }) {
+                           owner = ownerPid(), fromConfig = false }) {
   if (!agent) throw new Error("register: `agent` is required")
   const seat = writer || claimSeat({ agent, session, pid, owner })
   /**
@@ -933,7 +961,7 @@ export function register({ agent, project, session, room, pid = process.pid, wri
   // silent room the writer is alone in, with `send` returning success.
   if (joining && !roomExists(joining)) createRoom(joining, seat)
   // Membership is per seat from here on; the configured rooms seed it once and never again.
-  if (joining) seedMembers(seat, [joining])
+  if (joining) seedMembers(seat, [joining], { fromConfig })
   seedCursor(joining, seat)
   // Co-writers are counted PER SEAT — that is, per file. Another session of the same project
   // sits in its own seat and does not collide, so it must not raise a warning.
@@ -1667,23 +1695,34 @@ export function resolveRoom({ room, to, configured = [], from = null }) {
   const want = parseTo(to).filter(n => !isOwner(n))
   const mine = configured.filter(Boolean)
   const reaching = want.length ? mine.filter(r => participants(r).some(p => want.includes(p))) : []
-  if (reaching.length === 1) return { room: reaching[0], inferred: true }
   // ⚠ ONE PROJECT ADDRESSED FROM ANOTHER → THEIR ROOM (`projectRoom`, 2026-11-07). The relation's
   // own room wins over any shared mixed room — that is how the traffic leaves the 60-seat room it
   // was measured in — and where no room reaches the addressee at all, the relation's room is
   // OPENED instead of refusing: the umbrella had to hand-open a seat DM to reach one block, and
   // the platform it meant to include could not read it. Local projects only; a seat name keeps
   // its address inside the room, so it still reaches exactly that one session.
+  //
+  // ⚠ CHECKED FIRST, BEFORE "one room reaches it" (2026-11-08). The first cut only opened the
+  // relation's room where NO room reached the addressee, so a mixed room that happened to reach it
+  // still took the entry — every seat in it reading an errand between two projects — and two such
+  // rooms made `send --to <block>` a refusal ("room is required … in <room-1> and <room-2>"),
+  // measured on a live seat the evening the family left the big room. A room given
+  // explicitly is still used as given; this only decides where an UNNAMED room goes.
   const target = want.length === 1 ? projectOf(want[0]) : null
   if (target && from && !isOwner(from) && !String(from).includes("@") &&
       projectOf(from) !== target && isLocalProject(target)) {
-    const own = reaching.filter(r => projectPairOf(r)?.includes(target))
-    if (own.length === 1) return { room: own[0], inferred: true }
-    if (!reaching.length) {
+    const room = projectRoom(projectOf(from), target)
+    // …unless the one SEAT named has parted the relation's room: an entry there would wake nothing,
+    // so the old rules below pick the room it can still be reached in (or say why there is none).
+    // …and a room of two the sender opened with that very seat is a choice somebody made, so with
+    // one in reach the old rules decide (and ask, if there is more than one candidate).
+    const seatDm = want[0].includes("#") && reaching.some(r => pairArg(r) === true)
+    if (!seatDm && !(want[0].includes("#") && leftRooms(want[0]).includes(room))) {
       const opened = openProjectRoom(from, target)
-      return { room: opened.room, inferred: true, opened: opened.created }
+      return { room: opened.room, inferred: true, ...(opened.created ? { opened: true } : {}) }
     }
   }
+  if (reaching.length === 1) return { room: reaching[0], inferred: true }
   const named = want.join(", ")
   if (reaching.length > 1) throw new Error(
     `You are in several rooms (${mine.join(", ")}), so \`room\` is required — ` +
@@ -2571,15 +2610,26 @@ const leftRooms = seat => {
   return Array.isArray(rec?.left) ? rec.left : []
 }
 
-export function setMembers(seat, list, left = null) {
+export function setMembers(seat, list, left = null, seeded = null) {
   const all = readJson(MEMBERS, {})
   const prev = all[seat]
+  const rooms = [...new Set(list.filter(Boolean))].sort()
   all[seat] = {
-    rooms: [...new Set(list.filter(Boolean))].sort(),
+    rooms,
     left: [...new Set((left ?? (Array.isArray(prev?.left) ? prev.left : [])).filter(Boolean))].sort(),
   }
+  // `seeded` (2026-11-08, see `dropUnconfigured`): the rooms the project's CONFIGURATION put this
+  // seat in, as opposed to a join somebody made. Written only when there is one, so a seat that
+  // never had a configured room keeps the two-list record every older reader knows.
+  const keep = [...new Set(seeded ?? (Array.isArray(prev?.seeded) ? prev.seeded : []))].filter(r => rooms.includes(r)).sort()
+  if (keep.length) all[seat].seeded = keep
   writeJson(MEMBERS, all)
   return all[seat].rooms
+}
+
+const seededRooms = seat => {
+  const rec = readJson(MEMBERS, {})[seat]
+  return Array.isArray(rec?.seeded) ? rec.seeded : []
 }
 
 /**
@@ -2621,17 +2671,48 @@ export function wakingRooms(seat, configured = parseRooms(process.env.SET_AGENT_
     .sort()
 }
 
-export function seedMembers(seat, configured) {
+export function seedMembers(seat, configured, { fromConfig = false } = {}) {
   const have = members(seat)
   const left = leftRooms(seat)
   const add = (configured || []).filter(r => !left.includes(r))
-  if (have === null) return setMembers(seat, add)
-  const missing = add.filter(r => !have.includes(r))
-  return missing.length ? setMembers(seat, [...have, ...missing]) : have
+  const missing = have === null ? add : add.filter(r => !have.includes(r))
+  if (have !== null && !missing.length) return have
+  // A room that was already in the book stays whatever it was: an explicit join is not demoted to
+  // "configured" because the configuration happens to name it too.
+  return setMembers(seat, [...(have || []), ...missing], null,
+    fromConfig ? [...seededRooms(seat), ...missing] : null)
+}
+
+/**
+ * ⚠ A ROOM THE CONFIGURATION PUT A SEAT IN, IT ALSO TAKES IT OUT OF (2026-11-08). Reported by a
+ * consumer session the night the family moved to a plugin that configures no room: after its
+ * project dropped `SET_AGENT_ROOM=copilot-promo`, its LIVE seat was still a member of that room
+ * (membership is per seat, and nothing ever removed a configured one), so it went on being woken
+ * from a 60-seat room its project had left, and `send --to <project>` was refused as ambiguous
+ * between two such leftovers. It had to `sac part` each room by hand, and so would every live seat
+ * of the nine projects that changed configuration the same evening.
+ *
+ * Only what the configuration ADDED is taken away (`seeded`): a room joined by hand, invited into
+ * or derived (a relation room) is never touched, and the room is NOT put on `left`, so naming it
+ * again in the configuration brings the seat straight back. The hook faces call this — they read
+ * the project's own settings; the MCP server's environment is a different list and does not.
+ * A seat recorded before `seeded` existed has none, so nothing of it is dropped: a guess here
+ * would be a lost join, and a lost join is the failure this whole project exists to prevent.
+ */
+export function dropUnconfigured(seat, configured = []) {
+  if (!seat) return []
+  const keep = new Set((configured || []).filter(Boolean))
+  const seeded = seededRooms(seat)
+  const gone = seeded.filter(r => !keep.has(r))
+  if (!gone.length) return []
+  setMembers(seat, (members(seat) || []).filter(r => !gone.includes(r)), null, seeded.filter(r => keep.has(r)))
+  for (const r of gone) unregisterRoom(seat, r)
+  return gone
 }
 
 export function joinRoom(seat, room) {
-  const rooms = setMembers(seat, [...(members(seat) || []), room], leftRooms(seat).filter(r => r !== room))
+  const rooms = setMembers(seat, [...(members(seat) || []), room], leftRooms(seat).filter(r => r !== room),
+    seededRooms(seat).filter(r => r !== room))   // a hand-made join outranks the configuration
   // Both halves, always — see `unregisterRoom`. A membership only the member can see is not one.
   registerRoom(seat, room)
   return rooms
@@ -2783,7 +2864,7 @@ export function addressedIn(entry, pair) {
  */
 export function inviteToRoom(seat, room) {
   if (leftRooms(seat).includes(room)) return false
-  setMembers(seat, [...(members(seat) || []), room])
+  setMembers(seat, [...(members(seat) || []), room], null, seededRooms(seat).filter(r => r !== room))
   registerRoom(seat, room)
   return true
 }

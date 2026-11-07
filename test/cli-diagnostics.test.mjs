@@ -138,9 +138,14 @@ test("a seat name is a complete address — the room follows from it, and is REP
 
   const addressed = sac(["send", "FACT", "the invoice rounds the gross too", "--to", "beta#bbbb2222"], alpha)
   assert.equal(addressed.code, 0, addressed.stderr)
-  assert.equal(JSON.parse(addressed.stdout).room, "team", "it did not land where the addressee is")
+  // ⚠ Changed 2026-11-08: a seat of ANOTHER local project now gets the room between the two
+  // projects even where a mixed room (`team`) reaches it — the mixed room made every seat in it
+  // read an errand between two projects. The seat keeps its address inside, so it alone is woken.
+  const sent = JSON.parse(addressed.stdout)
+  assert.equal(sent.room, "dm-alpha--beta", "it did not go to the room between the two projects")
+  assert.deepEqual(sent.wakes, ["beta#bbbb2222"], "the seat named is not the one woken")
   // Which room it went into decides who may READ it, so it may not be a silent choice.
-  assert.match(addressed.stderr, /only reachable in 'team'/)
+  assert.match(addressed.stderr, /dm-alpha--beta/)
 })
 
 test("…and an addressee in NONE of my rooms gets the room between our two PROJECTS", () => {

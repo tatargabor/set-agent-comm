@@ -119,6 +119,12 @@ spawnSync(process.execPath,
 // this hook — an archive able to fail a session start would be worse than the sprawl it fixes.
 try { store.archiveDeadPairRooms() } catch { }
 
+// ⚠ A room the project's configuration no longer names is left again (`store.dropUnconfigured`,
+// 2026-11-08): measured the night nine projects moved to a plugin that configures no room — their
+// live seats stayed in the big mixed room and went on being woken from it. A resume or a compact
+// re-runs this hook with the same seat, which is where a changed configuration shows up first.
+try { store.dropUnconfigured(writer, configured) } catch { }
+
 for (const room of rooms) {
   // ⚠ AN ARCHIVED ROOM IS NOT RE-OPENED, NOT EVEN BY THE CONFIG THAT NAMES IT — the same rule
   // `register` enforces in the roster (2026-08-29), enforced here too because the hook would
@@ -130,7 +136,7 @@ for (const room of rooms) {
       `\`${ENV}${SAC} rooms --restore ${room}\` if it is wanted again.`)
     continue
   }
-  store.register({ agent, project: cwd, session, room, writer })
+  store.register({ agent, project: cwd, session, room, writer, fromConfig: configured.includes(room) })
 
   // COLD START (measured on the day it went live). Two gaps, both of which would have
   // silently swallowed the FIRST message — precisely the one that opens the conversation:

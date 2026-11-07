@@ -41,6 +41,35 @@ try {
     const rooms = named.length ? named : store.wakingRooms(seat, envRooms)
     const bridge = await import("../src/bridge.mjs")
     const relayed = rooms.filter(r => bridge.roomConfig(r))
+    /**
+     * ⚠ A RE-ARM ONLY FOR SOMETHING THIS SEAT IS WAITING ON (2026-11-08). Most seats of a family
+     * run in bypass mode, where the doorbell cannot ring, so the branch below never fired for
+     * them — and the reflex on the harness's own expiry notice ("Re-arm it if you still need the
+     * watch") is to re-arm. Measured over the 24 hours before: 19 arms and 23 expiries of inbox
+     * watches, 13 of those with no event at all, 15 in one session; each expiry a turn that re-reads
+     * the whole context. The owner's line: nothing may wake a session needlessly.
+     *
+     * So the FIRST watch of a session goes through, and a later one only while this seat has a
+     * QUESTION or REQUEST out that nobody answered (`store.awaitingReply`), or a relay room (whose
+     * entries arrive only through the watch's pull). Mail that arrives meanwhile is not lost: the
+     * Stop hook reports it at the end of every turn, and a sender is told to ring a bypass-mode
+     * window with SendMessage (`notRung[].fallback`).
+     */
+    const rearm = !bell.ok && !relayed.length && store.hadWatch(seat)
+    const waitingOn = rearm ? store.awaitingReply(seat, { rooms }) : []
+    if (rearm && !waitingOn.length) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          `[set-agent-comm] Not re-arming the inbox watch: this session already had one, and nothing ` +
+          `is waiting on an answer (no QUESTION or REQUEST of yours is open). Each expiry would re-read ` +
+          `your whole context every 30 minutes. Carry on — the Stop hook reports mail at the end of each ` +
+          `turn, and a sender rings this window with SendMessage. After you send a QUESTION or REQUEST ` +
+          `you wait on, arming it again is allowed.`,
+      } }))
+      process.exit(0)
+    }
     if (bell.ok && !relayed.length) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: {
         hookEventName: "PreToolUse",
