@@ -140,13 +140,20 @@ test("a watch that re-executes in place keeps its pid, its pipe and its silence"
   let out = "", err = ""
   w.stdout.on("data", d => { out += d }); w.stderr.on("data", d => { err += d })
   if (typeof process.execve !== "function") { w.kill("SIGKILL"); return }   // the fallback is the test below
-  await settle(() => /re-executing in place/.test(err), 15000)
+  // The re-exec is seen in the claim the NEW image writes at start-up: same pid, a later startedAt.
+  const claims = () => readdirSync(join(ROOT, "watches")).filter(f => f.startsWith("re-exec")).map(f => JSON.parse(readFileSync(join(ROOT, "watches", f), "utf8")))
+  await settle(() => claims().some(c => c.pid === w.pid), 8000)
+  const first = claims().find(c => c.pid === w.pid).startedAt
+  await settle(() => claims().some(c => c.pid === w.pid && c.startedAt !== first), 15000)
   await sleep(500)
+  const again = claims().find(c => c.pid === w.pid)
   const stillThere = alive(w.pid)
   w.kill("SIGKILL")
-  assert.match(err, new RegExp(`re-executing in place \\(pid ${w.pid}\\)`), `it did not re-exec: ${err}`)
+  assert.notEqual(again?.startedAt, first, "it never re-executed")
   assert.ok(stillThere, "the watch is gone — the Monitor would have ended")
+  // ⚠ BOTH streams: a Monitor turns a stderr line into an event as well (measured 2026-11-08).
   assert.equal(out, "", "it spoke on stdout — that is a notification, i.e. a whole turn, for nothing")
+  assert.equal(err, "", "it spoke on stderr — a Monitor delivers that too, a turn per edit")
 })
 
 test("a watch that outlives its age cap exits, so the Monitor starts a fresh one", async () => {

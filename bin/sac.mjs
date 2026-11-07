@@ -1546,8 +1546,10 @@ try {
         restarting = true
         if (typeof process.execve === "function" && process.env.SET_AGENT_WATCH_REEXEC !== "0" && newCodeLoads()) {
           try {
-            // stderr, not stdout: stdout is the notification channel, and this is not news.
-            console.error(`[set-agent-comm] ${why} — re-executing in place (pid ${process.pid}), still watching`)
+            // ⚠ NOTHING printed, on either stream. The first cut wrote one line to stderr "because stdout
+            // is the notification channel" — measured the same night by a consumer session: a Monitor
+            // turns stderr lines into events too, so that line still cost every watching session a turn
+            // per edit. The new image's own `claimWatch` stamp (watches/<seat>.json) is the record.
             await new Promise(r => process.stdout.write("", () => r()))
             process.execve(process.execPath, [process.execPath, fileURLToPath(import.meta.url), ...process.argv.slice(2)], process.env)
           } catch (e) {
