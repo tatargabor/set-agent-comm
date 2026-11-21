@@ -113,7 +113,7 @@ const USAGE = {
   hook: "sac hook <session-start|stop|heartbeat|watch-guard> [--from-plugin]   run a hook (what the portable line in settings.json calls)",
   "plugin-files": "sac plugin-files <plugin-dir> [--dry-run]   write the hook lines + the agent-comm skill a plugin ships, with no machine path",
   doctor: "sac doctor [--project <glob>] [--json]   per project: hooks wired (where, which form), live seats, rooms, last read, unread for it, ringable",
-  wait: "sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)",
+  wait: "sac wait [--once] [room…]           BLOCK until a message arrives (--once: as a background shell)",
   prune: "sac prune [--days N] [--dry-run]    forget dead seats, and retire DM rooms nobody is left in",
   "watch-paths": "sac watch-paths <room>              the files to watch (for the hook)",
   register: "sac register <room>                 check in to the registry",
@@ -1209,7 +1209,11 @@ try {
       // for the next turn. So a message could sit in the room, correctly delivered and unread,
       // with nobody to read it. That is exactly what happened between two consumer-a sessions.
       //
-      //   Monitor({ command: "sac wait", description: "agent-comm", persistent: true })
+      //   Bash({ command: "sac wait --once", run_in_background: true, description: "agent-comm inbox" })
+      //
+      // (2026-11-21: a background shell, not a Monitor. A Monitor dies after at most 30 minutes and
+      // every expiry is a turn; a background task wakes the session only when it exits, and
+      // `--once` exits on the first entry worth a turn. See `waitCmd` in hooks/session-start.mjs.)
       //
       // Each line printed here becomes one notification, so the lines are few and specific.
       // It NEVER advances the cursor: a notification is not a delivery, the agent still has to
@@ -1217,6 +1221,13 @@ try {
       // message — the exact failure mode `sac unread` had to be invented for.
       const once = rest.includes("--once")
       const names = rest.filter(a => a !== "--once")
+      // The window that owns this watch, taken FIRST — before any await. See "DIE WITH THE
+      // SESSION" below: looked up after start-up, a window that closed in those seconds left the
+      // watch reparented with no owner to find, i.e. unguarded (measured 2026-11-21 with a probe).
+      const PARENT = process.ppid
+      // A FORCED owner (`SET_AGENT_OWNER_PID`, the tests' simulated windows) is an identity, not a
+      // process — probing it would end every test watch after 30 s — so only a discovered one is.
+      const OWNER = process.env.SET_AGENT_OWNER_PID ? null : store.ownerPid()
       // ⚠ THE ROOM LIST IS RE-READ ON EVERY CHECK, not resolved once here. Measured 2026-08-19:
       // this watch is armed at session start with the rooms the project was installed with, so a
       // room the session joined afterwards (`sac join pair --create` — what the skill tells it to
@@ -1388,9 +1399,12 @@ try {
       const claim = store.claimWatch({ seat: ME, rooms: watched })
       // The dead heat: another watch of this seat claimed it in the same instant. One of us has
       // to go, both of us can see which — see `lost` in `store.claimWatch`.
+      // ⚠ ON STDOUT since 2026-11-21: run as a background shell, this exit re-invokes the session
+      // whatever it prints, and the session's reflex is to start the watch again — which would
+      // stop the other one and come back here. Saying "do not" is what breaks the loop.
       if (claim.lost) {
-        console.error(`[set-agent-comm] another watch of ${ME} (pid ${claim.heldBy}) claimed the ` +
-          `seat at the same moment — leaving it to that one.`)
+        console.log(`[set-agent-comm] another watch of this seat (pid ${claim.heldBy}) is already ` +
+          `running — this one stepped aside. Do NOT start another.`)
         process.exit(0)
       }
       if (claim.superseded.length) {
@@ -1464,11 +1478,49 @@ try {
       // Claude Code session that armed it, and the next session arms another. Their notifications
       // still land, out of a dead session's context and off a cursor nobody advances.
       //
-      // The parent is the shell the Monitor started us from; when the session goes, so does it,
+      // The parent is the shell the Monitor started us from (under a Monitor, which exec'd us — see the
+      // background-shell note just below for the form used since 2026-11-21); when the session goes, so does it,
       // and Linux reparents us to pid 1. That is the signal, and it costs one integer comparison.
-      const PARENT = process.ppid
+      //
+      // ⚠ AND THE WINDOW ITSELF, not only the parent — 2026-11-21. Run as a background Bash task
+      // (the form the SessionStart note now hands out), the parent is NOT the session: measured
+      // that day, the chain is `node` → `/bin/bash -c source <shell snapshot> … ` → `claude`. That
+      // bash is not exec'd away, so if it outlives the window it is merely reparented and the ppid
+      // above never changes — the 2026-09-12 orphan in a new costume. So the owning `claude`
+      // process is watched too (`store.ownerPid`, the identity the seat and the claim already use).
+      // Signal 0 is a liveness probe and sends nothing.
+      // (PARENT and OWNER are taken at the top of `wait`.)
+
+      // ⚠ REPLACED BY A NEWER WATCH OF THIS SEAT (`claimWatch` SIGTERMs the older one). As a
+      // background shell that exit re-invokes the session — measured nowhere yet, found in review
+      // 2026-11-21 — and a session that answers it by starting a watch again stops the newer one,
+      // and so on, one wasted turn per round. So the old one says what happened and that nothing
+      // is to be done. Any other SIGTERM exits as quietly as before.
+      // `claimWatch` signals BEFORE it writes its own claim, so the new pid shows up a moment after
+      // the signal: look for up to half a second, then go either way.
+      let terminating = false
+      process.on("SIGTERM", () => {
+        if (terminating) return
+        terminating = true
+        const until = Date.now() + 500
+        const look = () => {
+          const c = store.watchClaim(ME)
+          if (c?.pid && c.pid !== process.pid) {
+            console.log(`[set-agent-comm] this inbox watch was replaced by a newer one of this seat ` +
+              `(pid ${c.pid}) — that one is watching now. Do NOT start another.`)
+            process.exit(0)
+          }
+          if (Date.now() >= until) process.exit(0)
+          setTimeout(look, 25)
+        }
+        look()
+      })
+      const ownerGone = () => {
+        if (!OWNER) return false
+        try { process.kill(OWNER, 0); return false } catch (e) { return e.code === "ESRCH" }
+      }
       setInterval(() => {
-        if (process.ppid !== PARENT) {
+        if (process.ppid !== PARENT || ownerGone()) {
           console.log(`[set-agent-comm] the session that started this watch is gone — stopping.`)
           process.exit(0)
         }
@@ -1573,9 +1625,11 @@ try {
         // and this line is read at the END of a watch's life — precisely when an agent re-arms
         // by copying whatever it is handed. Measured 2026-09-23: 196 expiries since 09-16 cost
         // 38,150,258 tokens of re-read context and delivered nothing (47 a day on a full day).
-        console.log(`[set-agent-comm] this inbox watch STOPPED — ${why}. Nothing re-arms it: arm ` +
-          `a new one now, or this seat is unwatched. Monitor({ command: "${rearm}", ` +
-          `description: "agent-comm inbox", timeout_ms: 1800000, persistent: true })`)
+        // (2026-11-21: the line now hands out the background-shell form — see `waitCmd` in
+        // hooks/session-start.mjs for why the Monitor form had to go.)
+        console.log(`[set-agent-comm] this inbox watch STOPPED — ${why}. Nothing re-arms it: start ` +
+          `a new one now, or this seat is unwatched. Bash({ command: "${rearm} --once", ` +
+          `run_in_background: true, description: "agent-comm inbox" })`)
         process.exit(0)
       }
       // Half a minute is the right cadence for a 12-hour cap and a 30-second settle; a SHORTER cap
@@ -1856,7 +1910,7 @@ agent: ${AGENT}${ME !== AGENT ? `   ·   writer: ${ME} (this session)` : ""}   �
   sac plugin-files <dir>              the hook lines + skill a PLUGIN ships, path-free
   sac doctor [--project <glob>]       is each project on the bus: hooks, seats, rooms, reads, waiting
   sac quiet [--for 2h] [--off]        stop being woken; delivery is unaffected
-  sac wait [--once] [room…]           BLOCK until a message arrives (for a Monitor)
+  sac wait [--once] [room…]           BLOCK until a message arrives (--once: as a background shell)
   sac watch-paths <room>              the files to watch (for the hook)
   sac register <room>                 check in to the registry (the hook's job — join is yours)
   sac stats [room…] [--since 24h]     what the bus cost: decisions, wake-ups, characters

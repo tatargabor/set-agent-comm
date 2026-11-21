@@ -173,11 +173,16 @@ test("the watch guard declines a watch for a ringable seat with no relay room", 
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /No inbox watch needed/)
 })
 
-test("the guard lets the watch through for a bypass seat, and for anything that is not ours", () => {
+test("the guard sends a bypass seat to the background form, and lets anything not ours through", () => {
+  // 2026-11-21: a bypass seat cannot be rung, so it keeps its watch — but not as a Monitor, which
+  // dies every 30 minutes. The reason must carry the exact command, with `--once`, as a background shell.
   const cmd = `SET_AGENT_ROOM=team ${process.execPath} ${SAC} wait`
   const bypass = runHook("watch-guard.mjs", { tool_name: "Monitor", cwd: "/x/beta", permission_mode: "bypassPermissions",
                                               tool_input: { command: cmd } }, hookEnv(2, { SET_AGENT_NAME: "beta" }))
-  assert.equal(bypass.stdout, "", "a bypass seat cannot be rung, so it keeps its watch")
+  const why = JSON.parse(bypass.stdout).hookSpecificOutput
+  assert.equal(why.permissionDecision, "deny")
+  assert.ok(why.permissionDecisionReason.includes(JSON.stringify(`${cmd} --once`)), why.permissionDecisionReason)
+  assert.match(why.permissionDecisionReason, /run_in_background: true/)
   const other = runHook("watch-guard.mjs", { tool_name: "Monitor", cwd: "/x/beta", permission_mode: "auto",
                                              tool_input: { command: "tail -f build.log" } }, hookEnv(2, { SET_AGENT_NAME: "beta" }))
   assert.equal(other.stdout, "")
@@ -204,10 +209,10 @@ test("SessionStart: a ringable seat is NOT asked to arm a watch; a bypass one st
   const ok = JSON.parse(runHook("session-start.mjs", { cwd: "/x/delta" }, env()).stdout)
   const note = ok.hookSpecificOutput.additionalContext
   assert.match(note, /do NOT need an inbox watch/)
-  assert.doesNotMatch(note, /ARM YOUR INBOX WATCH ONCE/)
+  assert.doesNotMatch(note, /START YOUR INBOX WATCH ONCE/)
   writeFileSync(join(HOME, "settings.json"), JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }))
   const bp = JSON.parse(runHook("session-start.mjs", { cwd: "/x/delta" }, env()).stdout)
-  assert.match(bp.hookSpecificOutput.additionalContext, /ARM YOUR INBOX WATCH ONCE/)
+  assert.match(bp.hookSpecificOutput.additionalContext, /START YOUR INBOX WATCH ONCE/)
   rmSync(join(HOME, "settings.json"))
 })
 

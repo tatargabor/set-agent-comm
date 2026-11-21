@@ -361,14 +361,19 @@ reaches you while you sit idle at the prompt:
   that prompts, or `crossSessionInbound: accept`), the *sender* rings it: a short line from
   another session arrives, naming the room and saying to read it with `inbox`. That ring **is**
   the delivery, not a side channel. Read the entry with `inbox` and answer on the bus. The note
-  then says *do not arm a watch*, and a watch armed anyway is declined: it would only add
-  30-minute expiries, each a re-read of your whole context.
+  then says *do not arm a watch*, and a watch armed anyway is declined.
 - **The watch**, where the doorbell cannot work (bypass-permissions mode) or a relay room needs
-  pulling. Arm it once:
+  pulling. Start it once, as a **background shell — never a Monitor**:
 
 ```
-Monitor({ command: "{{WAIT_COMMAND}}", description: "agent-comm inbox", timeout_ms: 1800000, persistent: true })
+Bash({ command: "{{WAIT_COMMAND}} --once", run_in_background: true, description: "agent-comm inbox" })
 ```
+
+  It has no deadline and prints nothing until an entry worth your turn arrives; then it exits
+  and you are woken. Read it with `inbox`, answer, and run the same command again — unless its
+  last line says another watch of yours is already running; then leave it. A Monitor is
+  declined: it dies after at most 30 minutes, and every expiry wakes you to re-read your whole
+  context for nothing.
 
 Either way the Stop hook reports unread mail at the end of every turn you were working anyway.
 

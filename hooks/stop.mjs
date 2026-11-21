@@ -14,12 +14,14 @@
  * the next one. So there are two different gaps, and they need two different answers:
  *
  *   the agent is working  → THIS hook: it cannot finish the turn with unread mail
- *   the agent is idle     → `sac wait` inside a Monitor: that is what starts a new turn
+ *   the agent is idle     → `sac wait --once` in a background shell: that starts a new turn
+ *                           (a Monitor until 2026-11-21 — see `waitCmd` in session-start.mjs)
  *
  * ⚠ It nudges ONCE per entry (see `shouldNudge`). Claude Code has no `stop_hook_active` field
  * to break a blocking loop, so a hook that blocked on every unread message would trap an agent
  * that does not read it. Blocking is a strong move: it may be used to say something NEW.
  */
+import { closeSync, fstatSync, openSync, readSync } from "node:fs"
 import { basename } from "node:path"
 import * as store from "../src/store.mjs"
 
@@ -60,7 +62,77 @@ if (store.headless()) {
   process.exit(0)
 }
 
-const pending = []
+/**
+ * ⚠ A TURN THAT ENDS ON `ALL DONE:` OR `NEED INPUT:` IS NOT SENT BACK — 2026-11-21, asked for by
+ * the AI+ family's hook analysis (309 sessions, 2026-11-06..13): this hook's mail nag was the
+ * second-largest source of forced turns (107). Those two lines are the family's stated hand-overs
+ * to the person: the work is finished, or it cannot go on without them. Sending such a turn back
+ * makes the agent bury the hand-over under a mail errand the person never asked about.
+ *
+ * Read only when there IS something to block on (most turns end with no mail, and the transcript
+ * fallback reads up to 512 KB), and BEFORE `shouldNudge`, so nothing is spent: the entry stays
+ * unread, a running watch still announces it, and the next turn's Stop still nudges it once.
+ */
+const lastWords = () => {
+  if (typeof payload.last_assistant_message === "string") return payload.last_assistant_message
+  if (typeof payload.transcript_path !== "string") return ""
+  // Older harnesses do not hand the final message over; the transcript's tail has it. Bounded:
+  // a session's transcript runs to tens of MB, and this runs at the end of a turn.
+  try {
+    const fd = openSync(payload.transcript_path, "r")
+    try {
+      const size = fstatSync(fd).size, len = Math.min(size, 512 * 1024)
+      const buf = Buffer.alloc(len)
+      readSync(fd, buf, 0, len, size - len)
+      const lines = buf.toString("utf8").split("\n")
+      const texts = []
+      // Back to the last USER entry (a prompt or a tool result) and no further: only what the
+      // agent said AFTER it is this turn's ending. Walking on past it would let the previous
+      // turn's `ALL DONE:` exempt a turn that ended on a tool call.
+      for (let i = lines.length - 1; i >= 0; i--) {
+        let e
+        try { e = JSON.parse(lines[i]) } catch { continue }
+        if (e?.type === "user") break
+        if (e?.type !== "assistant") continue
+        const text = (Array.isArray(e.message?.content) ? e.message.content : [])
+          .filter(c => c?.type === "text").map(c => c.text).join("\n")
+        if (text) texts.unshift(text)
+      }
+      return texts.join("\n")
+    } finally { closeSync(fd) }
+  } catch { /* no transcript, or unreadable: decide as if there were no hand-over */ }
+  return ""
+}
+const HANDOVER = /^\s*(ALL DONE|NEED INPUT):/m
+
+/**
+ * ⚠ ONLY A QUESTION OR REQUEST ADDRESSED TO THIS SEAT holds the turn — 2026-11-21, same analysis —
+ * WHILE A WATCH OF THIS SEAT IS RUNNING. `wakes` stays the precondition (the one rule; this only
+ * narrows it), but it also says yes to a QUESTION/REQUEST broadcast to the whole room and to an
+ * addressed FACT or ANSWER, and neither owes THIS turn anything: the running watch announces them
+ * once the seat is idle (a broadcast after the letterbox has weighed it), and a fact or an answer
+ * is read when the agent next looks.
+ *
+ * ⚠ Without a running watch the narrowing would strand them: since the watch became a one-shot
+ * background shell, it exists only while the agent keeps re-running it, and a seat that forgot to
+ * would hear about a broadcast REQUEST from nobody (caught in review, 2026-11-21). So there the
+ * old rule stands — every `wakes` entry blocks, once. The doorbell does not change this: it rings
+ * only a direct address or a pair room, and a broadcast is left to the watch.
+ *
+ * Addressed means: one of `to` is this seat's name or its project's (`store.addressForms`), or,
+ * with no `to`, a room where an unaddressed entry has exactly one other party — the other side of
+ * a seat DM, or the other project of a project room (`store.addressedIn`). Never `owner`.
+ */
+const narrow = store.watchLive(writer)
+const forms = store.addressForms(writer)
+const addressedToMe = (m, room) => {
+  const pair = store.pairArg(room)
+  const e = store.addressedIn(m, pair)
+  return e.to?.length ? e.to.some(n => !store.isOwner(n) && forms.has(n)) : pair === true
+}
+const ASKS = new Set(["QUESTION", "REQUEST"])
+
+const found = []
 // The seat's OWN rooms, not the environment's — see `store.wakingRooms`. A room joined mid
 // session used to be invisible here, and one parted was still able to interrupt.
 for (const room of store.wakingRooms(writer)) {
@@ -79,9 +151,19 @@ for (const room of store.wakingRooms(writer)) {
   // to us", which a broadcast satisfies, and since every entry in the first two days of live
   // traffic was a broadcast, it meant: every entry blocked the end of every turn. One session
   // was blocked 33 times. A broadcast FACT is delivered, stays unread, and holds nobody up.
-  const waking = messages.filter(m => m.wakes)
+  const waking = messages.filter(m => m.wakes && (!narrow || (ASKS.has(m.type) && addressedToMe(m, room))))
   const last = waking.at(-1)
   if (!unreadWaking || !last) continue
+  found.push({ room, unread, waking, last })
+}
+
+if (found.length && HANDOVER.test(lastWords())) {
+  process.stdout.write("{}")
+  process.exit(0)
+}
+
+const pending = []
+for (const { room, unread, waking, last } of found) {
   if (!store.shouldNudge({ room, agent: writer, ts: last.ts })) continue
   // ⚠ A HELD TURN IS THE EXPENSIVE HALF, and this is where it actually happens — the decision
   // was recorded when the entry was written, but a decision only becomes a cost when it reaches
@@ -91,38 +173,21 @@ for (const room of store.wakingRooms(writer)) {
   store.recordWake({ room, seat: writer, entry: last.ts, how: "blocked" })
   const who = [...new Set(waking.map(m => m.from))].join(", ")
   const preview = last.text.replace(/\s+/g, " ").slice(0, 200)
-  const others = unread - unreadWaking
-  pending.push(`${unreadWaking} in "${room}" from ${who} — last one (${last.type}): "${preview}"` +
+  const others = unread - waking.length
+  pending.push(`${waking.length} in "${room}" from ${who} — last one (${last.type}): "${preview}"` +
     (others ? ` (+${others} that can wait)` : ""))
 }
 
-// ── the one thing worth asking for when there is no mail ─────────────────────
-// An undeclared `focus` costs twice over: the letterbox has nothing to weigh an incoming message
-// against, so it wakes this seat for everything; and the others have to ASK what it is working on
-// — measured, 46 entries in two days went on exactly that. So a seat that has never declared one
-// is asked ONCE, ever, and only when it has no mail to deal with and there is somebody to tell.
-//
-// ⚠ Once per seat, on disk. A reminder that returns every turn is a reminder that gets ignored,
-// and it would be the second interruption engine this project has had to remove.
-if (!pending.length && !store.getFocus(writer)) {
-  const rooms = store.wakingRooms(writer)
-  const others = rooms.some(r => store.liveSeats(r).some(s => s !== writer))
-  if (others && store.firstTime(`focus::${writer}`))
-    pending.push("__focus__")
-}
-const focusOnly = pending.length === 1 && pending[0] === "__focus__"
+// ── focus: asked for at SessionStart, never by holding a turn ─────────────────
+// ⚠ Until 2026-11-21 a seat with no declared `focus` was blocked here, once per seat. The same
+// analysis counted it: 25 forced turns in 25 sessions — one per session, every one of them a turn
+// spent on a declaration the SessionStart note already asks for. The note stays; the block went.
+// (Why `focus` matters is unchanged: the letterbox weighs mail against it, and the others read it
+// instead of asking — 46 entries in two days once went on "who is working on what".)
 
 // `decision: "block"` sends the agent back to work with the reason in hand. The room is named,
 // so it does not have to guess which `inbox` to call.
-process.stdout.write(JSON.stringify(focusOnly
-  ? {
-      decision: "block",
-      reason: `[set-agent-comm] You have not said what you are working on. Declare it once with ` +
-        `\`focus\` (one sentence + the paths) — the other sessions read it instead of asking you, ` +
-        `and the inbox watcher uses it to decide whether a message is yours. Then carry on; ` +
-        `you will not be asked again.`,
-    }
-  : pending.length
+process.stdout.write(JSON.stringify(pending.length
   ? {
       decision: "block",
       reason: `[set-agent-comm] Something that needs you arrived while you were working: ` +
@@ -132,6 +197,8 @@ process.stdout.write(JSON.stringify(focusOnly
         // every seat to answer every message, and the answers were themselves broadcasts that
         // obliged another round. What blocks now is narrow enough to be answered on its merits.
         `Answer it if it is a question or a request; if it is a fact you have nothing to add to, ` +
-        `reading it is the whole job — do not send an acknowledgement.`,
+        `reading it is the whole job — do not send an acknowledgement.` +
+        (narrow ? "" : ` (Your inbox watch is not running, so nothing will announce mail while you ` +
+          `sit idle — start it again with the command from the session-start note.)`),
     }
   : {}))

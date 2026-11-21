@@ -87,32 +87,35 @@ test("the heartbeat beats for a seat with NO configured room — the form a plug
   assert.ok(s?.lastSeen, "no beat was recorded, so `seatBusy` can never see this seat working")
 })
 
-// ── the watch guard: a re-arm only for something this seat is waiting on ──────
-const guard = (agent, session) => {
+// ── the watch guard: no Monitor at all, the background form instead (2026-11-21) ──────
+// Superseded: "a re-arm only for something this seat is waiting on" (2026-11-08). Measured the
+// evening it went: a seat with five "open" REQUESTs — two answered without `re:` — re-armed a
+// 30-minute Monitor four times in a row, every one allowed. `store.awaitingReply` stays (it is
+// still the honest answer to "what is this seat waiting on"); the guard no longer asks it.
+const guard = (agent, session, command = `SET_AGENT_NAME=${agent} sac wait`) => {
   const env = { ...process.env, SET_AGENT_NAME: agent, CLAUDE_CODE_SESSION_ID: session,
                 SET_AGENT_OWNER_PID: String(process.pid), SET_AGENT_HEADLESS: "0" }
   const payload = { tool_name: "Monitor", cwd: `/work/${agent}`, permission_mode: "bypassPermissions",
-                    tool_input: { command: `SET_AGENT_NAME=${agent} sac wait` } }
+                    tool_input: { command } }
   const r = spawnSync(process.execPath, [join(HOOKS, "watch-guard.mjs")], { input: JSON.stringify(payload), env, encoding: "utf8" })
   assert.equal(r.status, 0)
   return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput : null
 }
 
-test("the guard: the first watch goes through, a reflex re-arm does not, a re-arm for an open REQUEST does", () => {
+test("the guard declines EVERY Monitor of `sac wait` — first, re-arm, waiting or not — and names the background form", () => {
   const session = "d1000001-0000-4000-8000-000000000001"
   const me = store.register({ agent: "waiter", session, room: "talk", project: "/work/waiter", fromConfig: true }).writer
   const peer = seat("peer", "d2000001-0000-4000-8000-000000000001", "talk")
-  assert.equal(guard("waiter", session), null, "the first watch of a session was declined")
-
-  store.claimWatch({ seat: me, rooms: ["talk"], pid: 2 ** 22 + 7 })   // that watch, since expired
-  const denied = guard("waiter", session)
-  assert.equal(denied?.permissionDecision, "deny", "an expiry was re-armed with nothing to wait for")
-  assert.match(denied.permissionDecisionReason, /Not re-arming/)
+  const first = guard("waiter", session)
+  assert.equal(first?.permissionDecision, "deny", "a 30-minute Monitor was let through")
+  assert.match(first.permissionDecisionReason, /Bash\(\{ command: "SET_AGENT_NAME=waiter sac wait --once", run_in_background: true/)
 
   const asked = store.send({ room: "talk", from: me, type: "REQUEST", text: "can you check the export?", to: [peer] })
-  assert.equal(guard("waiter", session), null, "a seat waiting on an answer was left without its watch")
   assert.deepEqual(store.awaitingReply(me, { rooms: ["talk"] }).map(o => o.ts), [asked.ts])
+  assert.equal(guard("waiter", session)?.permissionDecision, "deny", "an open REQUEST re-opened the Monitor door")
 
-  store.send({ room: "talk", from: peer, type: "ANSWER", text: "done", to: [me], re: asked.ts })
-  assert.equal(guard("waiter", session)?.permissionDecision, "deny", "answered, and the watch still re-armed")
+  // Already `--once`, or rooms argued after `wait`: the flag is not doubled, and lands before the rooms.
+  assert.match(guard("waiter", session, "sac wait --once talk").permissionDecisionReason, /"sac wait --once talk"/)
+  assert.match(guard("waiter", session, "/x/bin/sac.mjs wait talk").permissionDecisionReason, /"\/x\/bin\/sac\.mjs wait --once talk"/)
+  assert.match(guard("waiter", session, "sac wait talk --once").permissionDecisionReason, /"sac wait talk --once"/)
 })

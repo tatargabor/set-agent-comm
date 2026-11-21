@@ -585,6 +585,24 @@ export function claimWatch({ seat, rooms = [], pid = process.pid, owner = ownerP
   return { superseded, lost, heldBy: lost ? held.pid : null }
 }
 
+/**
+ * Is a watch of this seat RUNNING right now — its claim's pid alive and still a `sac wait`?
+ * The Stop hook reads it (2026-11-21): since the watch became a one-shot background shell
+ * (`sac wait --once`), a seat is watched only while the agent keeps re-running it, and the Stop
+ * hook narrows what it blocks on only where something else will still announce the rest.
+ */
+export function watchLive(seat) {
+  try { assertSafeWriter(seat) } catch { return false }
+  const claim = readJson(join(WATCHES, `${seat}.json`), null)
+  return !!claim?.pid && alive(claim.pid) && looksLikeWatch(claim.pid)
+}
+
+/** The seat's watch claim as recorded (`{ pid, owner, rooms, startedAt }`), or null. */
+export function watchClaim(seat) {
+  try { assertSafeWriter(seat) } catch { return null }
+  return readJson(join(WATCHES, `${seat}.json`), null)
+}
+
 /** Whether this seat has armed a watch before — its claim outlives the process (see `pruneWatches`). */
 export function hadWatch(seat) {
   try { assertSafeWriter(seat) } catch { return false }

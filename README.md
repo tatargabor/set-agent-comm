@@ -696,11 +696,21 @@ notice you swallowed something. The watch command is **substituted in at install
 skill is a static file, and an agent guessing at a path is an agent that silently does not
 watch.
 
-The SessionStart note tells every session to arm that watch, in full:
+The SessionStart note tells every session to start that watch, in full — as a **background
+shell**, since 2026-11-21:
 
 ```js
-Monitor({ command: "… sac wait <rooms>", description: "agent-comm inbox", persistent: true })
+Bash({ command: "… SET_AGENT_ROOM=<rooms> … sac wait --once", run_in_background: true, description: "agent-comm inbox" })
 ```
+
+⚠ It was a `Monitor({ …, persistent: true })` until that day. The harness then dropped
+`persistent`: every Monitor dies after at most 30 minutes, and each expiry is a turn that re-reads
+the whole context for nothing — the owner's report was "it wakes up again every 30 minutes and the
+tokens run out". A background task wakes the session only when it exits, and `--once` exits only
+on an entry worth a turn; the agent reads it and runs the same command again. `hooks/watch-guard.mjs`
+declines a Monitor of `sac wait` and hands over this form instead. Where the Monitor's own exec
+kept the watch's parent the session, the background shell puts a `bash -c` wrapper in between, so
+the watch also checks that its owning `claude` process is alive (`ownerPid`, taken at start).
 
 ⚠ This sentence was missing until 2026-08-05, and it was the weakest link in the chain: a
 mechanism nobody switches on is indistinguishable from one that does not exist.

@@ -257,8 +257,22 @@ const siblings = writer !== agent
 // says on STDOUT that it stopped and asks for a fresh watch. See the note above `restart` in
 // `bin/sac.mjs`: that line is actionable, which is exactly what the earlier stderr-only text was
 // not.
-const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${SAC} wait`
-// ⚠ `timeout_ms` IS NOT OPTIONAL, AND THE NUMBER IS THE POINT. The Monitor tool caps a watch
+// ⚠ `--once`, AND A BACKGROUND SHELL, NOT A MONITOR — 2026-11-21. The owner's report that day:
+// "it wakes up again every 30 minutes and the tokens run out; it used to be unlimited". The
+// Monitor tool no longer has `persistent` at all: every Monitor dies at `timeout_ms`, at most
+// 30 minutes, and its expiry is a turn that re-reads the whole context. Measured on one seat the
+// same evening: four 30-minute re-arms in a row, each allowed by watch-guard because the seat had
+// a REQUEST out. Nothing on this side can lengthen a Monitor.
+//
+// A Bash `run_in_background` task has no such deadline — measured the same night: a 31m40s
+// background `sleep` ran to completion and reported (23:33 → 00:05) — and it re-invokes the
+// session when it EXITS, and only then. `sac wait --once` exits on the first entry worth a turn, so the session is woken
+// exactly when there is mail, and re-runs the same command after reading it. Its own age cap
+// re-executes in place (see `restart` in `bin/sac.mjs`), silently, so it costs no wake either.
+// The comments below about `timeout_ms` are kept: they are why the Monitor form had to go.
+const waitCmd = `${ENV}SET_AGENT_ROOM=${rooms.join(",")} ${process.execPath} ${SAC} wait --once`
+const watchCall = `Bash({ command: "${waitCmd}", run_in_background: true, description: "agent-comm inbox" })`
+// ⚠ (Monitor era, kept for the record) `timeout_ms` IS NOT OPTIONAL, AND THE NUMBER IS THE POINT. The Monitor tool caps a watch
 // at 30 minutes and DEFAULTS to five, so a line that omits it asks a literal-minded agent to
 // wake ~288 times a day instead of ~48. Every expiry wakes an idle session, and `bin/sac.mjs`
 // already states the price above `wait`: "a Monitor notification to an idle session pays for
@@ -294,18 +308,17 @@ const doorbellNote = rooms.length && bell.ok && !relayed.length
   ? ` You are woken through this session's own inbox socket (the sender rings it), so you do NOT ` +
     `need an inbox watch — do not arm one; the Stop hook still reports unread mail at the end of ` +
     `each turn. Only if this window is switched to bypass-permissions mode does that stop working; ` +
-    `then arm it once: Monitor({ command: "${waitCmd}", description: "agent-comm inbox", ` +
-    `timeout_ms: 1800000, persistent: true }).`
+    `then start the watch once: ${watchCall}.`
   : ""
 const monitor = doorbellNote || !rooms.length ? doorbellNote : rooms.length
-  ? ` ARM YOUR INBOX WATCH ONCE, now: Monitor({ command: "${waitCmd}", ` +
-    `description: "agent-comm inbox", timeout_ms: 1800000, persistent: true }). Nothing else ` +
-    `wakes you while you are idle at the prompt, so without it a message addressed to you ` +
-    `waits until someone happens to write to you here. Keep that timeout_ms: the tool's own ` +
-    `default is 5 minutes, and every expiry wakes you and re-reads your WHOLE context ` +
-    `(measured over 3 full days: 47 expiries a day, 8.9M tokens a day, zero messages). When it EXPIRES, re-arm ` +
-    `only if this session will sit idle and someone is actually waiting on you — the Stop hook ` +
-    `already reports unread mail at the end of each turn, in a context that is already loaded.`
+  ? ` START YOUR INBOX WATCH ONCE, now, as a BACKGROUND SHELL (not a Monitor): ${watchCall}. ` +
+    `It has no deadline and prints nothing until an entry worth your turn arrives; then it exits ` +
+    `and you are woken. Read it with \`inbox\`, answer, and run the SAME command again the same way ` +
+    `(unless its last line says another watch of yours is running — then leave it). ` +
+    `Do not use Monitor for this: a Monitor expires after at most 30 minutes, and every expiry ` +
+    `wakes you to re-read your WHOLE context for nothing (measured: 47 expiries a day, 8.9M tokens ` +
+    `a day, zero messages). Mail that arrives while you work is reported by the Stop hook at the ` +
+    `end of the turn anyway.`
   : ""
 
 if (notices.length || backlog.length || siblings || monitor) {

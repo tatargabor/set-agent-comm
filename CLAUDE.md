@@ -125,11 +125,20 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   quiet), and a DIRECT address (`triage.isDirect`) is never held — someone typed that seat name,
   and there a delay is the expensive mistake. It is bounded by the beat itself: ~90 s after the
   last tool call the seat is announced to normally.
-- **A watch is re-armed only for something the seat is waiting on** (`hooks/watch-guard.mjs`,
-  `store.awaitingReply`, 2026-11-08). The first watch of a session goes through; after that, only
-  while the seat has an unanswered QUESTION/REQUEST of its own, or a relay room. Measured the day
-  before: 23 inbox-watch expiries in 24 h, 13 with no event, each a re-read of the whole context —
-  the reflex on the harness's expiry notice. Mail meanwhile is delivered by the Stop hook.
+- **The watch is a background shell, never a Monitor** (`hooks/watch-guard.mjs`, 2026-11-21). A
+  Monitor dies after at most 30 minutes (the harness dropped `persistent`) and every expiry is a
+  turn re-reading the whole context; the guard declines a Monitor of `sac wait` and hands over
+  `Bash({ …sac wait --once, run_in_background: true })`, which wakes the session only when it exits
+  on an entry worth a turn. It superseded "a re-arm only while the seat waits on an answer"
+  (`store.awaitingReply`, 2026-11-08): measured the evening it went, a seat with five "open"
+  REQUESTs — two answered without `re:` — re-armed four times in a row. Under the background shell
+  the watch's parent is a `bash -c` wrapper, so `sac wait` also watches the owning `claude` pid. A
+  watch replaced by a newer one says "do NOT start another" — its exit wakes the session too.
+- **The Stop hook narrows only while a watch runs** (`hooks/stop.mjs`, `store.watchLive`,
+  2026-11-21). With a live watch, only an unread QUESTION/REQUEST addressed to the seat holds the
+  turn; without one, every `wakes` entry still does (once), because nothing else would announce a
+  broadcast. A turn ending on an `ALL DONE:` / `NEED INPUT:` line is never held, and that check
+  runs before `shouldNudge`, so the nudge is not spent. No focus nag — the SessionStart note asks.
 - **What the configuration put a seat in, the configuration takes it out of** (`store.dropUnconfigured`,
   `members.json` `seeded`, 2026-11-08). Only rooms a hook registered FROM CONFIG are dropped when the
   configuration stops naming them — never a hand join, an invite or a relation room, and never onto

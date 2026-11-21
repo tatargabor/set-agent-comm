@@ -7,7 +7,7 @@
 // runs them, rather than calling the functions behind them.
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync, readFileSync } from "node:fs"
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -46,24 +46,41 @@ const SEAT = "web-app#two"
 sac("one", "register", "team")
 sac("two", "register", "team")
 
-// ⚠ An undeclared `focus` is asked for ONCE per seat, ever, and only when there is no mail and
-// somebody to tell. It costs one turn and it buys two things back: the letterbox gets something to
-// weigh a message against (without it, everything wakes this seat), and the others stop asking —
-// measured, 46 entries in two days went on "who is working on what".
-test("a seat that never said what it is working on is asked — once", () => {
-  const first = stopHook("two")
-  assert.equal(first.decision, "block", "nobody ever asks, so nobody ever declares one")
-  assert.match(first.reason, /focus/, "the reason does not name what to do about it")
-  assert.deepEqual(stopHook("two"), {},
-    "it asked again — a reminder that returns every turn is the second interruption engine")
+// ⚠ An undeclared `focus` USED to be asked for here, once per seat, by holding the turn. Removed
+// 2026-11-21: the AI+ family's hook analysis counted 25 forced turns in 25 sessions for it, and the
+// SessionStart note already asks. The note stays (see headless.test.mjs); the block may not come back.
+test("a seat that never said what it is working on is NOT held for it", () => {
+  assert.deepEqual(stopHook("two"), {}, "a turn was held to ask for a focus declaration")
 })
 
 test("the Stop hook lets a turn end when there is nothing unread", () => {
   assert.deepEqual(stopHook("two"), {})
 })
 
+// ⚠ 2026-11-21: WHILE A WATCH OF THE SEAT RUNS, what holds a turn is a QUESTION or REQUEST
+// ADDRESSED to it (or its project, or the one other party of a pair room). A broadcast REQUEST is
+// the watch's to announce after the letterbox; an addressed FACT or ANSWER is read when the agent
+// next looks. The AI+ family's hook analysis counted this hook's nag at 107 forced turns in a week.
+// ⚠ And WITHOUT a running watch the old rule stands — caught in review the same day: the watch is a
+// one-shot background shell now, and a seat that forgot to re-run it would otherwise hear about a
+// broadcast REQUEST from nobody.
+test("with a watch running, a broadcast REQUEST does not hold the turn, nor an addressed FACT/ANSWER — without one, it does", async () => {
+  sac("one", "send", "team", "REQUEST", "Anyone free to look at the atlas build?")
+  sac("one", "send", "team", "FACT", "Rebuilt the index for you.", "--to", SEAT)
+  sac("one", "send", "team", "ANSWER", "Yes, the export is fine.", "--to", SEAT)
+  const watch = spawn(process.execPath, [SAC, "wait", "team"], { env: env("two") })
+  try {
+    await new Promise(r => setTimeout(r, 1500))               // let it take the seat's claim
+    assert.deepEqual(stopHook("two"), {}, "a turn was held for something that owes it nothing")
+  } finally { watch.kill() }
+  await new Promise(r => watch.on("exit", r))
+  const out = stopHook("two")
+  assert.equal(out.decision, "block", "no watch is running, and the broadcast REQUEST reached nobody")
+  assert.match(out.reason, /watch is not running/, "it did not say why this one holds the turn")
+})
+
 test("the Stop hook BLOCKS the end of the turn when a message arrived", () => {
-  sac("one", "send", "team", "REQUEST", "Do not regenerate the atlas yet.")
+  sac("one", "send", "team", "REQUEST", "Do not regenerate the atlas yet.", "--to", SEAT)
   const out = stopHook("two")
   assert.equal(out.decision, "block", "the agent was allowed to finish with unread mail")
   assert.match(out.reason, /team/, "the reason does not name the room to read")
@@ -391,4 +408,39 @@ test("a room named as an ARGUMENT means exactly that room — an explicit list i
     env: solo("three"), encoding: "utf8", timeout: 8000,
   })
   assert.doesNotMatch(r.stdout, /pair/, "an explicit room list quietly widened itself")
+})
+
+// ── a hand-over to the person is not sent back (2026-11-21) ────────────────────
+// `ALL DONE:` / `NEED INPUT:` are the AI+ family's stated hand-overs. A turn ending on one is not
+// held for mail — and, the half that matters, the nudge is NOT spent: the entry is still unread and
+// the next ordinary turn end still blocks for it once.
+const stopWith = (session, extra) => JSON.parse(spawnSync(process.execPath, [STOP], {
+  env: env(session), encoding: "utf8", input: JSON.stringify({ cwd: "/x", session_id: session, ...extra }),
+}).stdout || "{}")
+
+test("a turn ending on ALL DONE: or NEED INPUT: is not held, and the nudge survives it", () => {
+  sac("one", "send", "team", "REQUEST", "Please re-run the atlas export.", "--to", SEAT)
+  assert.deepEqual(stopWith("two", { last_assistant_message: "Shipped it.\nALL DONE: export fixed, tests green." }), {},
+    "a finished turn was sent back for mail")
+  // The older harness: no `last_assistant_message`, only the transcript.
+  const tx = join(ROOT, "transcript.jsonl")
+  writeFileSync(tx, [
+    { type: "user", message: { content: "go" } },
+    { type: "assistant", message: { content: [{ type: "text", text: "NEED INPUT: which bucket should it go to?" }] } },
+  ].map(l => JSON.stringify(l)).join("\n") + "\n")
+  assert.deepEqual(stopWith("two", { transcript_path: tx }), {}, "a turn waiting on the person was sent back")
+  const out = stopWith("two", { last_assistant_message: "Working on it; ALL DONE: is not at a line start here." })
+  assert.equal(out.decision, "block", "the hand-over spent the nudge — the request would never be raised")
+  assert.match(out.reason, /re-run the atlas export/)
+
+  // The PREVIOUS turn's hand-over does not exempt this one: the transcript is read back only to the
+  // last user entry (a prompt or a tool result), and this turn ended on a tool call.
+  sac("one", "send", "team", "REQUEST", "And the legend too, please.", "--to", SEAT)
+  writeFileSync(tx, [
+    { type: "assistant", message: { content: [{ type: "text", text: "ALL DONE: yesterday's work." }] } },
+    { type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } },
+    { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: {} }] } },
+  ].map(l => JSON.stringify(l)).join("\n") + "\n")
+  assert.equal(stopWith("two", { transcript_path: tx }).decision, "block",
+    "an earlier turn's ALL DONE: exempted this one")
 })

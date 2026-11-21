@@ -122,8 +122,8 @@ test("the one command it is offered does not rely on PATH", () => {
 test("a headless run is given NO imperative and NO watching", () => {
   const out = hook(START, "machine", { SET_AGENT_HEADLESS: "1" })
   const ctx = out.hookSpecificOutput.additionalContext
-  assert.doesNotMatch(ctx, /Monitor\(/, "it was told to arm a watch that can never wake it")
-  assert.doesNotMatch(ctx, /ARM YOUR INBOX/, "the imperative survived")
+  assert.doesNotMatch(ctx, /Monitor\(|run_in_background/, "it was told to arm a watch that can never wake it")
+  assert.doesNotMatch(ctx, /YOUR INBOX WATCH/, "the imperative survived")
   assert.doesNotMatch(ctx, /say so once with/, "it was told to declare a focus nobody will read")
   assert.equal(out.hookSpecificOutput.watchPaths, undefined,
     "it registered file watches for a process that exits after one task")
@@ -134,38 +134,30 @@ test("REGRESSION: an interactive session still gets all of it", () => {
   // session that looks fine and is simply never woken again.
   const out = hook(START, "human", { SET_AGENT_HEADLESS: "0" })
   const ctx = out.hookSpecificOutput.additionalContext
-  assert.match(ctx, /Monitor\(/, "an interactive session was left without its watch command")
+  assert.match(ctx, /Bash\(\{ command: /, "an interactive session was left without its watch command")
   assert.match(ctx, /focus/, "the focus request is gone")
   assert.ok(out.hookSpecificOutput.watchPaths?.length, "an interactive session is watching nothing")
 })
 
-test("REGRESSION: the watch it arms carries the LONGEST timeout the Monitor allows", () => {
-  // ⚠ Measured 2026-09-23, in a real session, from `.claude/logs/context-guard.jsonl`:
-  //
-  //     196 expiries since 09-16 · 38,150,258 tokens of re-read context · ZERO messages
-  //     (47 expiries and 8.9M tokens on an average full day, mean context 194,644)
-  //
-  // The Monitor tool caps every watch at 30 minutes and its DEFAULT is five. Each expiry wakes
-  // an idle session, and this file's own `sac.mjs` comment already states the price: "a Monitor
-  // notification to an idle session pays for the whole context again". A line that omits
-  // `timeout_ms` therefore asks a literal-minded agent to wake ~288 times a day instead of ~48 —
-  // and the cost is proportional to the session's context, so it is WORST exactly in the long
-  // sessions the bus exists to coordinate.
-  //
-  // The number is asserted, not just its presence: a smaller value is the regression, and
-  // "there is a timeout_ms" would pass while the watch woke every five minutes.
+test("REGRESSION: the watch it hands out is a background shell with no deadline, never a Monitor", () => {
+  // ⚠ 2026-09-23 (kept): a Monitor's expiry is a turn that re-reads the whole context — 196 expiries
+  // since 09-16 cost 38,150,258 tokens and delivered nothing. Then the answer was the LONGEST
+  // timeout the Monitor allows. 2026-11-21: that is no answer any more. The Monitor lost
+  // `persistent`, every one dies at 30 minutes at most, and the owner reported the result: "it wakes
+  // up again every 30 minutes and the tokens run out". A background Bash task wakes the session
+  // only when it exits, and `sac wait --once` exits only on an entry worth a turn.
   const ctx = hook(START, "human", { SET_AGENT_HEADLESS: "0" }).hookSpecificOutput.additionalContext
-  const ms = Number(ctx.match(/timeout_ms:\s*(\d+)/)?.[1])
-  assert.equal(ms, 1_800_000, `the armed watch does not carry the 30-minute cap: ${ctx}`)
+  assert.doesNotMatch(ctx, /Monitor\(\{/, `it still hands out a Monitor: ${ctx}`)
+  assert.match(ctx, /Bash\(\{ command: "[^"]*sac\.mjs wait --once", run_in_background: true/,
+    `the background form with --once is not what it hands out: ${ctx}`)
 })
 
-test("REGRESSION: it says what to do when the watch EXPIRES, not only how to arm it", () => {
-  // Arming is a one-off; expiry happens every 30 minutes for the life of the session. Without a
-  // stated policy the reflex is to re-arm — that reflex is what produced the 27 expiries above.
-  // The cheap delivery already exists and is named here so the agent can weigh it: the Stop hook
-  // reports unread mail at the end of every turn, into a context that is already loaded.
+test("REGRESSION: it says what to do when the watch fires, and that a Monitor is the wrong tool", () => {
+  // The re-arm is part of the instruction: a `--once` watch ends with its event, so a session told
+  // only how to START it would be unwatched after its first message.
   const ctx = hook(START, "human", { SET_AGENT_HEADLESS: "0" }).hookSpecificOutput.additionalContext
-  assert.match(ctx, /expir/i, `nothing tells it what an expiry means: ${ctx}`)
+  assert.match(ctx, /run the SAME command again/, `nothing says to start it again: ${ctx}`)
+  assert.match(ctx, /Do not use Monitor/, `the 30-minute trap is not named: ${ctx}`)
   assert.match(ctx, /Stop hook/, `the free delivery path is not named: ${ctx}`)
 })
 
@@ -176,7 +168,7 @@ test("REGRESSION: the watch it arms points at THIS store, not the default one", 
   // indistinguishable from a working one right up until a message does not arrive, which is the
   // whole failure this hook was written to remove.
   const ctx = hook(START, "human", { SET_AGENT_HEADLESS: "0" }).hookSpecificOutput.additionalContext
-  const cmd = ctx.match(/Monitor\(\{ command: "([^"]+)"/)?.[1]
+  const cmd = ctx.match(/Bash\(\{ command: "([^"]+)"/)?.[1]
   assert.ok(cmd, `no watch command to check: ${ctx}`)
   assert.match(cmd, new RegExp(`SET_AGENT_COMM_DIR=${ROOT}\\b`),
     `the armed watch would read the default store: ${cmd}`)
@@ -186,7 +178,9 @@ test("REGRESSION: the watch it arms points at THIS store, not the default one", 
 
 test("a headless run is NOT blocked by mail it could not act on", () => {
   hook(START, "other", { SET_AGENT_HEADLESS: "0" })
-  sac("other", "send", "team", "REQUEST", "Do not regenerate the atlas yet.")
+  // Addressed to the project: since 2026-11-21 only a QUESTION/REQUEST addressed to the seat holds
+  // a turn, and this test is about the headless exit, not about a broadcast.
+  sac("other", "send", "team", "REQUEST", "Do not regenerate the atlas yet.", "--to", "web-app")
   assert.deepEqual(hook(STOP, "machine", { SET_AGENT_HEADLESS: "1" }), {},
     "the machine was sent back to triage somebody else's message — up to 24 blocked turns an hour")
 })

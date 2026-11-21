@@ -11,11 +11,13 @@
  * mechanism.
  *
  * Where the doorbell works (`store.ringable`), the sender wakes this session through its own
- * inbox socket and the watch adds nothing. Relay rooms still need it — their entries arrive only
- * through a pull, and the watch is what pulls — so a seat in one is never declined.
+ * inbox socket and the watch adds nothing. Everywhere else the watch is still wanted, but NOT as a
+ * Monitor (2026-11-21): the reason hands over the background-shell form, `sac wait --once`, which
+ * has no deadline. Relay rooms included — that form pulls them just the same.
  *
  * IT NEVER BLOCKS ANYTHING ELSE AND NEVER THROWS. Any doubt — an unparsable payload, a Monitor
- * that is not ours, a seat with no doorbell — ends in silence, which lets the call through.
+ * that is not ours — ends in silence, which lets the call through. It is wired on `Monitor` only,
+ * so the background form it recommends is never declined by it.
  */
 import { basename } from "node:path"
 
@@ -42,34 +44,19 @@ try {
     const bridge = await import("../src/bridge.mjs")
     const relayed = rooms.filter(r => bridge.roomConfig(r))
     /**
-     * ⚠ A RE-ARM ONLY FOR SOMETHING THIS SEAT IS WAITING ON (2026-11-08). Most seats of a family
-     * run in bypass mode, where the doorbell cannot ring, so the branch below never fired for
-     * them — and the reflex on the harness's own expiry notice ("Re-arm it if you still need the
-     * watch") is to re-arm. Measured over the 24 hours before: 19 arms and 23 expiries of inbox
-     * watches, 13 of those with no event at all, 15 in one session; each expiry a turn that re-reads
-     * the whole context. The owner's line: nothing may wake a session needlessly.
+     * ⚠ (2026-11-08, SUPERSEDED 2026-11-21) A re-arm used to go through only while this seat had a
+     * QUESTION or REQUEST open (`store.awaitingReply`). Measured the evening it was superseded: one
+     * seat re-armed four times in a row, every one allowed, because it had five "open" REQUESTs —
+     * two of them answered hours earlier by an ANSWER without `re:`, one saying itself "nothing
+     * waits on it". The owner, the same evening: "it wakes up again every 30 minutes and the tokens
+     * run out; it used to be unlimited". The rule was a filter on the symptom. The cause is the
+     * Monitor: it no longer has `persistent`, so every one dies at 30 minutes and its expiry is a turn.
      *
-     * So the FIRST watch of a session goes through, and a later one only while this seat has a
-     * QUESTION or REQUEST out that nobody answered (`store.awaitingReply`), or a relay room (whose
-     * entries arrive only through the watch's pull). Mail that arrives meanwhile is not lost: the
-     * Stop hook reports it at the end of every turn, and a sender is told to ring a bypass-mode
-     * window with SendMessage (`notRung[].fallback`).
+     * So a Monitor of `sac wait` is declined outright, and the reason hands over the form that has
+     * no deadline: a background shell running `sac wait --once`, which wakes the session only when
+     * an entry worth a turn arrives (see `waitCmd` in hooks/session-start.mjs). Relay rooms are no
+     * exception any more — the background watch pulls them exactly as the Monitor did.
      */
-    const rearm = !bell.ok && !relayed.length && store.hadWatch(seat)
-    const waitingOn = rearm ? store.awaitingReply(seat, { rooms }) : []
-    if (rearm && !waitingOn.length) {
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          `[set-agent-comm] Not re-arming the inbox watch: this session already had one, and nothing ` +
-          `is waiting on an answer (no QUESTION or REQUEST of yours is open). Each expiry would re-read ` +
-          `your whole context every 30 minutes. Carry on — the Stop hook reports mail at the end of each ` +
-          `turn, and a sender rings this window with SendMessage. After you send a QUESTION or REQUEST ` +
-          `you wait on, arming it again is allowed.`,
-      } }))
-      process.exit(0)
-    }
     if (bell.ok && !relayed.length) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -80,7 +67,22 @@ try {
           `30 minutes to re-read your whole context. Carry on; the Stop hook still reports unread ` +
           `mail at the end of each turn.`,
       } }))
+      process.exit(0)
     }
+    // `--once` wherever it already stands is kept; otherwise it goes right after `wait`, anchored
+    // the same way as the test above so it cannot land inside another word.
+    const once = /\s--once(\s|$)/.test(command)
+      ? command : command.replace(/(^|[\s/])(sac(\.mjs)?\s+wait)(?=\s|$)/, "$1$2 --once")
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason:
+        `[set-agent-comm] Not as a Monitor: a Monitor dies after at most 30 minutes, and every expiry ` +
+        `wakes you to re-read your whole context for nothing. Start the inbox watch as a BACKGROUND ` +
+        `SHELL instead — it has no deadline and wakes you only when mail worth a turn arrives: ` +
+        `Bash({ command: ${JSON.stringify(once)}, run_in_background: true, description: "agent-comm inbox" }). ` +
+        `When it exits, read the mail with \`inbox\`, answer, and run the same command again.`,
+    } }))
   }
 } catch { /* a guard that can fail a tool call is worse than the expiries it saves */ }
 process.exit(0)

@@ -80,7 +80,9 @@ test("a second `sac wait` for one seat stops the first — end to end, real proc
                 SET_AGENT_ROOM: "solo-room", SET_AGENT_OWNER_PID: String(process.pid),
                 SET_AGENT_TRIAGE: "off", SET_AGENT_SAFETY_NET: "off" }
   store.createRoom("solo-room", "test")
-  const first = spawn(process.execPath, [SAC, "wait"], { stdio: ["ignore", "ignore", "pipe"], env })
+  const first = spawn(process.execPath, [SAC, "wait"], { stdio: ["ignore", "pipe", "pipe"], env })
+  let firstSaid = ""
+  first.stdout.on("data", d => { firstSaid += d })
   // Wait for the claim to be ON DISK rather than for a fixed delay: the seat name is resolved
   // inside the process, so this is also the assertion that a watch stamps itself at all.
   const claimed = () => { try { return readdirSync(join(ROOT, "watches")).filter(f => f.startsWith("solo")) } catch { return [] } }
@@ -92,9 +94,14 @@ test("a second `sac wait` for one seat stops the first — end to end, real proc
   const gone = await settle(() => !alive(first.pid), 8000)
   const stamp = (() => { try { return readFileSync(join(ROOT, "watches", claimed()[0]), "utf8") } catch { return "(none)" } })()
   second.kill("SIGKILL"); first.kill("SIGKILL")
+  await new Promise(r => first.stdout.readableEnded ? r() : first.stdout.on("close", r))
   assert.ok(gone, `the first watch survived the second one arming — this is the duplicate that was measured.
     first=${first.pid} second=${second.pid} stderr=${JSON.stringify(saidSo)} stamp=${stamp}`)
   assert.match(saidSo, /stopped 1 older watch/, "it stopped the duplicate SILENTLY")
+  // 2026-11-21: as a background shell the old watch's exit re-invokes its session, so it says what
+  // happened and that nothing is to be done — otherwise the reflex re-arm stops the new one in turn.
+  assert.match(firstSaid, /replaced by a newer one of this seat .*Do NOT start another/,
+    `the replaced watch did not say so: ${JSON.stringify(firstSaid)}`)
 })
 
 test("sourceStamp follows the newest source file, and only the sources", () => {
@@ -179,7 +186,7 @@ test("a watch that outlives its age cap exits, so the Monitor starts a fresh one
   // What earns the turn is that the line is ACTIONABLE — it carries the command that arms a new
   // watch, so the notification is a fix rather than a bulletin.
   assert.match(out, /watch STOPPED/, "it stopped in silence — the seat is now unwatched, unnoticed")
-  assert.match(out, /Monitor\(\{ command: .*sac\.mjs wait"/, "it did not say how to arm a new one")
+  assert.match(out, /Bash\(\{ command: .*sac\.mjs wait --once", run_in_background: true/, "it did not say how to arm a new one")
   assert.match(out, /SET_AGENT_ROOM=cap-room/, "the re-arm command would watch the wrong rooms")
   assert.ok(out.includes(`SET_AGENT_COMM_DIR=${ROOT}`), "the re-arm command names a different store")
   assert.match(out, /running for over/, "it exited without saying why")

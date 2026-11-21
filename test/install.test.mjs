@@ -85,7 +85,7 @@ test("it installs the skill too, with the commands baked in", () => {
   // a path is an agent that silently does not watch.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
   assert.doesNotMatch(skill, /\{\{/, "a placeholder was left in the installed skill")
-  assert.match(skill, /Monitor\(\{ command: "[^"]*\bsac wait"/, "the watch command is not spelled out")
+  assert.match(skill, /Bash\(\{ command: "[^"]*\bsac wait --once", run_in_background: true/, "the watch command is not spelled out")
   assert.match(skill, /^---\nname: agent-comm$/m, "the frontmatter is not what Claude Code reads")
 })
 
@@ -281,7 +281,7 @@ test("the skill's watch command is a SIMPLE command — never a self-re-arming l
   // bash forks, node's parent becomes that bash, the guard never fires, and the age cap respawns
   // the watcher instead of ending it — an immortal watch ingesting off a cursor nobody advances.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
-  const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
+  const line = skill.split("\n").find(l => l.includes("Bash({ command:"))
   assert.doesNotMatch(line, /while true/, "a wrapper orphans the watch from its session")
   assert.doesNotMatch(line, /\|\| break/, "`break` returns 0 — a failed watch reports a clean finish")
 })
@@ -290,9 +290,9 @@ test("the skill's watch command SEEDS the rooms in the environment, never as arg
   // ⚠ Argued, the rooms mean 'watch exactly these', resolved once when the Monitor is armed — so a
   // room joined later is watched by nothing while `send` reports the seat woken (2026-08-19).
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
-  const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
+  const line = skill.split("\n").find(l => l.includes("Bash({ command:"))
   assert.match(line, /SET_AGENT_ROOM=team/, "the room list is not in the environment")
-  assert.match(line, /\bsac wait"/, "a room was argued to `wait` — it pins the list")
+  assert.match(line, /\bsac wait --once"/, "a room was argued to `wait` — it pins the list")
 })
 
 test("…and it carries SET_AGENT_COMM_DIR, so the watch is on the store the hook uses", () => {
@@ -300,6 +300,6 @@ test("…and it carries SET_AGENT_COMM_DIR, so the watch is on the store the hoo
   // DEFAULT store creates an empty room directory and sits watching it. Nothing fails, and it is
   // indistinguishable from a working watch until a message does not arrive.
   const skill = readFileSync(join(PROJ, ".claude", "skills", "agent-comm", "SKILL.md"), "utf8")
-  const line = skill.split("\n").find(l => l.includes("Monitor({ command:"))
+  const line = skill.split("\n").find(l => l.includes("Bash({ command:"))
   assert.ok(line.includes(`SET_AGENT_COMM_DIR=${STORE}`), "the skill would watch a different store")
 })
