@@ -994,10 +994,10 @@ startup**, because a defensive measure that evaporates in silence is worse than 
 nobody to write the name into a config, so stdio — identity from the cwd — remains the only
 unforgeable route. The question was never "HTTP or stdio", it is **who writes the config**.
 
-## Why stdio is the default, when our set-designer uses HTTP
+## Why stdio is the default, when a sibling MCP server of ours uses HTTP
 
-We took over the structure of our set-designer MCP server — **one core (`tools.mjs`), two
-thin transports** — but the default mode differs, and for a reason: set-designer has *one
+We took over the structure of a sibling MCP server of ours — **one core (`tools.mjs`), two
+thin transports** — but the default mode differs, and for a reason: that server has *one
 global* state, whereas here we have to know **who writes**.
 
 - **stdio**: Claude Code starts the client with its own cwd → identity comes from the project
