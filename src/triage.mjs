@@ -53,8 +53,10 @@ export const isDirect = isDirectAddress          // the one rule lives in the co
 export const isSibling = (entry, seat) =>
   entry.from?.includes("#") && seatBase(entry.from) === seatBase(seat) && entry.from !== seat
 
-/** `claude-haiku-4-5` — cheapest current model, and plenty for a yes/no about one short message. */
-const MODEL = process.env.SET_AGENT_TRIAGE_MODEL || "claude-haiku-4-5"
+/** `claude-haiku-5-5` — the cheapest current model, and plenty for a yes/no about one short message.
+ *  Moved from claude-haiku-4-5 on 2026-11-22: measured on the triage prompt, 5.5 answered the same
+ *  verdict in 2.9 s against 4.0 s, at a tenth of the price. */
+const MODEL = process.env.SET_AGENT_TRIAGE_MODEL || "claude-haiku-5-5"
 /**
  * Which binary answers. Overridable because `claude` is not always on the PATH of the shell a
  * Monitor runs in — the same lesson `process.execPath` was learned for — and because it is the
