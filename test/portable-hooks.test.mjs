@@ -43,6 +43,32 @@ test("setup writes a launcher that names this machine's node and checkout — ou
   assert.equal(JSON.parse(sac(["setup"]).stdout).state, "already current", "a re-run rewrote it")
 })
 
+test("setup declares `sac doctor` to set-doctor — only where set-core's config dir exists", () => {
+  const home = mkdtempSync(join(tmpdir(), "sac-portable-decl-"))
+  const r0 = JSON.parse(sac(["setup"], { env: { HOME: home } }).stdout)
+  assert.equal(r0.doctor.state, "skipped")
+  assert.equal(existsSync(join(home, ".config", "set-core")), false, "it created set-core's config dir")
+
+  const cfg = join(home, "cfg")
+  mkdirSync(cfg)
+  const r1 = JSON.parse(sac(["setup"], { env: { HOME: home, SET_CONFIG_DIR: cfg } }).stdout)
+  assert.equal(r1.doctor.state, "declared")
+  const decl = JSON.parse(readFileSync(join(cfg, "doctors.d", "sac.json"), "utf8"))
+  assert.deepEqual(decl.command, ["sac", "doctor", "--json"])
+  assert.equal(decl.module, "sac")
+  assert.equal(decl.contract, "sac.doctor/1")
+  assert.ok(decl.install, "no install hint")
+  assert.equal(JSON.parse(sac(["setup"], { env: { HOME: home, SET_CONFIG_DIR: cfg } }).stdout).doctor.state, "already current")
+
+  writeFileSync(join(cfg, "doctors.d", "sac.json"), JSON.stringify({ module: "other" }))
+  assert.equal(JSON.parse(sac(["setup"], { env: { HOME: home, SET_CONFIG_DIR: cfg } }).stdout).doctor.state, "left alone")
+
+  const xdg = join(home, "xdg")
+  mkdirSync(join(xdg, "set-core"), { recursive: true })
+  sac(["setup"], { env: { HOME: home, XDG_CONFIG_HOME: xdg } })
+  assert.ok(existsSync(join(xdg, "set-core", "doctors.d", "sac.json")), "XDG_CONFIG_HOME was not honoured")
+})
+
 test("setup does not replace somebody else's `sac`", () => {
   const other = mkdtempSync(join(tmpdir(), "sac-portable-other-"))
   mkdirSync(join(other, ".local", "bin"), { recursive: true })

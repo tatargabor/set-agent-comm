@@ -180,6 +180,40 @@ const takeFlag = (argv, name) => {
   return { value: argv[i + 1], rest: [...argv.slice(0, i), ...argv.slice(i + 2)] }
 }
 
+/** set-core's config directory, resolved the way set-core resolves its project registry. */
+const setCoreConfigDir = () => process.env.SET_CONFIG_DIR ||
+  join(process.env.XDG_CONFIG_HOME || join(process.env.HOME || homedir(), ".config"), "set-core")
+
+/**
+ * DECLARE `sac doctor` TO set-doctor (2026-11-23, asked for by set-core: change
+ * doctor-module-contract, B-193). set-doctor runs every `doctors.d/*.json` it finds; a module that
+ * is declared but not on this machine's PATH becomes a warn with the `install` hint. Measured
+ * there: a project with a LIVE seat and no session-start/watch-guard hook re-armed a 30-minute
+ * Monitor ~26 times, and the bus verdict was one warn among 90 in set-doctor's report.
+ * Written only where set-core's config directory already exists — a machine without set-core gets
+ * no directory it never asked for. A file there naming another module, or not JSON, is left alone.
+ * The contract stays `sac.doctor/1` until `sac doctor` prints `doctor/1`; set-core adapts it.
+ */
+const declareDoctor = () => {
+  const dir = setCoreConfigDir()
+  if (!existsSync(dir)) return { state: "skipped", why: `${dir} does not exist — set-core is not set up on this machine` }
+  const file = join(dir, "doctors.d", "sac.json")
+  const body = JSON.stringify({ module: "sac", command: ["sac", "doctor", "--json"], contract: "sac.doctor/1",
+    install: "clone github.com/tatargabor/set-agent-comm, npm install, then `node bin/sac.mjs setup` (puts `sac` in ~/.local/bin)" },
+  null, 2) + "\n"
+  let was = null
+  try { was = readFileSync(file, "utf8") } catch { /* absent */ }
+  if (was === body) return { file, state: "already current" }
+  if (was !== null) {
+    let module = null
+    try { module = JSON.parse(was).module } catch { }
+    if (module !== "sac") return { file, state: "left alone", why: "it exists and is not this module's declaration" }
+  }
+  store.ensureDir(dirname(file))
+  writeFileSync(file, body)
+  return { file, state: was === null ? "declared" : "updated" }
+}
+
 /**
  * A backup of a file we are about to rewrite in SOMEONE ELSE'S repo, kept in the bus's own store,
  * never beside the file. Measured 2026-11-08, rolling four projects over to the plugin: every
@@ -1001,7 +1035,7 @@ try {
       }
       const onPath = (process.env.PATH || "").split(":").includes(bin)
       json({ launcher: target, state: current ? "already current" : was === "absent" ? "installed" : `replaced (was a ${was})`,
-        node: nodeBin, checkout: dirname(dirname(me)), onPath,
+        node: nodeBin, checkout: dirname(dirname(me)), onPath, doctor: declareDoctor(),
         ...(onPath ? {} : { note: `${bin} is not on this shell's PATH — the hook line falls back to it by name, ` +
           `so hooks work; for your own shell add it to the PATH.` }) })
       break
@@ -1113,7 +1147,7 @@ try {
       // A project that only ever reached the bus through the CLI or MCP has no path on record; set-core's
       // project list (optional, read-only — like the Fleet roster) can still say where it lives.
       let known = {}
-      try { known = JSON.parse(readFileSync(join(process.env.HOME || homedir(), ".config", "set-core", "projects.json"), "utf8")).projects || {} } catch { }
+      try { known = JSON.parse(readFileSync(join(setCoreConfigDir(), "projects.json"), "utf8")).projects || {} } catch { }
       const report = []
       for (const a0 of Object.values(reg.agents || {})) {
         if (!a0?.agent || a0.agent.includes("@")) continue
