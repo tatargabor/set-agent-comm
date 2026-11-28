@@ -272,6 +272,17 @@ test("a message naming THIS SEAT is never second-guessed by the letterbox", asyn
     "someone typed this seat's name and a classifier overruled them")
 })
 
+// ⚠ Measured 2026-11-24 (set-core B-215): an unaddressed ANSWER `re:` this seat's own REQUEST was
+// let through by the rule and then vetoed by the letterbox, so the asker never heard its answer.
+test("an answer to THIS SEAT's own entry is never second-guessed by the letterbox", async () => {
+  const asked = JSON.parse(post("two", "send", "post", "REQUEST", "Which port does the relay use?",
+    "--to", "api-server").stdout)
+  postOther("send", "post", "ANSWER", "7511, see src/relay.mjs.", "--re", asked.ts)
+  const out = await waitFor("two", ["--once", "post"], 3000,
+    { SET_AGENT_ROOM: "post", SET_AGENT_TRIAGE_SAYS: "no" })
+  assert.match(out.text, /7511/, "the asker's own answer was vetoed by a classifier that cannot know who asked")
+})
+
 test("…but naming this seat AND two others is a broadcast, and the letterbox may say no", () => {
   // The bypass is what makes addressing trustworthy; a list of names is what makes it worthless.
   // Without the "and nobody else" half, the cheapest way to guarantee everyone's attention would

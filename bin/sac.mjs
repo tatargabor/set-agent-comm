@@ -1387,8 +1387,9 @@ try {
           const seat = store.agents().find(a => a.agent === store.seatBase(ME))
           const live = seat?.live || []
           const candidates = waking.slice(-3)
+          const mine = store.ownTimestamps(room, ME)
           const judged = await Promise.all(candidates.map(m =>
-            triage.triage({ entry: m, room, seat: ME, live })))
+            triage.triage({ entry: m, room, seat: ME, live, mine })))
           // ⚠ findLAST, not findFirst. The older entries are still unread — an agent that was
           // woken and did not answer keeps them — so the first approved one is routinely something
           // this seat has already been told about. Reporting it again is the storm in miniature.
@@ -1400,7 +1401,7 @@ try {
             // `via` says which layer answered: `direct` never reached the model (someone typed a
             // seat name and a classifier does not get to overrule that), `unavailable` is the
             // fail-open path, `model` is a real verdict.
-            const by = v.via === "direct" || v.via === "sibling" ? "rule" : v.via === "unavailable" ? "letterbox-failed" : "letterbox"
+            const by = v.via === "direct" || v.via === "sibling" || v.via === "reply" ? "rule" : v.via === "unavailable" ? "letterbox-failed" : "letterbox"
             store.recordDecision({ room, seat: ME, entry: candidates[i].ts, by, woke: !!v.wake })
           }
           const yes = judged.findLastIndex(v => v.wake)

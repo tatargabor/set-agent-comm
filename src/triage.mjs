@@ -177,7 +177,7 @@ function ask(text) {
  *   different facts, and a run where every decision came back `unavailable` is a broken triage
  *   pretending to be a quiet one.
  */
-export async function triage({ entry, room, seat, live }) {
+export async function triage({ entry, room, seat, live, mine }) {
   // Named THIS seat — not the project, this seat — and NOBODY ELSE. Never second-guessed.
   // (Property 2 above.)
   //
@@ -189,6 +189,14 @@ export async function triage({ entry, room, seat, live }) {
     return { wake: true, why: "addressed to this seat by name", via: "direct" }
   if (isSibling(entry, seat))
     return { wake: true, why: "from a sibling session of this project", via: "sibling" }
+  // ⚠ A REPLY TO THIS SEAT'S OWN ENTRY is never second-guessed either. Measured 2026-11-24
+  //   (set-core B-215): an unaddressed ANSWER in a project pair room, `re:` the REQUEST this seat
+  //   had sent eight minutes earlier. The rule woke the seat (`re:` in `mine`), the letterbox —
+  //   whose prompt cannot know who asked — said no, and the asker sat idle on the answer it was
+  //   waiting for. The Stop hook does not catch it: with a watch live it holds only for a
+  //   QUESTION/REQUEST. Nobody but the asker is the reader of an answer to its own question.
+  if (entry.re && mine?.has(entry.re))
+    return { wake: true, why: "answers this seat's own entry", via: "reply" }
   if (!enabled()) return { wake: true, why: "triage off", via: "unavailable" }
   const v = await ask(prompt({ seat, focus: getFocus(seat), entry, room, live }))
   return v ? { ...v, via: "model" } : { wake: true, why: "letterbox unavailable", via: "unavailable" }
