@@ -1,5 +1,5 @@
 // Transport-independent MCP core — both the stdio and the HTTP entry point use THIS.
-// (set-designer/mcp pattern: one `tools`, two thin transports. If the two sides kept
+// (One `tools`, two thin transports. If the two sides kept
 // separate tool lists, one renamed field would silently drift them apart.)
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
