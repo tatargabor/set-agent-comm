@@ -74,7 +74,7 @@ export const enabled = () => process.env.SET_AGENT_TRIAGE !== "off"
  * "do not wake" line names something that actually cost a turn in the `consumer-a-atlas` room over the
  * first two days.
  */
-const prompt = ({ seat, focus, entry, room, live }) => `You are the letterbox of a coding agent.
+export const prompt = ({ seat, focus, entry, room, live }) => `You are the letterbox of a coding agent.
 Decide ONE thing: must this message interrupt your agent NOW — starting a whole turn — or can it
 wait until the agent looks at its inbox on its own?
 
@@ -120,21 +120,38 @@ function parse(out) {
 /**
  * The `claude` CLI in headless mode, stripped of everything that would make it expensive:
  * no MCP servers (`--strict-mcp-config` with an empty config — otherwise it would load THIS
- * project's own agent-comm server and could send messages while judging one), no hooks, and plan
- * mode so it cannot reach for a tool. The CLI, rather than the API, on purpose: it uses the login
- * the user already has, so the letterbox needs no key and no second piece of configuration.
+ * project's own agent-comm server and could send messages while judging one), no hooks, no tools
+ * at all, no settings, no CLAUDE.md, and a one-line system prompt in place of Claude Code's own.
+ * The CLI, rather than the API, on purpose: it uses the login the user already has, so the
+ * letterbox needs no key and no second piece of configuration.
+ *
+ * ⚠ Measured 2026-11-28 (set-core's token review: ~1000 calls that week, ~2.3 % of the machine's
+ *   price-weighted week, output 77 % thinking). The old start — MCP and hooks off, plan mode —
+ *   still loaded ~36 000 tokens before the prompt (the global CLAUDE.md, the skill list, the tool
+ *   schemas) and WROTE most of it into the cache on every one-shot run: 0.0046 USD for a
+ *   one-line answer. `--tools ""` + `--setting-sources ""` + `--system-prompt` brought it to
+ *   ~2 400; dropping `--permission-mode plan` (pointless with no tools, and its reminder is
+ *   ~1 800 tokens) to ~610, 0.00013 USD. `--effort low` because a yes/no about one message needs
+ *   no long think. Accuracy on test/triage-corpus.mjs is in the commit that made this change.
  */
+export const SYSTEM_PROMPT =
+  "You classify one message for a coding agent. Answer with the JSON the user asks for and nothing else."
+export const askArgs = text => [
+  "-p", text,
+  "--model", MODEL,
+  "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+  "--settings", '{"disableAllHooks":true}',
+  "--tools", "",
+  "--setting-sources", "",
+  "--system-prompt", SYSTEM_PROMPT,
+  "--effort", "low",
+  "--no-session-persistence",
+]
 function ask(text) {
   return new Promise(resolve => {
     let child
     try {
-      child = spawn(BIN, [
-        "-p", text,
-        "--model", MODEL,
-        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        "--permission-mode", "plan",
-        "--settings", '{"disableAllHooks":true}',
-      ], { stdio: ["ignore", "pipe", "pipe"], cwd: "/" })
+      child = spawn(BIN, askArgs(text), { stdio: ["ignore", "pipe", "pipe"], cwd: "/" })
     } catch { return resolve(null) }     // no binary at all — fail open
     let out = "", err = ""
     const done = (v, reason) => {
@@ -192,7 +209,7 @@ export async function triage({ entry, room, seat, live }) {
 // put every broadcast FACT back on everyone's desk and we would be exactly where we started. So no
 // binary, a timeout, unparseable output, anything at all going wrong: stay quiet. The entry is
 // unread, in the room, and the agent's own next `inbox` still hands it over.
-const netPrompt = ({ seat, focus, entry, room }) => `You are the safety net of a coding agent.
+export const netPrompt = ({ seat, focus, entry, room }) => `You are the safety net of a coding agent.
 
 This message was ALREADY judged not urgent by a rule and your agent was NOT woken. That is usually
 right. You are here for the rare case where it is wrong and something would be lost.
