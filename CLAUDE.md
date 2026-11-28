@@ -159,6 +159,11 @@ State lives outside the repo, in `$SET_AGENT_COMM_DIR` (default
   seat/project (or `@device` form) untouched → alias → Fleet label. Several live windows behind
   one name are refused with the list, never fanned out; every rewrite is reported in `resolved`.
   Fleet's roster is read-only and optional — its absence costs labels, never a working address.
+- **A closer is declared by the SENDER, in the BODY** (`store.QUIET_MARK`, 2026-11-28): `quiet` on a
+  FACT/ANSWER wakes nobody, even in a pair or project room, and is refused on a QUESTION/REQUEST. It
+  is a first body line, never a header token — `ENTRY_HEADER` ends in `\s*$`, so a grown header is
+  folded into the previous entry by every reader built before it (a long-lived MCP server) and lost.
+  Likewise an entry the seat has already answered (`re:` in its own file) stops `wakes` in `inbox`.
 - **`owner` is the human, never a seat** (`store.isOwner`, 2026-10-19). It is exempt from the
   participant check, ignored by `isForMe` (so it wakes nobody and is never rung), and an entry to it
   is OPEN until something in the room answers it with `re:` — one rule, no second store

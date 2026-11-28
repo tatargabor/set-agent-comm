@@ -213,7 +213,10 @@ export async function push({ room, log = () => {} }) {
         // ⚠ `owner` LEAVES AS `owner@<this machine>` (owner-addressee): on the other side a bare
         // `owner` is THEIR human. `localName` there leaves it as written, so it never reaches the
         // wrong person's `sac owner`; back here it arrives as `owner` again.
+        // `quiet` (a sender-declared closer, `store.QUIET_MARK`) rides inside too; an older
+        // receiver ignores the field and wakes, which is the safe direction.
         cipher: encrypt(cfg.roomKey, JSON.stringify({ type: e.type, re: e.re, text: e.text,
+                                                      ...(e.quiet && { quiet: true }),
                                                       to: (e.to || []).map(n => n === "owner" ? `owner@${ns}` : n) }),
                         entryAad(from, e.ts)),
         _writer: writer,
@@ -290,6 +293,7 @@ export async function pull({ room, wait = 25, log = () => {} }) {
       // `localName`). Names on other machines pass through untouched — the room stays readable
       // to everyone, and only who gets WOKEN depends on this.
       if (ingest({ room, writer: e.writer, ts: e.ts, type: body.type, re: body.re, text: body.text,
+                   quiet: body.quiet === true,
                    to: parseTo(body.to).map(n => localName(n, ns)) })) written++
     } catch (err) {
       log(`⚠ refused an entry from ${e.writer} in "${room}": ${err.message}`)

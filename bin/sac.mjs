@@ -100,7 +100,7 @@ const USAGE = {
   agents: "sac agents [--json]                 who exists, who is alive · --json is the versioned machine view",
   rooms: "sac rooms [--archived] | --archive <room> [--force] | --restore <room>   the rooms, and how far each reaches",
   admin: "sac admin                           the operator's live view (Tab panes · ↵ open · / search · ? keys)",
-  send: 'sac send [<room>] <type> "text" [--to <seat|project>[,…]] [--re <ts>]   (the room may be left out when --to names a seat)',
+  send: 'sac send [<room>] <type> "text" [--to <seat|project>[,…]] [--re <ts>] [--quiet]   (the room may be left out when --to names a seat; --quiet: a FACT/ANSWER closer that wakes nobody)',
   focus: 'sac focus ["what you are on"] [--files a,b] [--phase explore|plan|apply|verify|blocked]   · no args reads it back · --files is shown to the others and the letterbox AS WRITTEN — a glob stays text, nothing matches against it',
   inbox: "sac inbox <room> [--mine]           new messages from others (marks them read) · --mine: entries addressed elsewhere as one line each",
   peek: "sac peek <room> [--mine]            the same, without moving the cursor",
@@ -258,7 +258,9 @@ try {
       if (unknown) throw new Error(`agents: unknown flag '${unknown}' — the only one is --json`)
       // The versioned projection, never the raw registry: see `agentsReport` for why the shape is
       // hand-written and why liveness is a word rather than a nullable boolean.
-      if (rest.includes("--json")) { json(store.agentsReport()); break }
+      // `self` (B-260): the seat THIS caller resolves to by the hooks' own rule — after `/clear`
+      // the session id moves and the seat does not, so a caller cannot find itself by id.
+      if (rest.includes("--json")) { json(store.agentsReport({ self: ME })); break }
       const list = store.agents()
       if (!list.length) { console.log("(the registry is empty)"); break }
       for (const a of list) {
@@ -410,7 +412,9 @@ try {
       // entry with it.
       const { value: re, rest: afterRe } = takeFlag(afterTo, "--re")
       const create = afterRe.includes("--create")
-      const args = afterRe.filter(a => a !== "--create")
+      // `--quiet`: a closer that wakes nobody (see `store.QUIET_MARK`); refused on a QUESTION/REQUEST.
+      const quiet = afterRe.includes("--quiet")
+      const args = afterRe.filter(a => a !== "--create" && a !== "--quiet")
       // ⚠ THE ROOM MAY BE LEFT OUT WHEN THE ENTRY IS ADDRESSED — the same rule the MCP face
       // uses, read from the same place (`store.resolveRoom`), because a seat name is a complete
       // address and making the sender look up its room is the hunt that rule exists to end.
@@ -439,7 +443,7 @@ try {
         const made = store.createRoom(room, ME)
         if (made.created) console.error(`sac: opened a new room '${room}'`)
       }
-      const out = store.send({ room, from: ME, type, text: text.join(" "), to, re })
+      const out = store.send({ room, from: ME, type, text: text.join(" "), to, re, quiet })
       // Said on stderr, not folded into the JSON: which room an entry landed in decides who can
       // read it, and that may not be a decision the sender only discovers by reading a field.
       if (inferred) console.error(`sac: no room given — '${to}' is only reachable in '${room}', so it went there.`)
@@ -1329,6 +1333,8 @@ try {
       // suppresses a LEDGER LINE, not a delivery: losing it on restart costs one duplicate
       // statistic, while the entry itself is still unread and still announced normally.
       const heldSaid = new Set()
+      const ARMED_AT = Date.now()
+      const ARM_GRACE_MS = Number(process.env.SET_AGENT_ARM_GRACE_MS ?? 60_000)
       const check = async () => {
         watched = roomsNow()
         for (const room of watched) {
@@ -1365,7 +1371,20 @@ try {
            * ⚠ A DIRECT ADDRESS IS NEVER HELD. Someone typed this seat's name; a delay is the
            * expensive mistake there, and `triage.isDirect` is the one rule for it.
            */
-          if (store.seatBusy(ME) && !triage.isDirect(last, ME) && !triage.isSibling(last, ME)) {
+          /**
+           * ⚠ AND RIGHT AFTER ARMING, NOT EVEN A DIRECT ADDRESS IS ANNOUNCED TO A BUSY SEAT.
+           * set-core's trace, 2026-11-22..28: of 67 entries announced and then held on by the Stop
+           * hook, 25 were announced by a watch the session had armed SECONDS earlier — re-arming
+           * is the last act of a turn, the fresh watch found the unread direct entry at once and
+           * exited, and the Stop hook of that same turn delivered it first (median ~10 s later).
+           * The notification then arrived for an entry already read. The direct exemption below
+           * pays off for an entry that LANDS mid-turn, not for one that was waiting when the turn
+           * re-armed: that turn is about to end, and its Stop hook holds an addressed QUESTION or
+           * REQUEST. Bounded by the grace (60 s, `SET_AGENT_ARM_GRACE_MS`, `0` = off): an
+           * addressed FACT/ANSWER the narrowed Stop hook lets pass is announced once it ends.
+           */
+          const arming = Date.now() - ARMED_AT < ARM_GRACE_MS
+          if (store.seatBusy(ME) && (arming || (!triage.isDirect(last, ME) && !triage.isSibling(last, ME)))) {
             // Recorded once per entry — this fires every 5 s while the turn runs, and a ledger
             // that logged each pass would drown the numbers it exists to produce.
             if (!heldSaid.has(last.ts)) {

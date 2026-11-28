@@ -101,6 +101,28 @@ const escapeBodyHeaders = text =>
   text.split("\n").map(l => ENTRY_HEADER.test(l) ? ` ${l}` : l).join("\n")
 
 /**
+ * A SENDER-DECLARED CLOSER: a FACT or ANSWER that asks nothing of anybody, delivered at the next
+ * read and waking no one (`send({ quiet: true })`, `sac send --quiet`). Asked for by set-core,
+ * 2026-11-28, from a week of ledger (2026-11-22..28): in pair and relation rooms every entry wakes,
+ * and 64 FACT wake-ups there re-read 12.2M context tokens; one "nothing to do" ANSWER woke a
+ * 470k-token asker twice. Only the sender knows an entry is a closer — the rule cannot tell
+ * "done, here is the result you are waiting on" from "thanks, nothing to do" — so the sender says it.
+ *
+ * ⚠ IT IS A BODY LINE, NOT A HEADER FIELD, and that is the compatibility story rather than a
+ * shortcut. `ENTRY_HEADER` is strict and ends in `\s*$`, so a header grown by one token is NOT
+ * a header to a reader built before it: a long-lived MCP server (it cannot restart itself) would
+ * fold the entry into the previous one's body and never deliver it. As a first body line, an old
+ * reader shows an HTML comment and WAKES as it always did — the fail-open direction. Over the
+ * wire it travels as a `quiet` field and `ingest` writes the line back; an older receiver drops
+ * the field and wakes, the same direction again.
+ *
+ * Never on a QUESTION or REQUEST: those owe the reader a turn by definition. `send` refuses the
+ * combination; a line arriving on one anyway (another machine, a hand edit) is stripped and ignored.
+ */
+export const QUIET_MARK = "<!-- sac:quiet -->"
+const ASKING = new Set(["QUESTION", "REQUEST"])
+
+/**
  * `SET_AGENT_ROOM` may name SEVERAL rooms, comma-separated ("promo,atlas"): one agent can be
  * part of more than one conversation. Note what this deliberately does NOT do: with several
  * rooms configured there is no default room, so `send` without an explicit `room` fails
@@ -229,6 +251,9 @@ export function wakes(entry, me, mine, quiet = undefined, pair = false, live = u
   // from here on it follows the ordinary rules for a project-addressed entry — see `projectRoom`.
   if (Array.isArray(pair)) { entry = addressedIn(entry, pair); pair = false }
   if (!isForMe(entry, me)) return false
+  // A closer the SENDER declared (see `QUIET_MARK`): delivered, read at the next look, a turn for
+  // nobody — above the pair rule on purpose, since the pair and relation rooms are where it pays.
+  if (entry.quiet && !ASKING.has(entry.type)) return false
   // ⚠ A DECLARED quiet is applied HERE and nowhere else, because this function is the single
   // rule the Stop hook, `sac wait` and `inbox` all read. Delivery is untouched: a quiet seat
   // still receives every entry — only the expensive half is suppressed. `quiet` is passed in by
@@ -1097,11 +1122,21 @@ export const AGENTS_SCHEMA = "sac.agents/1"
 
 const liveness = live => (live === true ? "live" : live === false ? "gone" : "unknown")
 
-export function agentsReport() {
+export function agentsReport({ self = null } = {}) {
+  const list = agents()
   return {
     schema: AGENTS_SCHEMA,
     generatedAt: now(),
-    agents: agents().map(a => ({
+    /**
+     * WHO IS ASKING — the caller's own seat, or `null` (B-260, set-core 2026-11-28). After
+     * `/clear` a window gets a new `CLAUDE_CODE_SESSION_ID` but keeps its seat, which follows the
+     * owning `claude` pid (see `claimSeat`); a caller matching its session id against `session`
+     * here found nothing. Resolved by `seatOf`, the rule every hook uses, and published only when
+     * that seat is really on the roster — never a name `seatFor` merely computed. Additive, so
+     * `sac.agents/1` stands.
+     */
+    self: self && list.some(a => (a.seats || []).some(s => s.writer === self)) ? self : null,
+    agents: list.map(a => ({
       agent: a.agent,
       project: a.project ?? null,
       host: a.host ?? null,
@@ -1217,11 +1252,14 @@ export function pruneEmptySeats({ room, agent, keep }) {
  * the `Write`/`Edit` tool, which is a FULL rewrite of a 555 KB file per message — the file
  * lands in the context, and out of two concurrent writes one is silently lost.
  */
-export function send({ room, from, type = "FACT", text, re, to }) {
+export function send({ room, from, type = "FACT", text, re, to, quiet = false }) {
   if (!room || !from) throw new Error("send: `room` and `from` are required")
   if (!text?.trim()) throw new Error("send: empty message")
   type = normalizeType(type)
   if (!TYPES.includes(type)) throw new Error(`send: unknown type '${type}' (${TYPES.join(" | ")})`)
+  if (quiet && ASKING.has(type))
+    throw new Error(`send: a ${type} cannot be quiet — it owes the reader a turn. ` +
+      `\`quiet\` is for a FACT or ANSWER that asks nothing (a closer, a thank-you, "nothing to do").`)
   // An addressee nobody answers to is the one failure this must not commit silently: it would
   // be a message with the room full of readers and NOT ONE of them woken — indistinguishable
   // from a quiet room. So a name that matches no participant fails here, at the writer, where
@@ -1260,7 +1298,8 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   for (let bump = 1; last && ts === last; bump++) ts = now(new Date(Date.now() + bump))
   const head = `## ${ts} — ${type}${addressed.length ? ` → ${addressed.join(", ")}` : ""}${re ? ` (re: ${re})` : ""}`
   const body = escapeBodyHeaders(text.trim())
-  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${body}\n`)
+  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n` +
+    `${quiet ? `${QUIET_MARK}\n` : ""}${body}\n`)
   // `from` is a SEAT, so the registry entry belongs to the project behind it. `writer` keeps
   // the seat as it is: sending a message may not reshuffle who sits where.
   // The OWNER writes (a close) but is not a session: registering it would put a pseudo-seat on the
@@ -1299,7 +1338,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
   // intentions. So the server answers both here: who this woke, and how long it was. Reported,
   // never enforced — `send` refusing a message would be a far worse failure than a verbose one.
   const live = liveSeats(room)
-  const entry = { ts, from, type, to: addressed, re }
+  const entry = { ts, from, type, to: addressed, re, quiet: !!quiet }
   // ⚠ THE RULE'S DECISION IS RECORDED HERE, once per entry per live seat, because this is the
   // one place it is computed for everybody at once. Doing it in `inbox` instead would re-record
   // the same entries on every read; doing it in the watcher would miss every seat that has no
@@ -1398,7 +1437,10 @@ export function send({ room, from, type = "FACT", text, re, to }) {
       `has to act on it, address that seat (${seats.map(s => `'${s}'`).join(", ")}), or send a ` +
       `QUESTION / REQUEST.`)
   const ownerOnly = addressed.length && addressed.every(isOwner)
-  if (ownerOnly)
+  if (quiet && others)
+    notice.push(`Quiet: interrupts nobody — ${others} live seat(s) read it at their next \`inbox\`. ` +
+      `Right for a closer; if the reader is waiting on this to go on, send it without \`quiet\`.`)
+  else if (ownerOnly)
     notice.push(`Addressed to the owner — the person, not a session: no seat is woken. It is listed ` +
       `by \`sac owner\` until an entry in this room answers it with re: ${ts}.`)
   else if (!woke.length && others && !spread.length)
@@ -1412,7 +1454,7 @@ export function send({ room, from, type = "FACT", text, re, to }) {
 
   // `re` rides back too: a reply whose reference was silently dropped is a reply that wakes
   // nobody by the `re:` rule, and the writer could not tell from this result that it had been.
-  return { ts, room, from, type, to: addressed, ...(re ? { re } : {}), path, wakes: woke,
+  return { ts, room, from, type, to: addressed, ...(re ? { re } : {}), ...(quiet && { quiet: true }), path, wakes: woke,
            ...(notice.length && { notice }), ...(warning && { warning }) }
 }
 
@@ -1780,7 +1822,7 @@ export function resolveRoom({ room, to, configured = [], from = null }) {
  *
  * @returns true if it was new
  */
-export function ingest({ room, writer, ts, type = "FACT", re, text, to }) {
+export function ingest({ room, writer, ts, type = "FACT", re, text, to, quiet = false }) {
   if (!room || !writer || !ts) throw new Error("ingest: `room`, `writer` and `ts` are required")
   if (!text?.trim()) throw new Error("ingest: empty message")
   assertSafeWriter(writer)
@@ -1801,7 +1843,9 @@ export function ingest({ room, writer, ts, type = "FACT", re, text, to }) {
   // Escaped on the RECEIVING side too, not merely trusted from the sender: the other machine may
   // be running an older build, or may not be a friend at all. What crosses the wire is normalised
   // where it lands (see `assertSafeTs`, which exists for the same reason and the same attacker).
-  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${escapeBodyHeaders(text.trim())}\n`)
+  // `quiet` from another machine is honoured on a FACT / ANSWER only — see `QUIET_MARK`.
+  const mark = quiet === true && !ASKING.has(normalizeType(type)) ? `${QUIET_MARK}\n` : ""
+  appendFileSync(path, `${existsSync(path) && statSync(path).size ? "\n" : ""}${head}\n${mark}${escapeBodyHeaders(text.trim())}\n`)
   noteRemote(writer, room)
   return true
 }
@@ -1869,7 +1913,14 @@ function parse(path, agent) {
   // file on every `inbox`, `wakes` and `history` call, and the busiest measured room holds 232
   // entries; keying all of them on their full text would put hundreds of kilobytes of string
   // building on a hot path, every call, to find nothing.
-  const entries = out.map(e => ({ ...e, text: e.lines.join("\n").trim(), lines: undefined }))
+  const entries = out.map(e => {
+    const text = e.lines.join("\n").trim()
+    // The closer line (see `QUIET_MARK`) is lifted out of the text into a field — on a QUESTION
+    // or REQUEST it is stripped and ignored, never honoured.
+    if (!text.startsWith(QUIET_MARK)) return { ...e, text, lines: undefined }
+    const rest = text.slice(QUIET_MARK.length).trim()
+    return { ...e, text: rest, ...(!ASKING.has(e.type) && { quiet: true }), lines: undefined }
+  })
   if (new Set(entries.map(e => e.ts)).size === entries.length) return entries
   const seen = new Set()
   return entries
@@ -1994,7 +2045,17 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
   // Read ONCE for the whole call: `wakes` needs to know what this seat asked, and re-reading
   // its own file per entry would turn a linear pass into a quadratic one on a busy room. The
   // same argument applies to the seat's declared presence, so it is read here and passed down.
-  const mine = ownTimestamps(room, agent)
+  const own = parse(busFile(room, agent), agent)
+  const mine = new Set(own.map(e => e.ts))
+  /**
+   * ⚠ AN ENTRY THIS SEAT HAS ALREADY ANSWERED (`re:` from its own file) IS NOT OWED ANOTHER TURN.
+   * set-core's trace, 2026-11-22..28: 72 entries were delivered twice to one seat, and in 6 the
+   * seat had answered between the two deliveries — straight from the preview the watch prints,
+   * without an `inbox`, so the cursor stayed and the Stop hook held the turn on an entry already
+   * answered. Delivery is untouched (it is still unread, `forMe`, listed); only `wakes` drops, and
+   * every reader of it — the Stop hook, `sac wait`, `unreadWaking` — follows.
+   */
+  const answered = new Set(own.map(e => e.re).filter(Boolean))
   const quiet = respectQuiet && seatPresence(agent).quiet
   // Whether a project name still means THIS seat (see `wakes`): one registry read per call.
   const live = liveSeats(room)
@@ -2008,7 +2069,8 @@ export function inbox({ room, agent, advance = true, limit = 20, respectQuiet = 
     for (const e of parse(path, writer)) {
       // By time, not by string — the same trap as with sorting.
       if (!seen[writer] || t(e.ts) > t(seen[writer]))
-        fresh.push({ ...e, forMe: isForMe(addressedIn(e, isPair), agent), wakes: wakes(e, agent, mine, quiet, isPair, live),
+        fresh.push({ ...e, forMe: isForMe(addressedIn(e, isPair), agent),
+                     wakes: !answered.has(e.ts) && wakes(e, agent, mine, quiet, isPair, live),
                      ...(seatBase(writer) === base && { sibling: true }) })
     }
   }

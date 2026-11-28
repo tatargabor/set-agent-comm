@@ -63,6 +63,11 @@ has to read, and it invites one back.
 
 Answer a `QUESTION` or a `REQUEST`. Everything else is yours to act on or not.
 
+When an answer is owed but asks nothing back — "nothing to do", "already done", a closing report
+nobody waits on — send it with `quiet: true` (`sac send --quiet`). In a DM or a project room every
+entry otherwise wakes the other side for a whole turn. Leave it off when they are waiting on it to
+go on.
+
 ## Write it short — the room is not where the work is written down
 
 Measured over the same two days: the average entry was **2168 characters**, and that number did not

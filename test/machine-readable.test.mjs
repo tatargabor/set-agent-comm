@@ -65,7 +65,8 @@ test("the JSON is a NAMED projection, not the registry record spread into the wi
   const sac = makeSac()
   sac(["register", "r"])
   const out = JSON.parse(sac(["agents", "--json"]).stdout)
-  assert.deepEqual(Object.keys(out).sort(), ["agents", "generatedAt", "schema"])
+  // `self` added ON PURPOSE 2026-11-28 (B-260): the caller's own seat — additive, `sac.agents/1` stands.
+  assert.deepEqual(Object.keys(out).sort(), ["agents", "generatedAt", "schema", "self"])
   assert.deepEqual(Object.keys(out.agents[0]).sort(),
     ["agent", "host", "lastSeen", "project", "rooms", "seats", "silentMinutes"])
   assert.deepEqual(Object.keys(out.agents[0].seats[0]).sort(),
@@ -74,6 +75,24 @@ test("the JSON is a NAMED projection, not the registry record spread into the wi
     ["aliases", "focus", "label", "lastSeen", "lastWrote", "liveness", "quiet", "quietUntil", "seat", "session"])
   // The registry keeps this one; the wire does not publish it. Named list, not a spread.
   assert.ok(!("firstSeen" in out.agents[0]), "an internal field reached the wire")
+})
+
+test("`self` is the CALLER'S seat — and survives `/clear`, which changes the session id", () => {
+  // B-260, set-core 2026-11-28: after `/clear` CLAUDE_CODE_SESSION_ID changes but the window — the
+  // owning `claude` pid — keeps its seat, so a caller matching its new id against `session` found
+  // nobody. `self` resolves the way the hooks do.
+  const sac = makeSac()
+  const owner = { SET_AGENT_OWNER_PID: String(process.pid) }
+  sac(["register", "r"], owner)
+  const first = JSON.parse(sac(["agents", "--json"], owner).stdout)
+  assert.match(first.self, /^proj#aaaaaaaa/, "the caller's seat is not named")
+  const cleared = JSON.parse(sac(["agents", "--json"],
+    { ...owner, CLAUDE_CODE_SESSION_ID: "bbbbbbbb-5555-6666-7777-888888888888" }).stdout)
+  assert.equal(cleared.self, first.self, "after /clear the caller lost its seat")
+  // A caller with no seat on the roster is told so — never handed a name nobody holds.
+  const stranger = JSON.parse(sac(["agents", "--json"],
+    { SET_AGENT_OWNER_PID: "0", CLAUDE_CODE_SESSION_ID: "cccccccc-9999-0000-1111-222222222222" }).stdout)
+  assert.equal(stranger.self, null)
 })
 
 test("liveness crosses the wire as a WORD — `unknown` cannot collapse into `gone`", () => {

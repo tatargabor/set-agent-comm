@@ -323,6 +323,14 @@ not leak anywhere else:
   this: a plain `FACT` in a room of two reported `wakes: []`. The README had said the right thing
   all along — *"a room of two needs no addressing: everything in it is for the other one"* — while
   `wakes()` did not. A declared `quiet` still wins, because somebody chose that.
+  **And so does a sender-declared closer** (`send({ quiet: true })`, `sac send --quiet`, 2026-11-28):
+  a FACT or ANSWER that asks nothing — "nothing to do", a thank-you — is delivered and read at the
+  next `inbox`, and wakes nobody. set-core measured the cost of its absence over 2026-11-22..28: 64
+  FACT wake-ups in pair and relation rooms re-read 12.2M context tokens, and one "nothing to do"
+  ANSWER woke a 470k-token asker twice. Only the sender can tell a closer from "done, here is what
+  you are waiting on", so the sender says it; a QUESTION or REQUEST cannot be quiet. It is the
+  first body line (`store.QUIET_MARK`), not a header field: a reader built before it still parses
+  the entry, and wakes — the safe direction.
 - **Reading is restricted** — the only place on this bus where it is. `inbox`, `peek` and `history`
   refuse a third seat, and the room's *name* is not listed to it either, because the name says who
   is talking to whom. Measured before this: a third seat ran `sac history <pair room>` and read the

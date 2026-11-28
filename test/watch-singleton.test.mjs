@@ -236,17 +236,37 @@ test("a seat that is mid-turn is NOT announced to — the Stop hook will deliver
   assert.match(held, /"by":"held-busy"/, "the hold was not recorded — it cannot be measured later")
 })
 
-test("…but a DIRECT address is never held back", async () => {
+test("…but a DIRECT address is never held back (once the watch is past its arming grace)", async () => {
   store.createRoom("direct-proj-room", "test")
   const session = "d0000000-0000-4000-8000-000000000001"
   const me = store.claimSeat({ agent: "direct-proj", session, owner: process.pid })
   beat("direct-proj", session, "direct-proj-room")
   store.send({ room: "direct-proj-room", from: "someone#aaaa", type: "QUESTION",
                text: "you specifically", to: [me] })
-  const w = wait("direct-proj", session)
+  const w = wait("direct-proj", session, { SET_AGENT_ARM_GRACE_MS: "0" })
   const code = await new Promise(r => { w.p.on("exit", c => r(c)); setTimeout(() => r("timeout"), 6000) })
   w.p.kill("SIGKILL")
   assert.match(w.said(), /you specifically/, `a deliberate address was delayed (exit: ${code})`)
+})
+
+test("a direct address WAITING when a busy turn re-arms the watch is left to that turn's Stop hook", async () => {
+  // set-core's trace, 2026-11-22..28: 25 of 67 announced→blocked duplicates were a watch re-armed
+  // as the last act of a turn, finding the unread direct entry at once and exiting — while the
+  // Stop hook of that same turn delivered it ~10 s later. The notification then came for nothing.
+  store.createRoom("arming-proj-room", "test")
+  const session = "e0000000-0000-4000-8000-000000000001"
+  const me = store.claimSeat({ agent: "arming-proj", session, owner: process.pid })
+  beat("arming-proj", session, "arming-proj-room")
+  store.send({ room: "arming-proj-room", from: "someone#aaaa", type: "REQUEST",
+               text: "already waiting", to: [me] })
+  const w = wait("arming-proj", session, { SET_AGENT_ARM_GRACE_MS: "3000" })
+  await sleep(1500)
+  const early = w.said()
+  // The grace is bounded: past it, a seat still busy hears the direct address as before.
+  const code = await new Promise(r => { w.p.on("exit", c => r(c)); setTimeout(() => r("timeout"), 12000) })
+  w.p.kill("SIGKILL")
+  assert.equal(early, "", `the fresh watch announced what the arming turn's Stop hook delivers: ${early}`)
+  assert.match(w.said(), /already waiting/, `past the grace the direct address never came (exit: ${code})`)
 })
 
 test("…and once the seat goes quiet the entry is announced normally — a DELAY, not a drop", async () => {

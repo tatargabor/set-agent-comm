@@ -96,6 +96,14 @@ export const TOOL_DEFS = [
           "the file and the symbol instead of quoting them.",
       },
       re: { type: "string", description: "Which entry this answers — its timestamp" },
+      quiet: {
+        type: "boolean",
+        description:
+          "A CLOSER: this FACT or ANSWER asks nothing of the reader — a thank-you, \"nothing to do\", " +
+          "a report nobody waits on. It is delivered and read at their next `inbox`, and wakes nobody, " +
+          "even in a DM or a project room, where every entry otherwise wakes. Leave it off when the " +
+          "reader is waiting on this to go on. Refused on a QUESTION or REQUEST.",
+      },
       to: {
         type: "array", items: { type: "string" },
         description:
@@ -299,7 +307,7 @@ export function createMcpServer(identify) {
               (known.length ? ` — this machine has: ${known.join(", ")}` : " and this machine has none") +
               `. A room is opened on purpose (\`sac install ${r}\`), never by writing into it.`)
           }
-          out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to })
+          out = store.send({ room: r, from: agent, type: a.type, text: a.text, re: a.re, to: a.to, quiet: a.quiet === true })
           // The doorbell after the write, like the relay push: the entry is on disk first, and a
           // ring that fails is reported per seat, never a failed send (native-doorbell).
           const rung = await (await import("./doorbell.mjs")).ringReport({ room: r, out, text: a.text })
